@@ -54,6 +54,7 @@
 | **MCP 集成** | 无 | 无法调用外部工具 |
 | **会话管理** | 无 | 无法保持上下文 |
 | **工具系统** | 无 | 无法让 AI 调用工具 |
+| **Agent 组件系统** | Agent 无法自由组装 | 无法自定义 Agent 行为 |
 
 ---
 
@@ -66,6 +67,7 @@
 2. 在对话中创建工作流、编辑 Agent
 3. 让 AI 自动创建和调用工作流
 4. 通过 Skills 和 MCP 扩展能力
+5. **自由组装 Agent 组件**（预装载提示词、连线接口、MCP 配置等）
 
 ### 架构图
 
@@ -161,7 +163,76 @@ GrassFlow 目标架构:
 - `core/mcp_server.py` - MCP 服务器
 - `core/permission.py` - 权限控制
 
-### 阶段 4: 高级特性 (2-3周)
+### 阶段 4: Agent 组件系统 (2-3周)
+
+**目标**: 实现 Agent 组件的自由组装
+
+| 任务 | 说明 | 优先级 |
+|------|------|--------|
+| Agent 组件定义 | 预装载提示词、连线接口、MCP 配置 | 🔴 高 |
+| 组件注册表 | 自定义 Agent 组件的注册和发现 | 🔴 高 |
+| 组件编辑器 | GUI/TUI 中可视化编辑 Agent 组件 | 🟡 中 |
+| 组件市场 | 分享和导入社区 Agent 组件 | 🟢 低 |
+
+**Agent 组件规格**:
+```yaml
+# agent_component.yaml
+name: code-reviewer
+description: 代码审查 Agent
+version: 1.0.0
+
+# 预装载提示词
+system_prompt: |
+  你是一个专业的代码审查专家...
+  审查重点：
+  - 代码质量
+  - 安全漏洞
+  - 性能问题
+
+# 连线接口定义
+ports:
+  inputs:
+    - name: code
+      type: string
+      description: 待审查的代码
+    - name: context
+      type: object
+      description: 上下文信息
+  outputs:
+    - name: review_result
+      type: object
+      description: 审查结果
+    - name: issues
+      type: array
+      description: 发现的问题列表
+
+# MCP 配置
+mcp_servers:
+  - name: github
+    tools: [create_issue, add_comment]
+  - name: sonarqube
+    tools: [analyze_code, get_metrics]
+
+# 模型配置
+model:
+  default: gpt-4
+  fallback: gpt-3.5-turbo
+  temperature: 0.3
+
+# 工具权限
+permissions:
+  allow: [read_file, write_file, search_code]
+  deny: [delete_file, execute_command]
+  ask: [commit_changes, push_code]
+```
+
+**交付物**:
+- `core/agent_component.py` - Agent 组件定义
+- `core/component_registry.py` - 组件注册表
+- `tui/component_editor.py` - 组件编辑器
+- `examples/components/` - 示例组件
+
+### 阶段 5: 高级特性 (2-3周)
 
 **目标**: 完善用户体验和系统健壮性
 
@@ -171,12 +242,14 @@ GrassFlow 目标架构:
 | Doom Loop 检测 | 防止 Agent 陷入死循环 | 🟡 中 |
 | 渐进式披露 | 最小信息 → 完整内容 | 🟢 低 |
 | AI 自动创建工作流 | 让 AI 生成 DSL | 🟢 低 |
+| 组件市场 | 社区分享 Agent 组件 | 🟢 低 |
 
 **交付物**:
 - `core/circuit_breaker.py` - 熔断器
 - `core/doom_loop.py` - Doom Loop 检测
 - Skills 渐进式披露
 - AI 工作流生成器
+- 组件市场 API
 
 ---
 
@@ -210,6 +283,7 @@ GrassFlow 目标架构:
 | Skills 系统 | YAML + Markdown 格式 |
 | MCP 集成 | Client + Server 双向 |
 | 权限控制 | allow/deny/ask 三级 |
+| **Agent 组件系统** | 预装载提示词、连线接口、MCP 配置 |
 
 ---
 
@@ -245,10 +319,17 @@ GrassFlow 目标架构:
 - [ ] 权限控制正常工作
 
 ### 阶段 4 完成标准
+- [ ] Agent 组件定义格式规范
+- [ ] 组件注册表支持自定义组件
+- [ ] 组件编辑器可在 TUI 中使用
+- [ ] 示例组件 5+ 个
+
+### 阶段 5 完成标准
 - [ ] 熔断器在连续失败时触发
 - [ ] Doom Loop 检测防止死循环
 - [ ] Skills 渐进式披露工作
 - [ ] AI 可自动生成简单工作流
+- [ ] 组件市场 API 可用
 
 ---
 
