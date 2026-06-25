@@ -842,8 +842,8 @@ class GrassFlowREPL:
             # 系统提示
             system_prompt = self._get_system_prompt()
 
-            # 处理消息
-            async for event in agent_loop.process(text, history, system_prompt):
+            # 处理消息（流式）
+            async for event in agent_loop.process_streaming(text, history, system_prompt):
                 etype = event.type
                 edata = event.data
 
@@ -851,8 +851,6 @@ class GrassFlowREPL:
                     pass  # 循环开始
                 elif etype == "loop_end":
                     pass  # 循环结束
-                elif etype == "text_start":
-                    pass  # 文本开始
                 elif etype == "text_delta":
                     # 流式 token 增量 — 追加到最近一条输出
                     token = edata.get("text", "")
@@ -862,25 +860,23 @@ class GrassFlowREPL:
                         self.add_output(token, role="assistant")
                 elif etype == "text_end":
                     pass  # 文本结束
-                elif etype == "thinking_start":
-                    self.add_output("[thinking] ", role="system")
                 elif etype == "thinking_delta":
+                    # 思考过程增量（reasoning 模型）
                     token = edata.get("text", "")
                     if self.output and self.output[-1].role == "system":
                         self.output[-1].text += token
-                elif etype == "thinking_end":
-                    self.add_output(" [/thinking]", role="system")
+                    else:
+                        self.add_output(f"[thinking] {token}", role="system")
                 elif etype == "tool_call_start":
                     tool_name = edata.get("name", "?")
-                    self.add_output(f"[tool] Calling {tool_name}...", role="tool")
-                elif etype == "tool_call_args":
                     tool_args = edata.get("args", {})
-                    if self.output and self.output[-1].role == "tool":
-                        self.output[-1].text += f" args={json.dumps(tool_args, ensure_ascii=False)[:300]}"
+                    self.add_output(f"[tool] Calling {tool_name}...", role="tool")
+                    if tool_args:
+                        self.add_output(f"  args: {json.dumps(tool_args, ensure_ascii=False)[:300]}", role="tool")
                 elif etype == "tool_call_end":
                     pass  # 工具调用参数结束
                 elif etype == "tool_result":
-                    result = edata.get("result", "")
+                    result = edata.get("result", edata.get("output", ""))
                     self.add_output(
                         f"[tool result] {str(result)[:800]}",
                         role="tool",
@@ -890,10 +886,6 @@ class GrassFlowREPL:
                 elif etype == "interrupted":
                     self.add_output("Interrupted.", role="system")
                     break
-                elif etype == "usage":
-                    # 使用统计
-                    self._token_count = edata.get("total_tokens", self._token_count)
-                    self._api_call_count += 1
 
                 # 刷新 UI
                 if self.app:
@@ -1328,15 +1320,16 @@ Be concise and helpful. Use tools when needed to complete tasks."""
     def _init_agent_loop(self) -> None:
         """初始化 Agent Loop"""
         try:
-            from tui.agent_loop import AgentLoop
+            from tui.agent_loop import AgentLoop, create_agent_loop_from_config
+            from core.tool_registry import get_default_registry
 
-            # 创建 AgentLoop
-            self._agent_loop = AgentLoop()
+            tool_registry = get_default_registry()
+            self._agent_loop = create_agent_loop_from_config(tool_registry=tool_registry)
             self.add_output("Agent loop initialized.", role="system")
-        except ImportError:
+        except ImportError as e:
             self.add_output(
-                "AgentLoop not available. Falling back to echo mode.\n"
-                "AI responses will not be available until the agent loop is set up.",
+                f"AgentLoop not available: {e}\n"
+                "Falling back to echo mode.",
                 role="system",
             )
             self._agent_loop = None
@@ -1372,24 +1365,30 @@ Be concise and helpful. Use tools when needed to complete tasks."""
         # 初始化会话
         self._init_session()
 
+        # 初始化 Agent Loop
+        self._init_agent_loop()
+
+        # 尝试创建 prompt_toolkit Application
+        try:
+            self.app = Application(
+                layout=self._build_layout(),
+                key_bindings=self.kb,
+                style=build_pt_style(self._theme),
+                full_screen=True,
+                mouse_support=True,
+                enable_page_navigation_bindings=True,
+            )
+        except Exception as e:
+            # Windows Git Bash / mintty 不支持全屏终端，降级为简单模式
+            self._output_buffer = [(BANNER.strip(), "system")]
+            self._run_fallback(f"prompt_toolkit 不可用 ({e})，使用降级模式。输入 /exit 退出。")
+            return
+
         # 显示横幅
         self.add_output(BANNER.strip(), role="system")
         self.add_output("  GrassFlow REPL", role="system")
         self.add_output("  Type /help for commands, Ctrl+X Q to exit.", role="system")
         self.add_output("", role="system")
-
-        # 初始化 Agent Loop
-        self._init_agent_loop()
-
-        # 构建 prompt_toolkit Application
-        self.app = Application(
-            layout=self._build_layout(),
-            key_bindings=self.kb,
-            style=build_pt_style(self._theme),
-            full_screen=True,
-            mouse_support=True,
-            enable_page_navigation_bindings=True,
-        )
 
         # 注册定期刷新回调
         def _periodic_refresh():
@@ -1415,16 +1414,107 @@ Be concise and helpful. Use tools when needed to complete tasks."""
         # 清理
         self._cleanup()
 
+    def _run_fallback(self, notice: str = "") -> None:
+        """降级模式：使用 input() 的简单 REPL（兼容 Git Bash / mintty / 非全屏终端）
+
+        当 prompt_toolkit 的 Application 无法创建时使用。
+        """
+        self._running = True
+        self._should_exit = False
+
+        # 使用 Rich Console 渲染
+        console = RichConsole(highlight=False)
+
+        # 显示 banner 和通知
+        console.print(Panel.fit(BANNER.strip(), style="bold cyan", title="GrassFlow REPL"))
+        if notice:
+            console.print(f"  [dim yellow]{notice}[/dim yellow]")
+        console.print("  [dim]Type /help for commands, /exit to quit.[/dim]")
+        console.print()
+
+        while self._running and not self._should_exit:
+            try:
+                user_input = input(PROMPT)
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n  Goodbye!")
+                break
+
+            stripped = user_input.strip()
+            if not stripped:
+                continue
+
+            # 处理内部命令（不需要 Agent Loop）
+            if stripped == "/exit" or stripped == "/quit" or stripped == "/q":
+                console.print("  Goodbye!")
+                break
+            elif stripped == "/clear" or stripped == "/cls":
+                console.clear()
+                continue
+            elif stripped == "/help":
+                handler = CommandHandler()
+                console.print(Markdown(handler.get_help_text()))
+                continue
+
+            # 流式调用 Agent Loop
+            console.print()
+            console.print(f"[bold blue]{PROMPT}[/bold blue]{stripped}")
+
+            if self._agent_loop:
+                full_text = ""
+                try:
+                    # 异步迭代：需要在 sync 代码中用 asyncio.run 消费
+                    async def _consume():
+                        nonlocal full_text
+                        async for event in self._agent_loop.process_streaming(stripped):
+                            etype = event.type
+                            edata = event.data
+
+                            if etype in ("text_delta",):
+                                token = edata.get("text", "")
+                                full_text += token
+                                console.print(token, end="", highlight=False)
+                            elif etype == "thinking_delta":
+                                token = edata.get("text", "")
+                                if not full_text and not getattr(_consume, "_thinking_shown", False):
+                                    console.print("  [dim italic]思考中...[/dim italic]")
+                                    _consume._thinking_shown = True
+                            elif etype == "tool_call_start":
+                                name = edata.get("name", "?")
+                                args = edata.get("args", {})
+                                args_str = json.dumps(args, ensure_ascii=False)[:200] if args else ""
+                                console.print(f"\n  [bold yellow][tool] Calling {name}[/bold yellow]", highlight=False)
+                                if args_str:
+                                    console.print(f"  [dim]  args: {args_str}[/dim]", highlight=False)
+                            elif etype == "tool_result":
+                                result = edata.get("result", edata.get("output", ""))
+                                is_err = edata.get("is_error", edata.get("success", True) is False)
+                                style = "bold red" if is_err else "dim"
+                                result_preview = str(result)[:500]
+                                console.print(f"  [{style}][tool result] {result_preview}[/{style}]", highlight=False)
+                            elif etype == "error":
+                                msg = edata.get("message", str(edata))
+                                console.print(f"\n  [bold red][error] {msg}[/bold red]", highlight=False)
+                            elif etype == "interrupted":
+                                console.print("\n  [yellow]Interrupted.[/yellow]", highlight=False)
+
+                    asyncio.run(_consume())
+                    console.print()  # 换行
+                except Exception as e:
+                    console.print(f"\n[bold red]Error: {e}[/bold red]")
+            else:
+                # 无 Agent Loop，回显模式
+                console.print(f"  {stripped}")
+
+            console.print()
+
     def _cleanup(self) -> None:
         """清理资源"""
         if self.session and self._enable_session and self.session_mgr:
             try:
-                # 保存会话最后状态
                 pass
             except Exception:
                 pass
 
-        # 打印退出消息
         print("\n  Goodbye!")
         print()
 

@@ -428,8 +428,9 @@ class AgentLoop:
                     break
 
                 # 更新使用统计
-                self._state.total_input_tokens += response.usage.prompt_tokens
-                self._state.total_output_tokens += response.usage.completion_tokens
+                if response.usage:
+                    self._state.total_input_tokens += response.usage.prompt_tokens or 0
+                    self._state.total_output_tokens += response.usage.completion_tokens or 0
 
                 # 3. 处理响应
                 if response.tool_calls:
@@ -629,7 +630,7 @@ class AgentLoop:
                             proto_messages.append(msg)
 
                     async for event in self._client.stream_chat(
-                        messages=[{"role": m.role, "content": m.content} for m in proto_messages],
+                        messages=[{"role": m.role, "content": m.content} for m in messages],
                         temperature=0.7,
                     ):
                         if self._abort_signal.is_set():
@@ -874,10 +875,15 @@ class AgentLoop:
                 )
 
                 # 转换回 LLMResponse（ProtocolLLMClient.chat 返回 _LegacyLLMResponse）
+                raw_usage = response.usage if hasattr(response, 'usage') and response.usage else {}
                 return LLMResponse(
                     text=response.content,
                     model=response.model,
-                    usage=None,  # Will be set by caller
+                    usage=Usage(
+                        prompt_tokens=raw_usage.get("prompt_tokens", 0),
+                        completion_tokens=raw_usage.get("completion_tokens", 0),
+                        total_tokens=raw_usage.get("total_tokens", 0),
+                    ),
                     finish_reason=response.finish_reason,
                 )
 
@@ -1002,8 +1008,11 @@ def create_agent_loop_from_config(
         # 从 provider 配置获取 api_key 和 base_url
         provider_config = config.provider.get(provider_name)
         if provider_config:
-            api_key = provider_config.api_key
-            base_url = provider_config.base_url
+            # 兼容 camelCase（opencode 格式）和 snake_case 两种命名
+            opts = getattr(provider_config, "options", None)
+            if opts:
+                api_key = getattr(opts, "apiKey", None) or getattr(opts, "api_key", None)
+                base_url = getattr(opts, "baseURL", None) or getattr(opts, "base_url", None)
 
         # 特殊处理 ollama
         if provider_name == "ollama":
