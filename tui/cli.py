@@ -507,5 +507,20 @@ def monitor_cmd(workflow_file: str, model: str, watch: bool):
         sys.exit(1)
 
 
+@main.command()
+@click.argument("workflow_file", required=False)
+def edit(workflow_file: Optional[str]):
+    """交互式编辑工作流"""
+    try:
+        from tui.editor import run_editor
+        run_editor(workflow_file)
+    except ImportError:
+        display.print_error("textual is not installed. Run: pip install textual")
+        sys.exit(1)
+    except Exception as e:
+        display.print_error(f"Error: {e}")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()
