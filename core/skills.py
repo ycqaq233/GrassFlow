@@ -4,22 +4,29 @@ GrassFlow Skills 管理器
 参考 opencode 的 Skills 系统，实现：
 - YAML + Markdown 格式解析（SKILL.md 文件）
 - 多目录发现机制（当前目录 → 项目目录 → 全局目录）
-- 渐进式披露（列表 → 详情 → 文件）
+- 渐进式披露三层架构（列表 → 详情 → 文件）
 
 SKILL.md 文件格式：
     ---
     name: skill-name
     description: 技能描述
     slash: true
+    tags: [tag1, tag2]
+    version: "1.0"
     ---
     # 技能内容
+
+渐进式披露三层架构（参考 Hermes / OpenCode）：
+- Level 1: 列表（name + description + tags）- 最小 token 消耗
+- Level 2: 详情（完整结构化内容）- 中等 token 消耗
+- Level 3: 文件（按需加载原始 SKILL.md）- 按需
 """
 
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +100,8 @@ class SkillInfo:
         location: SKILL.md 文件的绝对路径
         content: Markdown 正文内容（frontmatter 之后的部分）
         metadata: frontmatter 中的其他字段
+        tags: 标签列表（来自 frontmatter）
+        version: 版本号（来自 frontmatter）
     """
 
     name: str
@@ -101,20 +110,41 @@ class SkillInfo:
     location: str = ""
     content: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
+    tags: List[str] = field(default_factory=list)
+    version: Optional[str] = None
+
+    # ── 渐进式披露 Level 1：列表 ──────────────────────────────────────────
 
     def to_list_line(self) -> str:
-        """渐进式披露 Level 1：一行摘要"""
+        """渐进式披露 Level 1：一行摘要（Markdown 格式）"""
         desc = f": {self.description}" if self.description else ""
-        return f"- **{self.name}**{desc}"
+        tags_str = f" [{', '.join(self.tags)}]" if self.tags else ""
+        return f"- **{self.name}**{desc}{tags_str}"
+
+    def to_list_summary(self) -> Dict[str, Any]:
+        """渐进式披露 Level 1：结构化摘要（用于 API/JSON）"""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "slash": self.slash,
+            "tags": self.tags,
+            "version": self.version,
+            "location": self.location,
+        }
+
+    # ── 渐进式披露 Level 2：详情 ──────────────────────────────────────────
 
     def to_detail(self) -> str:
-        """渐进式披露 Level 2：结构化详情"""
-        lines = [
-            f"## {self.name}",
-            "",
-        ]
+        """渐进式披露 Level 2：结构化详情（Markdown 格式）"""
+        lines = [f"## {self.name}", ""]
         if self.description:
             lines.append(f"**Description:** {self.description}")
+            lines.append("")
+        if self.tags:
+            lines.append(f"**Tags:** {', '.join(self.tags)}")
+            lines.append("")
+        if self.version:
+            lines.append(f"**Version:** {self.version}")
             lines.append("")
         if self.slash:
             lines.append("**Slash command:** yes")
@@ -124,7 +154,8 @@ class SkillInfo:
         if self.metadata:
             lines.append("**Metadata:**")
             for key, value in self.metadata.items():
-                lines.append(f"  - {key}: {value}")
+                if key not in ("tags", "version"):
+                    lines.append(f"  - {key}: {value}")
             lines.append("")
         if self.content:
             lines.append("**Content:**")
@@ -132,20 +163,89 @@ class SkillInfo:
             lines.append(self.content)
         return "\n".join(lines)
 
+    def to_detail_dict(self) -> Dict[str, Any]:
+        """渐进式披露 Level 2：结构化详情（用于 API/JSON）"""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "slash": self.slash,
+            "tags": self.tags,
+            "version": self.version,
+            "location": self.location,
+            "content": self.content,
+            "metadata": self.metadata,
+        }
+
+    # ── 渐进式披露 Level 3：文件 ──────────────────────────────────────────
+
     def to_full(self) -> str:
-        """渐进式披露 Level 3：完整文件内容（含 frontmatter）"""
+        """渐进式披露 Level 3：完整文件内容（含 frontmatter，Markdown 格式）"""
         parts = ["---"]
         parts.append(f"name: {self.name}")
         if self.description:
             parts.append(f"description: {self.description}")
         if self.slash:
             parts.append("slash: true")
+        if self.tags:
+            parts.append(f"tags: [{', '.join(self.tags)}]")
+        if self.version:
+            parts.append(f"version: {self.version}")
         for key, value in self.metadata.items():
-            parts.append(f"{key}: {value}")
+            if key not in ("tags", "version"):
+                parts.append(f"{key}: {value}")
         parts.append("---")
         parts.append("")
         parts.append(self.content)
         return "\n".join(parts)
+
+    def to_full_dict(self) -> Dict[str, Any]:
+        """渐进式披露 Level 3：完整数据（用于 API/JSON）"""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "slash": self.slash,
+            "tags": self.tags,
+            "version": self.version,
+            "location": self.location,
+            "content": self.content,
+            "metadata": self.metadata,
+            "raw_content": self.to_full(),
+        }
+
+    # ── 过滤匹配 ──────────────────────────────────────────────────────────
+
+    def matches_filter(
+        self,
+        tags: Optional[List[str]] = None,
+        slash_only: bool = False,
+        search_term: Optional[str] = None,
+    ) -> bool:
+        """检查 Skill 是否匹配过滤条件
+
+        Args:
+            tags: 标签过滤列表（任一匹配即可）
+            slash_only: 是否只返回 slash 命令
+            search_term: 搜索词（匹配名称、描述或内容）
+
+        Returns:
+            是否匹配
+        """
+        if slash_only and not self.slash:
+            return False
+
+        if tags:
+            if not any(tag in self.tags for tag in tags):
+                return False
+
+        if search_term:
+            term = search_term.lower()
+            name_match = term in self.name.lower()
+            desc_match = self.description is not None and term in self.description.lower()
+            content_match = term in self.content.lower()
+            if not (name_match or desc_match or content_match):
+                return False
+
+        return True
 
 
 # ── Frontmatter 解析 ─────────────────────────────────────────────────────────
@@ -383,6 +483,18 @@ def load_skill_file(path: Path) -> SkillInfo:
     # 提取已知字段
     description = metadata.pop("description", None)
     slash = metadata.pop("slash", False)
+    tags = metadata.pop("tags", [])
+    version = metadata.pop("version", None)
+
+    # 处理 tags：可能是字符串或列表
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    elif not isinstance(tags, list):
+        tags = []
+
+    # 处理 version：转为字符串
+    if version is not None:
+        version = str(version)
 
     # 剩余字段作为 metadata
     return SkillInfo(
@@ -392,6 +504,8 @@ def load_skill_file(path: Path) -> SkillInfo:
         location=str(path.resolve()),
         content=body.strip(),
         metadata=metadata,
+        tags=tags,
+        version=version,
     )
 
 
@@ -439,23 +553,33 @@ class SkillManager:
     """Skills 管理器
 
     提供 Skill 的发现、加载、查询和格式化功能。
-    支持渐进式披露：列表 → 详情 → 完整文件。
+    支持渐进式披露三层架构：列表 → 详情 → 文件。
+
+    渐进式披露设计（参考 Hermes / OpenCode）：
+    - Level 1: 列表（name + description + tags）- 最小 token 消耗
+    - Level 2: 详情（完整结构化内容）- 中等 token 消耗
+    - Level 3: 文件（按需加载原始 SKILL.md）- 按需
 
     用法：
         manager = SkillManager()
         # 或指定搜索目录
         manager = SkillManager(search_dirs=[Path("/my/skills")])
 
-        # 列出所有 Skills
+        # 列出所有 Skills（Level 1）
         skills = manager.list()
+        print(manager.format_list())
 
-        # 获取单个 Skill
-        skill = manager.get("my-skill")
+        # 过滤查询
+        filtered = manager.filter(tags=["code"], slash_only=True)
 
-        # 渐进式披露
-        print(manager.format_list())        # Level 1: 名称+描述
-        print(manager.format_detail("xxx")) # Level 2: 结构化详情
-        print(manager.format_full("xxx"))   # Level 3: 完整文件内容
+        # 获取单个 Skill 详情（Level 2）
+        print(manager.format_detail("xxx"))
+
+        # 获取完整文件内容（Level 3）
+        print(manager.format_full("xxx"))
+
+        # 获取统计信息
+        stats = manager.get_stats()
     """
 
     def __init__(self, search_dirs: Optional[List[Path]] = None):
@@ -546,21 +670,87 @@ class SkillManager:
             dirs.add(parent)
         return sorted(dirs)
 
+    @property
+    def all_tags(self) -> List[str]:
+        """获取所有标签（去重、排序）"""
+        tags: Set[str] = set()
+        for skill in self.skills.values():
+            tags.update(skill.tags)
+        return sorted(tags)
+
+    # ── 过滤查询 ──────────────────────────────────────────────────────────
+
+    def filter(
+        self,
+        tags: Optional[List[str]] = None,
+        slash_only: bool = False,
+        search_term: Optional[str] = None,
+    ) -> List[SkillInfo]:
+        """过滤 Skills
+
+        Args:
+            tags: 标签过滤列表（任一匹配即可）
+            slash_only: 是否只返回 slash 命令
+            search_term: 搜索词（匹配名称、描述或内容）
+
+        Returns:
+            过滤后的 SkillInfo 列表（按名称排序）
+        """
+        return sorted(
+            [
+                skill
+                for skill in self.skills.values()
+                if skill.matches_filter(
+                    tags=tags, slash_only=slash_only, search_term=search_term
+                )
+            ],
+            key=lambda s: s.name,
+        )
+
     # ── 渐进式披露格式化 ──────────────────────────────────────────────────
 
-    def format_list(self) -> str:
+    def format_list(
+        self,
+        tags: Optional[List[str]] = None,
+        slash_only: bool = False,
+        search_term: Optional[str] = None,
+    ) -> str:
         """渐进式披露 Level 1：名称 + 描述列表
+
+        Args:
+            tags: 标签过滤
+            slash_only: 是否只返回 slash 命令
+            search_term: 搜索词
 
         Returns:
             格式化的 Markdown 列表
         """
-        skills = self.list()
+        skills = self.filter(tags=tags, slash_only=slash_only, search_term=search_term)
         if not skills:
             return "No skills are currently available."
         lines = ["## Available Skills", ""]
         for skill in skills:
             lines.append(skill.to_list_line())
         return "\n".join(lines)
+
+    def format_list_json(
+        self,
+        tags: Optional[List[str]] = None,
+        slash_only: bool = False,
+        search_term: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """渐进式披露 Level 1：结构化摘要列表（用于 API/JSON）
+
+        Args:
+            tags: 标签过滤
+            slash_only: 是否只返回 slash 命令
+            search_term: 搜索词
+
+        Returns:
+            结构化摘要列表
+        """
+        skills = self.filter(tags=tags, slash_only=slash_only, search_term=search_term)
+        return [skill.to_list_summary() for skill in skills]
 
     def format_detail(self, name: str) -> str:
         """渐进式披露 Level 2：单个 Skill 的结构化详情
@@ -577,6 +767,21 @@ class SkillManager:
         skill = self.require(name)
         return skill.to_detail()
 
+    def format_detail_json(self, name: str) -> Dict[str, Any]:
+        """渐进式披露 Level 2：单个 Skill 的结构化详情（用于 API/JSON）
+
+        Args:
+            name: Skill 名称
+
+        Returns:
+            结构化详情字典
+
+        Raises:
+            SkillNotFoundError: Skill 不存在
+        """
+        skill = self.require(name)
+        return skill.to_detail_dict()
+
     def format_full(self, name: str) -> str:
         """渐进式披露 Level 3：完整文件内容
 
@@ -592,18 +797,43 @@ class SkillManager:
         skill = self.require(name)
         return skill.to_full()
 
-    def format_for_agent(self, verbose: bool = False) -> str:
+    def format_full_json(self, name: str) -> Dict[str, Any]:
+        """渐进式披露 Level 3：完整数据（用于 API/JSON）
+
+        Args:
+            name: Skill 名称
+
+        Returns:
+            完整数据字典
+
+        Raises:
+            SkillNotFoundError: Skill 不存在
+        """
+        skill = self.require(name)
+        return skill.to_full_dict()
+
+    def format_for_agent(
+        self,
+        verbose: bool = False,
+        tags: Optional[List[str]] = None,
+        slash_only: bool = False,
+        search_term: Optional[str] = None,
+    ) -> str:
         """为 Agent 生成 Skill 列表格式
 
         参考 opencode 的 fmt 函数，提供两种输出格式。
 
         Args:
             verbose: True 返回 XML 格式，False 返回 Markdown 格式
+            tags: 标签过滤
+            slash_only: 是否只返回 slash 命令
+            search_term: 搜索词
 
         Returns:
             格式化的 Skill 列表
         """
-        skills = [s for s in self.list() if s.description]
+        skills = self.filter(tags=tags, slash_only=slash_only, search_term=search_term)
+        skills = [s for s in skills if s.description]
         if not skills:
             return "No skills are currently available."
 
@@ -613,6 +843,8 @@ class SkillManager:
                 lines.append("  <skill>")
                 lines.append(f"    <name>{skill.name}</name>")
                 lines.append(f"    <description>{skill.description}</description>")
+                if skill.tags:
+                    lines.append(f"    <tags>{', '.join(skill.tags)}</tags>")
                 lines.append(f"    <location>{skill.location}</location>")
                 lines.append("  </skill>")
             lines.append("</available_skills>")
@@ -620,8 +852,30 @@ class SkillManager:
 
         lines = ["## Available Skills"]
         for skill in skills:
-            lines.append(f"- **{skill.name}**: {skill.description}")
+            tags_str = f" [{', '.join(skill.tags)}]" if skill.tags else ""
+            lines.append(f"- **{skill.name}**{tags_str}: {skill.description}")
         return "\n".join(lines)
+
+    # ── 统计 ──────────────────────────────────────────────────────────────
+
+    def get_stats(self) -> Dict[str, Any]:
+        """获取 Skill 统计信息
+
+        Returns:
+            统计信息字典
+        """
+        skills = self.list()
+        tags_count: Dict[str, int] = {}
+        for skill in skills:
+            for tag in skill.tags:
+                tags_count[tag] = tags_count.get(tag, 0) + 1
+
+        return {
+            "total": len(skills),
+            "slash_commands": len(self.slash_skills),
+            "tags": tags_count,
+            "directories": self.directories,
+        }
 
     def __repr__(self) -> str:
         return f"SkillManager(count={self.count}, dirs={self._search_dirs})"

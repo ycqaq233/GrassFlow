@@ -1300,6 +1300,7 @@ def openai_provider(
 def deepseek_provider(
     api_key: Optional[str] = None,
     default_model: str = "deepseek-chat",
+    **kwargs,
 ) -> Provider:
     """创建 DeepSeek Provider"""
     return Provider(
@@ -1313,6 +1314,7 @@ def deepseek_provider(
 def ollama_provider(
     base_url: str = "http://localhost:11434",
     default_model: str = "llama3",
+    **kwargs,
 ) -> Provider:
     """创建 Ollama Provider"""
     return Provider(
