@@ -809,6 +809,8 @@ class GrassFlowREPL:
         """使用 AgentLoop 异步处理消息"""
         self._agent_running = True
 
+        from prompt_toolkit.eventloop import call_soon_threadsafe
+
         # 在后台线程中运行异步 Agent Loop
         def _run():
             try:
@@ -820,8 +822,9 @@ class GrassFlowREPL:
                 self._ui_update_queue.put(("error", {"message": f"Agent error: {e}"}))
             finally:
                 self._agent_running = False
-                # 通知主线程刷新
+                # 通知主线程刷新并消费队列中剩余的所有更新
                 self._ui_update_queue.put(("agent_done", {}))
+                call_soon_threadsafe(self._process_ui_updates)
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -832,9 +835,14 @@ class GrassFlowREPL:
         UI 更新通过线程安全队列 _ui_update_queue 传递到主线程，
         避免从非 UI 线程直接调用 prompt_toolkit 的 invalidate()。
         """
+        from prompt_toolkit.eventloop import call_soon_threadsafe
+
         def _push_ui(action: str, **kwargs):
-            """将 UI 更新推入线程安全队列"""
+            """将 UI 更新推入线程安全队列，并通过 call_soon_threadsafe 通知主线程消费"""
             self._ui_update_queue.put((action, kwargs))
+            # 通知主线程立即消费队列中的更新，解决全屏 TUI 模式不渲染流式输出的问题
+            # 参见 docs/diagnose-streaming.md 的根因分析
+            call_soon_threadsafe(self._process_ui_updates)
 
         try:
             from tui.agent_loop import AgentLoop, LoopEvent
