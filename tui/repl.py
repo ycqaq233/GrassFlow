@@ -367,9 +367,11 @@ class GrassFlowREPL:
         self._should_exit = False
         self._agent_running = False
 
-        # ---- 输入队列 ----
+        # ---- 队列 ----
         self._input_queue: queue.Queue = queue.Queue()
         self._interrupt_queue: queue.Queue = queue.Queue()
+        # 线程安全 UI 更新队列：Agent Loop 线程 → UI 主线程
+        self._ui_update_queue: queue.Queue = queue.Queue()
 
         # ---- 补全器 ----
         self._completer = SlashCommandCompleter()
@@ -662,21 +664,16 @@ class GrassFlowREPL:
     # ==================== 输入处理 ====================
 
     def _accept_input(self, buffer: Buffer) -> bool:
-        """接受输入回调"""
+        """接受输入回调 — 直接同步处理，不经过队列"""
         text = buffer.text.strip()
         if not text:
             buffer.reset()
-            return True  # 保持输入，不清空
+            return True  # 空输入，清空 buffer
 
-        # 放入输入队列
-        self._input_queue.put(text)
         buffer.reset()
 
-        # 触发异步处理
-        if self.app:
-            self.app.invalidate()
-
-        # 清空 buffer
+        # 直接处理输入（命令同步处理，普通消息通过 Agent Loop 异步处理）
+        self._process_entry(text)
         return True  # 返回 True 表示已处理
 
     # ==================== 布局构建 ====================
@@ -820,17 +817,25 @@ class GrassFlowREPL:
                 loop.run_until_complete(self._async_agent_loop(text))
                 loop.close()
             except Exception as e:
-                self.add_output(f"Agent error: {e}", role="error")
+                self._ui_update_queue.put(("error", {"message": f"Agent error: {e}"}))
             finally:
                 self._agent_running = False
-                if self.app:
-                    self.app.invalidate()
+                # 通知主线程刷新
+                self._ui_update_queue.put(("agent_done", {}))
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
 
     async def _async_agent_loop(self, text: str) -> None:
-        """异步 Agent Loop 处理"""
+        """异步 Agent Loop 处理（在后台线程中运行）
+
+        UI 更新通过线程安全队列 _ui_update_queue 传递到主线程，
+        避免从非 UI 线程直接调用 prompt_toolkit 的 invalidate()。
+        """
+        def _push_ui(action: str, **kwargs):
+            """将 UI 更新推入线程安全队列"""
+            self._ui_update_queue.put((action, kwargs))
+
         try:
             from tui.agent_loop import AgentLoop, LoopEvent
 
@@ -854,50 +859,40 @@ class GrassFlowREPL:
                 elif etype == "text_delta":
                     # 流式 token 增量 — 追加到最近一条输出
                     token = edata.get("text", "")
-                    if self.output and self.output[-1].role == "assistant":
-                        self.output[-1].text += token
-                    else:
-                        self.add_output(token, role="assistant")
+                    _push_ui("text_delta", text=token)
                 elif etype == "text_end":
-                    pass  # 文本结束
+                    # 文本结束 — 触发 UI 刷新
+                    _push_ui("invalidate")
                 elif etype == "thinking_delta":
                     # 思考过程增量（reasoning 模型）
                     token = edata.get("text", "")
-                    if self.output and self.output[-1].role == "system":
-                        self.output[-1].text += token
-                    else:
-                        self.add_output(f"[thinking] {token}", role="system")
+                    _push_ui("thinking_delta", text=token)
                 elif etype == "tool_call_start":
                     tool_name = edata.get("name", "?")
                     tool_args = edata.get("args", {})
-                    self.add_output(f"[tool] Calling {tool_name}...", role="tool")
-                    if tool_args:
-                        self.add_output(f"  args: {json.dumps(tool_args, ensure_ascii=False)[:300]}", role="tool")
+                    _push_ui("tool_call_start", name=tool_name, args=tool_args)
                 elif etype == "tool_call_end":
                     pass  # 工具调用参数结束
                 elif etype == "tool_result":
                     result = edata.get("result", edata.get("output", ""))
-                    self.add_output(
-                        f"[tool result] {str(result)[:800]}",
-                        role="tool",
-                    )
+                    _push_ui("tool_result", output=str(result)[:800])
                 elif etype == "error":
-                    self.add_output(f"[error] {edata}", role="error")
+                    msg = edata.get("message", str(edata))
+                    _push_ui("error", message=msg)
                 elif etype == "interrupted":
-                    self.add_output("Interrupted.", role="system")
+                    _push_ui("interrupted")
                     break
-
-                # 刷新 UI
-                if self.app:
-                    self.app.invalidate()
+                elif etype == "usage":
+                    # 使用统计
+                    if isinstance(edata, dict):
+                        self._token_count = edata.get("total_tokens", self._token_count)
+                        self._api_call_count += 1
+                    _push_ui("invalidate")
 
         except ImportError:
-            self.add_output(
-                "AgentLoop module not found. Install required dependencies.",
-                role="error",
-            )
+            _push_ui("error", message="AgentLoop module not found. Install required dependencies.")
         except Exception as e:
-            self.add_output(f"Agent error: {e}\n{traceback.format_exc()}", role="error")
+            _push_ui("error", message=f"Agent error: {e}\n{traceback.format_exc()}")
 
     def _build_history(self) -> List[Dict[str, Any]]:
         """从输出历史构建对话消息"""
@@ -1262,11 +1257,69 @@ Be concise and helpful. Use tools when needed to complete tasks."""
     # ==================== 主循环 ====================
 
     def _process_queue(self) -> None:
-        """处理输入队列中的消息"""
+        """处理输入队列中的消息（保留用于降级模式和其他路径）"""
         try:
             while True:
                 text = self._input_queue.get_nowait()
                 self._process_entry(text)
+        except queue.Empty:
+            pass
+
+    def _process_ui_updates(self) -> None:
+        """处理来自 Agent Loop 后台线程的 UI 更新（线程安全）
+
+        在 prompt_toolkit 主线程中调用，从 _ui_update_queue 消费更新并应用到 UI。
+        """
+        try:
+            while True:
+                action, kwargs = self._ui_update_queue.get_nowait()
+
+                if action == "text_delta":
+                    token = kwargs.get("text", "")
+                    if self.output and self.output[-1].role == "assistant":
+                        self.output[-1].text += token
+                    else:
+                        self.add_output(token, role="assistant")
+
+                elif action == "thinking_delta":
+                    token = kwargs.get("text", "")
+                    if self.output and self.output[-1].role == "system" \
+                            and self.output[-1].text.startswith("[thinking]"):
+                        self.output[-1].text += token
+                    else:
+                        self.add_output(f"[thinking] {token}", role="system")
+
+                elif action == "tool_call_start":
+                    tool_name = kwargs.get("name", "?")
+                    tool_args = kwargs.get("args", {})
+                    self.add_output(f"[tool] Calling {tool_name}...", role="tool")
+                    if tool_args:
+                        self.add_output(
+                            f"  args: {json.dumps(tool_args, ensure_ascii=False)[:300]}",
+                            role="tool",
+                        )
+
+                elif action == "tool_result":
+                    output = kwargs.get("output", "")
+                    self.add_output(f"[tool result] {output}", role="tool")
+
+                elif action == "error":
+                    msg = kwargs.get("message", "Unknown error")
+                    self.add_output(f"[error] {msg}", role="error")
+
+                elif action == "interrupted":
+                    self.add_output("Interrupted.", role="system")
+
+                elif action == "agent_done":
+                    # Agent Loop 结束，状态已更新
+                    pass
+
+                elif action == "invalidate":
+                    pass  # 仅触发刷新
+
+                if self.app:
+                    self.app.invalidate()
+
         except queue.Empty:
             pass
 
@@ -1390,22 +1443,19 @@ Be concise and helpful. Use tools when needed to complete tasks."""
         self.add_output("  Type /help for commands, Ctrl+X Q to exit.", role="system")
         self.add_output("", role="system")
 
-        # 注册定期刷新回调
-        def _periodic_refresh():
-            """定期处理队列中的消息"""
-            self._process_queue()
+        # 注册 UI 更新处理器 — 每次 prompt_toolkit 重绘时消费线程安全队列
+        def _process_ui_updates_from_agent():
+            """从线程安全队列消费 Agent Loop 产出的 UI 更新（在 UI 线程执行）"""
+            self._process_ui_updates()
             if self._should_exit:
                 self.app.exit()
 
+        # prompt_toolkit 的 on_invalidate 在每次渲染前被调用，是安全的 UI 线程回调
+        self.app.on_invalidate += _process_ui_updates_from_agent
+
         # 使用 asyncio 事件循环运行
         try:
-            # 使用 prompt_toolkit 的运行方式
-            # 在 Windows 上使用 win32 事件循环
-            if sys.platform == "win32":
-                self.app.run()
-            else:
-                # Unix: 注册异步刷新
-                self.app.run()
+            self.app.run()
         except Exception as e:
             self.add_output(f"REPL error: {e}", role="error")
         finally:

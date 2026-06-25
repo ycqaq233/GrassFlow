@@ -38,6 +38,7 @@ from core.llm_protocol import (
     ToolDefinition,
     ToolCall,
     GenerationOptions,
+    Usage,
     openai_provider,
     deepseek_provider,
     ollama_provider,
@@ -604,7 +605,6 @@ class AgentLoop:
 
                 try:
                     proto_messages: List[Message] = []
-                    system_msgs: List[Message] = []
                     for m in messages:
                         msg = Message(
                             role=m.get("role", "user"),
@@ -624,13 +624,10 @@ class AgentLoop:
                                         arguments=tc_data.get("arguments", tc_data.get("function", {}).get("arguments", "")),
                                     ))
                             msg.tool_calls = tcs
-                        if msg.role == "system":
-                            system_msgs.append(msg)
-                        else:
-                            proto_messages.append(msg)
+                        proto_messages.append(msg)  # 包含 system 消息，由 stream_chat 自动分离
 
                     async for event in self._client.stream_chat(
-                        messages=[{"role": m.role, "content": m.content} for m in messages],
+                        messages=[{"role": m.role, "content": m.content} for m in proto_messages],
                         temperature=0.7,
                     ):
                         if self._abort_signal.is_set():
@@ -664,6 +661,12 @@ class AgentLoop:
 
                         elif event.type == LLMEventType.FINISH:
                             finish_reason = event.data.get("finish_reason", "")
+                            # 提取 usage 信息并更新统计
+                            usage_data = event.data.get("usage")
+                            if usage_data:
+                                if isinstance(usage_data, dict):
+                                    self._state.total_input_tokens += usage_data.get("prompt_tokens", 0)
+                                    self._state.total_output_tokens += usage_data.get("completion_tokens", 0)
 
                 except Exception as e:
                     logger.error(f"Streaming LLM call failed: {e}")
@@ -673,7 +676,7 @@ class AgentLoop:
                     )
                     break
 
-                # 更新使用统计
+                # 更新活动时间戳
                 self._state.last_activity_time = time.monotonic()
 
                 # 处理响应
