@@ -51,6 +51,21 @@ from .error_classifier import (
     classify_error,
     create_retry_executor,
 )
+from .permission import (
+    PermissionAction,
+    ReplyAction,
+    PermissionRule,
+    PermissionRequest,
+    PermissionService,
+    Permissions,
+    PermissionRuleDeniedError,
+    PermissionRequestNotFoundError,
+    PermissionUserRejectedError,
+    create_permission_service,
+    evaluate,
+    from_config,
+    wildcard_match,
+)
 
 __all__ = [
     "Agent",
@@ -122,4 +137,18 @@ __all__ = [
     "RetryExecutor",
     "classify_error",
     "create_retry_executor",
+    # permission
+    "PermissionAction",
+    "ReplyAction",
+    "PermissionRule",
+    "PermissionRequest",
+    "PermissionService",
+    "Permissions",
+    "PermissionRuleDeniedError",
+    "PermissionRequestNotFoundError",
+    "PermissionUserRejectedError",
+    "create_permission_service",
+    "evaluate",
+    "from_config",
+    "wildcard_match",
 ]

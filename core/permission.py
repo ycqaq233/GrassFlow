@@ -87,8 +87,8 @@ class PendingEntry:
     future: asyncio.Future
 
 
-class PermissionDeniedError(Exception):
-    """权限被拒绝异常"""
+class PermissionRuleDeniedError(Exception):
+    """权限规则拒绝异常"""
     def __init__(self, permission: str, pattern: str, ruleset: Optional[List[Dict]] = None):
         self.permission = permission
         self.pattern = pattern
@@ -96,14 +96,14 @@ class PermissionDeniedError(Exception):
         super().__init__(f"Permission denied: {permission} for pattern '{pattern}'")
 
 
-class PermissionNotFoundError(Exception):
+class PermissionRequestNotFoundError(Exception):
     """权限请求未找到异常"""
     def __init__(self, request_id: str):
         self.request_id = request_id
         super().__init__(f"Permission request not found: {request_id}")
 
 
-class PermissionRejectedError(Exception):
+class PermissionUserRejectedError(Exception):
     """用户拒绝权限请求异常"""
     def __init__(self, message: Optional[str] = None):
         self.message = message
@@ -299,7 +299,7 @@ class PermissionService:
                     for r in ruleset
                     if wildcard_match(permission, r.permission)
                 ]
-                raise PermissionDeniedError(permission, pattern, denied_rules)
+                raise PermissionRuleDeniedError(permission, pattern, denied_rules)
             if rule.action == PermissionAction.ALLOW:
                 continue
             needs_ask = True
@@ -353,7 +353,7 @@ class PermissionService:
         """
         entry = self._pending.get(request_id)
         if not entry:
-            raise PermissionNotFoundError(request_id)
+            raise PermissionRequestNotFoundError(request_id)
 
         # 从 pending 中移除
         self._pending.pop(request_id, None)
@@ -362,7 +362,7 @@ class PermissionService:
             # 拒绝当前请求
             if not entry.future.done():
                 entry.future.set_exception(
-                    PermissionRejectedError(message)
+                    PermissionUserRejectedError(message)
                 )
             return
 
