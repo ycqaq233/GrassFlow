@@ -899,8 +899,9 @@ class TestIntegration:
         """自动上下文的完整流程"""
         ctx = AutoCompactingContext(
             llm_client=mock_llm_client,
-            context_limit=1000,
+            context_limit=10_000,
             compaction_threshold=100,
+            compaction_buffer=4_000,
             system_prompt="你是一个助手",
         )
 

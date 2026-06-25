@@ -729,6 +729,7 @@ class AutoCompactingContext:
         compaction_threshold: int = COMPACTION_THRESHOLD_TOKENS,
         keep_recent_tokens: int = KEEP_RECENT_TOKENS,
         tail_turns: int = DEFAULT_TAIL_TURNS,
+        compaction_buffer: int = COMPACTION_BUFFER_TOKENS,
     ):
         """
         初始化自动压缩上下文
@@ -740,6 +741,7 @@ class AutoCompactingContext:
             compaction_threshold: 触发压缩的最小 token 阈值
             keep_recent_tokens: 保留最近消息的 token 预算
             tail_turns: 最少保留的对话轮数
+            compaction_buffer: 为输出预留的缓冲区大小
         """
         self.messages: List[ChatMessage] = []
         self.system_prompt = system_prompt
@@ -749,6 +751,7 @@ class AutoCompactingContext:
             compaction_threshold=compaction_threshold,
             keep_recent_tokens=keep_recent_tokens,
             tail_turns=tail_turns,
+            compaction_buffer=compaction_buffer,
         )
 
         # 添加 system prompt

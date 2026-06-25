@@ -836,21 +836,18 @@ class DataFlowRouter:
             source_output = self._agent_outputs.get(mapping.source_agent, {})
             value = source_output.get(mapping.source_port)
 
-            if mapping.target_port in input_data:
-                # 聚合：多个源连接到同一端口
-                if mapping.target_port not in port_sources:
-                    # 第一次冲突，将已有值包装为字典
-                    existing_source = self._find_first_source(
-                        agent_name, mapping.target_port
-                    )
+            if mapping.target_port in port_sources:
+                # 已有源记录 -> 聚合
+                if len(port_sources[mapping.target_port]) == 1:
+                    # 第二个源到达，将已有值包装为字典
+                    first_source = port_sources[mapping.target_port][0]
                     input_data[mapping.target_port] = {
-                        existing_source: input_data[mapping.target_port],
+                        first_source: input_data[mapping.target_port],
                     }
-                    port_sources[mapping.target_port] = [existing_source]
-
                 input_data[mapping.target_port][mapping.source_agent] = value
                 port_sources[mapping.target_port].append(mapping.source_agent)
             else:
+                # 第一个源
                 input_data[mapping.target_port] = value
                 port_sources[mapping.target_port] = [mapping.source_agent]
 
