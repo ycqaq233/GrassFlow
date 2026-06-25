@@ -641,13 +641,14 @@ class TestAutoCompactingContext:
     @pytest.mark.asyncio
     async def test_auto_compact_trigger(self, mock_llm_client):
         """自动压缩触发"""
+        # context_limit=5000, buffer=4000 -> usable_limit=1000, threshold=750
+        # 20 轮 x (200+200) chars / 3 = ~2900 tokens > 750 -> 触发压缩
         ctx = AutoCompactingContext(
             llm_client=mock_llm_client,
-            context_limit=10_000,
+            context_limit=5_000,
             compaction_threshold=100,
             compaction_buffer=4_000,
         )
-        # 添加足够多的消息触发压缩 (usable_limit=6000, 75%=4500)
         for i in range(20):
             await ctx.add_user_message(f"问题{i}: " + "A" * 200)
             await ctx.add_assistant_message(f"回答{i}: " + "B" * 200)
@@ -899,7 +900,7 @@ class TestIntegration:
         """自动上下文的完整流程"""
         ctx = AutoCompactingContext(
             llm_client=mock_llm_client,
-            context_limit=10_000,
+            context_limit=5_000,
             compaction_threshold=100,
             compaction_buffer=4_000,
             system_prompt="你是一个助手",
