@@ -66,6 +66,21 @@ from .permission import (
     from_config,
     wildcard_match,
 )
+from .agent_component import (
+    ComponentAgent,
+    ComponentError,
+    ComponentFactory,
+    ComponentNotFoundError,
+    ComponentRegistry,
+    DataFlowRouter,
+    InstantiatedWorkflow,
+    OverrideError,
+    PortConflictError,
+    PortMapper,
+    PortMapping,
+    PortMappingError,
+    WorkflowInstantiator,
+)
 from .llm_protocol import (
     Protocol,
     ProtocolBody,
@@ -185,6 +200,20 @@ __all__ = [
     "evaluate",
     "from_config",
     "wildcard_match",
+    # agent_component
+    "ComponentAgent",
+    "ComponentError",
+    "ComponentFactory",
+    "ComponentNotFoundError",
+    "ComponentRegistry",
+    "DataFlowRouter",
+    "InstantiatedWorkflow",
+    "OverrideError",
+    "PortConflictError",
+    "PortMapper",
+    "PortMapping",
+    "PortMappingError",
+    "WorkflowInstantiator",
     # llm_protocol
     "Protocol",
     "ProtocolBody",

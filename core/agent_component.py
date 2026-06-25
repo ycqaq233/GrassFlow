@@ -16,7 +16,7 @@ import copy
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from .agent import Agent, AgentConfig
 from .dsl_v2_ast import (
@@ -852,18 +852,6 @@ class DataFlowRouter:
                 port_sources[mapping.target_port] = [mapping.source_agent]
 
         return input_data
-
-    def _find_first_source(
-        self, target_agent: str, target_port: str
-    ) -> str:
-        """找到第一个映射到指定端口的源 agent"""
-        for mapping in self._workflow.port_mappings:
-            if (
-                mapping.target_agent == target_agent
-                and mapping.target_port == target_port
-            ):
-                return mapping.source_agent
-        return "unknown"
 
     def get_workflow_output(self) -> Dict[str, Any]:
         """收集工作流的输出数据

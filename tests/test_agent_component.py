@@ -1095,7 +1095,6 @@ class TestWorkflowInstantiator:
 # ===========================================================================
 
 
-@pytest.mark.asyncio
 class TestDataFlowRouter:
     """数据流路由器测试"""
 
@@ -1517,12 +1516,12 @@ class TestIntegration:
 
     @pytest.mark.asyncio
     async def test_end_to_end_data_flow(self):
-        """端到端数据流"""
+        """端到端数据流（使用同名端口做透传）"""
         comp = Component(
             name="pass",
             ports=[
-                Port(name="in", direction="input", type="string"),
-                Port(name="out", direction="output", type="string"),
+                Port(name="data", direction="input", type="string"),
+                Port(name="data", direction="output", type="string"),
             ],
         )
 
@@ -1534,15 +1533,15 @@ class TestIntegration:
             name="chain",
             agents=agents,
             port_mappings=[
-                PortMapping("a", "out", "b", "in"),
-                PortMapping("b", "out", "c", "in"),
+                PortMapping("a", "data", "b", "data"),
+                PortMapping("b", "data", "c", "data"),
             ],
         )
 
         router = DataFlowRouter(workflow)
 
         # A 执行
-        result_a = await agents["a"].run({"in": "start"})
+        result_a = await agents["a"].run({"data": "start"})
         router.set_agent_output("a", result_a)
 
         # B 执行
@@ -1554,7 +1553,7 @@ class TestIntegration:
         input_c = router.get_agent_input("c")
         result_c = await agents["c"].run(input_c)
 
-        assert result_c["out"] is not None
+        assert result_c["data"] == "start"
 
     @pytest.mark.asyncio
     async def test_broadcast_data_flow(self):
