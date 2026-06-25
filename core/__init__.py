@@ -12,6 +12,25 @@ from .llm_agent import LLMAgent, LLMAgentFactory, llm_agent_factory
 from .storage import WorkflowStorage, StorageError, workflow_storage
 from .db import ExecutionDatabase, DatabaseError, execution_db
 from .monitor import Monitor, MonitorReport, MonitorIssue, monitor
+from .tool_registry import (
+    BaseTool,
+    MCPToolAdapter,
+    ParameterSchema,
+    ToolContext,
+    ToolDef,
+    ToolPermission,
+    ToolResult,
+    ToolSource,
+    ToolRegistry,
+    get_default_registry,
+    register_tool,
+    reset_default_registry,
+    GrassFlowToolError,
+    ToolNotFoundError,
+    ToolInvalidArgumentsError,
+    ToolExecutionError,
+    ToolRegistrationError,
+)
 
 __all__ = [
     "Agent",
@@ -46,4 +65,22 @@ __all__ = [
     "MonitorReport",
     "MonitorIssue",
     "monitor",
+    # tool_registry
+    "BaseTool",
+    "MCPToolAdapter",
+    "ParameterSchema",
+    "ToolContext",
+    "ToolDef",
+    "ToolPermission",
+    "ToolResult",
+    "ToolSource",
+    "ToolRegistry",
+    "get_default_registry",
+    "register_tool",
+    "reset_default_registry",
+    "GrassFlowToolError",
+    "ToolNotFoundError",
+    "ToolInvalidArgumentsError",
+    "ToolExecutionError",
+    "ToolRegistrationError",
 ]

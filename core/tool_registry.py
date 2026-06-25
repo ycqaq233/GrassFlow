@@ -171,7 +171,7 @@ class ToolDef(BaseModel):
     enabled: bool = True  # 是否启用
 
     # ---- 运行时字段（不参与序列化） ----
-    _execute: Optional[Callable[..., Awaitable[ToolResult]]] = Field(
+    execute_fn: Optional[Callable[..., Awaitable[ToolResult]]] = Field(
         default=None, exclude=True, repr=False
     )
 
