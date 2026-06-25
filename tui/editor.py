@@ -675,48 +675,9 @@ class WorkflowEditor(App):
 """)
 
     def generate_dsl(self) -> str:
-        """生成 DSL"""
-        lines = []
-        lines.append(f"# {self.workflow.name}")
-        lines.append(f"# {self.workflow.description or ''}")
-        lines.append("")
-        lines.append(f"workflow {self.workflow.name} {{")
-
-        # Agent 声明
-        for agent in self.workflow.agents:
-            lines.append(f"  agent {agent.name} {{")
-            if agent.type.value != "llm":
-                lines.append(f'    type: "{agent.type.value}"')
-            if agent.model:
-                lines.append(f'    model: "{agent.model}"')
-            if agent.prompt:
-                lines.append(f'    prompt: "{agent.prompt}"')
-            if agent.input_schema:
-                lines.append(f'    input_schema: {agent.input_schema}')
-            if agent.output_schema:
-                lines.append(f'    output_schema: {agent.output_schema}')
-            if agent.on_fail != "stop":
-                lines.append(f'    on_fail: "{agent.on_fail}"')
-            lines.append("  }")
-            lines.append("")
-
-        # 执行流
-        lines.append("  # 执行流")
-
-        # 简化：按顺序输出边
-        for edge in self.workflow.edges:
-            if edge.interaction_type == InteractionType.CONDITION:
-                lines.append(f"  {edge.source} -> [{edge.condition}] {edge.target}")
-            elif edge.interaction_type == InteractionType.PARALLEL:
-                lines.append(f"  ({edge.source}, {edge.target})")
-            elif edge.interaction_type == InteractionType.IMMEDIATE:
-                lines.append(f"  {edge.source} | {edge.target}")
-            else:
-                lines.append(f"  {edge.source} -> {edge.target}")
-
-        lines.append("}")
-
-        return "\n".join(lines)
+        """生成 DSL（使用共享的 _generate_dsl 函数，消除代码重复）"""
+        from tui.cli import _generate_dsl
+        return _generate_dsl(self.workflow)
 
 
 def run_editor(workflow_file: Optional[str] = None) -> None:
