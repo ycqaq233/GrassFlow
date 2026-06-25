@@ -3,6 +3,17 @@
 
 from .dsl_parser import DSLParser, DSLError, parse_dsl, parse_file
 from .display import Display, ProgressDisplay, display, progress_display
+from .repl import (
+    REPL,
+    Message,
+    MessageRole,
+    MessageRenderer,
+    CommandHandler,
+    CommandResult,
+    InputHandler,
+    create_repl,
+    run_repl,
+)
 
 __all__ = [
     "DSLParser",
@@ -13,4 +24,13 @@ __all__ = [
     "ProgressDisplay",
     "display",
     "progress_display",
+    "REPL",
+    "Message",
+    "MessageRole",
+    "MessageRenderer",
+    "CommandHandler",
+    "CommandResult",
+    "InputHandler",
+    "create_repl",
+    "run_repl",
 ]
