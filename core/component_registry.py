@@ -128,6 +128,13 @@ class ComponentEntry:
             "source_path": self.source.path,
         }
 
+    def __repr__(self) -> str:
+        return (
+            f"ComponentEntry(name={self.name!r}, "
+            f"version={self.version!r}, "
+            f"source={self.source!r})"
+        )
+
 
 # ---------------------------------------------------------------------------
 #  错误类型
@@ -376,38 +383,11 @@ class ComponentRegistry:
         source = ComponentSource(source_type, str(file_path))
 
         for comp in parse_result.components:
-            existing = self._entries.get(comp.name)
-            if existing is None:
-                # 新组件，直接注册
-                entry = ComponentEntry(component=comp, source=source)
-                self._entries[comp.name] = entry
+            registered = self._register_if_higher_priority(comp, source)
+            if registered:
                 loaded_components.append(comp)
-                logger.debug("Loaded component '%s' from %s", comp.name, file_path)
-            else:
-                # 同名组件：比较优先级
-                if source.priority < existing.source.priority:
-                    # 新来源优先级更高，替换
-                    entry = ComponentEntry(component=comp, source=source)
-                    self._entries[comp.name] = entry
-                    loaded_components.append(comp)
-                    logger.info(
-                        "Replaced component '%s': %s (priority %d) -> %s (priority %d)",
-                        comp.name,
-                        existing.source.source_type,
-                        existing.source.priority,
-                        source.source_type,
-                        source.priority,
-                    )
-                else:
-                    logger.debug(
-                        "Skipping duplicate component '%s' from %s "
-                        "(existing source '%s' has higher priority)",
-                        comp.name,
-                        file_path,
-                        existing.source.source_type,
-                    )
 
-            # 记录发现路径
+            # 记录发现路径（无论是否实际注册，用于冲突警告）
             self._discovered_paths.setdefault(comp.name, []).append(str(file_path))
 
         return loaded_components
@@ -453,6 +433,79 @@ class ComponentRegistry:
         entry = ComponentEntry(component=component, source=source)
         self._entries[component.name] = entry
         logger.debug("Registered component '%s' (source=%s)", component.name, source)
+
+    def register_all(
+        self,
+        components: List[Component],
+        source: Optional[ComponentSource] = None,
+        overwrite: bool = False,
+    ) -> int:
+        """批量注册组件
+
+        Args:
+            components: 组件定义列表
+            source: 组件来源，默认为 PROGRAMMATIC
+            overwrite: 是否覆盖已存在的同名组件
+
+        Returns:
+            成功注册的组件数量
+        """
+        count = 0
+        for comp in components:
+            try:
+                self.register(comp, source=source, overwrite=overwrite)
+                count += 1
+            except ComponentDuplicateError:
+                logger.warning(
+                    "Skipping duplicate component '%s' during batch registration",
+                    comp.name,
+                )
+        return count
+
+    def _register_if_higher_priority(
+        self,
+        component: Component,
+        source: ComponentSource,
+    ) -> bool:
+        """仅当来源优先级高于已注册组件时才注册（用于发现机制）
+
+        Args:
+            component: 组件定义
+            source: 组件来源
+
+        Returns:
+            是否成功注册（新注册或替换了已有组件）
+        """
+        existing = self._entries.get(component.name)
+        if existing is None:
+            entry = ComponentEntry(component=component, source=source)
+            self._entries[component.name] = entry
+            logger.debug(
+                "Loaded component '%s' from %s", component.name, source.path
+            )
+            return True
+
+        if source.priority < existing.source.priority:
+            entry = ComponentEntry(component=component, source=source)
+            self._entries[component.name] = entry
+            logger.info(
+                "Replaced component '%s': %s (priority %d) -> %s (priority %d)",
+                component.name,
+                existing.source.source_type,
+                existing.source.priority,
+                source.source_type,
+                source.priority,
+            )
+            return True
+
+        logger.debug(
+            "Skipping duplicate component '%s' from %s "
+            "(existing source '%s' has higher priority)",
+            component.name,
+            source.path,
+            existing.source.source_type,
+        )
+        return False
 
     def unregister(self, name: str) -> bool:
         """注销组件
@@ -612,6 +665,41 @@ class ComponentRegistry:
             imported.append(comp)
 
         return imported
+
+    def load_from_string(
+        self,
+        dsl_text: str,
+        source: Optional[ComponentSource] = None,
+    ) -> List[Component]:
+        """从 DSL 文本加载组件
+
+        用于从当前文件中提取组件定义（发现路径第 1 层）。
+        不会进行优先级冲突检查，直接注册（同名覆盖）。
+
+        Args:
+            dsl_text: DSL 文本内容
+            source: 组件来源，默认为 FILE_INLINE
+
+        Returns:
+            加载的组件列表
+        """
+        if source is None:
+            source = ComponentSource(ComponentSource.FILE_INLINE)
+
+        try:
+            parse_result = self._parser.parse(dsl_text)
+        except Exception as e:
+            logger.error("Failed to parse DSL text: %s", e)
+            return []
+
+        loaded = []
+        for comp in parse_result.components:
+            entry = ComponentEntry(component=comp, source=source)
+            self._entries[comp.name] = entry
+            loaded.append(comp)
+            logger.debug("Loaded component '%s' from DSL text", comp.name)
+
+        return loaded
 
     def export_component(
         self, name: str, output_path: Union[str, Path]
