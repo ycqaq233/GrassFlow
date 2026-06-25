@@ -327,11 +327,11 @@ class StatusBar:
     def _mode_icon(mode: str) -> str:
         """模式图标"""
         icons = {
-            "Build": "⚒",       # ⚒
-            "Chat": "\u{1F4AC}",    # 💬
-            "Plan": "\u{1F4CB}",    # 📋
-            "Review": "\u{1F50D}",  # 🔍
-            "Architect": "\u{1F3D7}",  # 🏗
+            "Build": "⚒",        # ⚒
+            "Chat": "\U0001F4AC",     # 💬
+            "Plan": "\U0001F4CB",     # 📋
+            "Review": "\U0001F50D",   # 🔍
+            "Architect": "\U0001F3D7", # 🏗
         }
         return icons.get(mode, "◆")  # ◆ default
 

@@ -302,7 +302,7 @@ def doctor_command() -> None:
                 border_style="yellow"
             ))
 
-    except ImportError:
+    else:
         # 无 Rich 时的降级输出
         print("GrassFlow Doctor - System Health Check")
         print("=" * 50)
@@ -332,7 +332,3 @@ def doctor_command() -> None:
         if issues:
             print(f"\n{len(issues)} issue(s) found!")
             sys.exit(1)
-
-    except Exception as e:
-        display.print_error(f"Doctor check failed: {e}")
-        sys.exit(1)

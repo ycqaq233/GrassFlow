@@ -51,11 +51,11 @@ DANGEROUS_PATTERNS = [
 # =============================================================================
 
 HARDLINE_PATTERNS = [
-    (r'\brm\s+(-[^\s]*\s+)*(-rf|-fr)\s+(/|/\*|\*)', "recursive delete of root"),
+    (r'\brm\s+(-[^\s]*\s+)*(-rf|-fr)\s+(/|/\*|~\*?)(?:\s|$)', "recursive delete of root"),
     (r'\bmkfs(\.[a-z0-9]+)?\s+', "format filesystem"),
     (r'\bkill\s+(-[^\s]+\s+)*-1\b', "kill all processes"),
     (r'\b(shutdown|reboot|halt|poweroff)\b', "system shutdown"),
-    (r'\bchmod\s+(-[^\s]*\s+)*777\s+/', "world-writable root"),
+    (r'\bchmod\s+(-[^\s]*\s+)*777\s+(/)(?:\s|$)', "world-writable root"),
     (r'\bdd\s+if=/dev/zero\s+of=/dev/', "zero out block device"),
     (r'\bdd\s+if=.*\s+of=/dev/', "dd to block device"),
     (r'>\s*/dev/sd[a-z]', "write to block device via redirect"),

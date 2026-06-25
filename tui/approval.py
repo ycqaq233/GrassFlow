@@ -12,7 +12,10 @@ GrassFlow 审批系统
 from enum import Enum
 from typing import Dict, Optional, Set
 
-from .dangerous_commands import DangerousCommandDetector
+try:
+    from .dangerous_commands import DangerousCommandDetector
+except ImportError:
+    from dangerous_commands import DangerousCommandDetector  # type: ignore
 
 
 class ApprovalMode(Enum):
