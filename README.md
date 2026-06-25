@@ -49,6 +49,37 @@ python -m tui.cli list
 python -m tui.cli save examples/ticket_processing.af
 ```
 
+### 配置管理
+
+```bash
+# 查看配置
+python -m tui.cli config list                    # 列出所有配置
+python -m tui.cli config list --scope global     # 只看全局配置
+python -m tui.cli config list --json             # JSON 格式输出
+python -m tui.cli config get llm.default_model   # 获取配置值
+python -m tui.cli config path                    # 显示配置文件路径
+
+# 修改配置
+python -m tui.cli config set llm.default_model gpt-4 --scope global
+python -m tui.cli config api-key openai sk-xxx   # 设置 API Key
+python -m tui.cli config show-key openai         # 显示 API Key（脱敏）
+
+# 重置配置
+python -m tui.cli config reset --scope global    # 重置全局配置
+python -m tui.cli config reset --scope project   # 重置项目配置
+python -m tui.cli config reset --scope all       # 重置所有配置
+```
+
+**配置文件位置**：
+- 全局配置：`~/.Grass/config.json`
+- 项目配置：`.grass/config.json`
+
+**环境变量覆盖**：
+```bash
+export GRASSFLOW_LLM_DEFAULT_MODEL=claude-3
+export GRASSFLOW_API_KEYS_OPENAI=sk-xxx
+```
+
 ### 基本使用
 
 ```python
@@ -122,6 +153,7 @@ grassflow/
 │   ├── scheduler.py          # asyncio 并行调度器
 │   ├── context.py            # 只读数据传递 Context
 │   ├── condition.py          # 条件分支 Agent
+│   ├── config.py             # 配置管理
 │   ├── llm.py                # LLM API 封装
 │   ├── llm_agent.py          # LLM Agent
 │   ├── monitor.py            # 监控 Agent
@@ -161,7 +193,7 @@ ruff check core/ tui/ tests/
 
 ## 测试覆盖
 
-项目包含 115 个测试，覆盖以下模块：
+项目包含 149 个测试，覆盖以下模块：
 
 - **核心模块**：Agent、Context、Workflow、Models
 - **DAG 引擎**：拓扑排序、依赖解析、环检测
@@ -171,6 +203,7 @@ ruff check core/ tui/ tests/
 - **LLM 集成**：LLMClient、LLMManager、LLMAgent
 - **存储**：工作流保存/加载、SQLite 执行记录
 - **监控**：Schema 检查、质量检查、性能检查
+- **配置管理**：多级配置、环境变量覆盖、CLI 配置命令
 
 ## 许可证
 

@@ -522,5 +522,240 @@ def edit(workflow_file: Optional[str]):
         sys.exit(1)
 
 
+# ==================== 配置管理命令 ====================
+
+@main.group()
+def config():
+    """管理 GrassFlow 配置"""
+    pass
+
+
+@config.command()
+@click.argument("key")
+@click.option("--scope", "-s", type=click.Choice(["global", "project", "merged"]), default="merged",
+              help="配置作用域")
+def get(key: str, scope: str):
+    """获取配置值
+
+    支持点号分隔的嵌套键，例如：llm.default_model
+    """
+    try:
+        from core.config import config_manager
+
+        if scope == "global":
+            value = getattr(config_manager.load_global_config(), key, None)
+        elif scope == "project":
+            project_config = config_manager.load_project_config()
+            value = getattr(project_config, key, None) if project_config else None
+        else:
+            value = config_manager.get(key)
+
+        if value is None:
+            display.print_info(f"{key}: (not set)")
+        else:
+            click.echo(f"{key}: {value}")
+
+    except Exception as e:
+        display.print_error(f"Error: {e}")
+        sys.exit(1)
+
+
+@config.command()
+@click.argument("key")
+@click.argument("value")
+@click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
+              help="配置作用域")
+def set(key: str, value: str, scope: str):
+    """设置配置值
+
+    支持点号分隔的嵌套键，例如：llm.default_model gpt-4
+    """
+    try:
+        from core.config import config_manager
+
+        # 尝试解析 JSON 值
+        import json
+        try:
+            parsed_value = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            parsed_value = value
+
+        config_manager.set(key, parsed_value, scope=scope)
+        display.print_success(f"Set {key} = {parsed_value} ({scope})")
+
+    except Exception as e:
+        display.print_error(f"Error: {e}")
+        sys.exit(1)
+
+
+@config.command("list")
+@click.option("--scope", "-s", type=click.Choice(["global", "project", "all"]), default="all",
+              help="显示哪个作用域的配置")
+@click.option("--json", "-j", "as_json", is_flag=True, help="以 JSON 格式输出")
+def list_config(scope: str, as_json: bool):
+    """列出所有配置"""
+    try:
+        from core.config import config_manager
+        import json
+
+        configs = config_manager.list_configs()
+
+        if as_json:
+            click.echo(json.dumps(configs, indent=2, ensure_ascii=False))
+            return
+
+        try:
+            from rich.table import Table
+            from rich.console import Console
+            from rich.tree import Tree
+
+            console = Console()
+
+            if scope in ("global", "all"):
+                console.print("\n[bold cyan]Global Config[/bold cyan]")
+                console.print(f"  Path: {configs['global']['path']}")
+                console.print(f"  Exists: {configs['global']['exists']}")
+                if configs['global']['config']:
+                    tree = Tree("  ")
+                    _add_config_tree(tree, configs['global']['config'])
+                    console.print(tree)
+
+            if scope in ("project", "all"):
+                console.print("\n[bold cyan]Project Config[/bold cyan]")
+                console.print(f"  Path: {configs['project']['path']}")
+                console.print(f"  Exists: {configs['project']['exists']}")
+                if configs['project']['config']:
+                    tree = Tree("  ")
+                    _add_config_tree(tree, configs['project']['config'])
+                    console.print(tree)
+                else:
+                    console.print("  [dim]No project config[/dim]")
+
+            if scope == "all":
+                console.print("\n[bold cyan]Merged Config[/bold cyan]")
+                tree = Tree("  ")
+                _add_config_tree(tree, configs['merged'])
+                console.print(tree)
+
+        except ImportError:
+            # 没有 Rich 时的简单输出
+            click.echo("GrassFlow Configuration:")
+            click.echo("=" * 50)
+
+            if scope in ("global", "all"):
+                click.echo(f"\nGlobal Config: {configs['global']['path']}")
+                click.echo(f"  Exists: {configs['global']['exists']}")
+                if configs['global']['config']:
+                    for key, value in configs['global']['config'].items():
+                        click.echo(f"  {key}: {value}")
+
+            if scope in ("project", "all"):
+                click.echo(f"\nProject Config: {configs['project']['path']}")
+                click.echo(f"  Exists: {configs['project']['exists']}")
+                if configs['project']['config']:
+                    for key, value in configs['project']['config'].items():
+                        click.echo(f"  {key}: {value}")
+
+            if scope == "all":
+                click.echo(f"\nMerged Config:")
+                for key, value in configs['merged'].items():
+                    click.echo(f"  {key}: {value}")
+
+    except Exception as e:
+        display.print_error(f"Error: {e}")
+        sys.exit(1)
+
+
+def _add_config_tree(tree, config: dict, prefix: str = ""):
+    """递归添加配置树节点"""
+    for key, value in config.items():
+        if isinstance(value, dict):
+            branch = tree.add(f"[bold]{key}[/bold]")
+            _add_config_tree(branch, value)
+        else:
+            tree.add(f"{key}: [green]{value}[/green]")
+
+
+@config.command()
+@click.option("--scope", "-s", type=click.Choice(["global", "project", "all"]), default="all",
+              help="重置哪个作用域的配置")
+@click.option("--force", "-f", is_flag=True, help="强制重置，不提示确认")
+def reset(scope: str, force: bool):
+    """重置配置为默认值"""
+    try:
+        from core.config import config_manager
+
+        if not force:
+            click.confirm(f"Reset {scope} config to defaults?", abort=True)
+
+        config_manager.reset(scope=scope)
+        display.print_success(f"Reset {scope} config to defaults.")
+
+    except Exception as e:
+        display.print_error(f"Error: {e}")
+        sys.exit(1)
+
+
+@config.command()
+@click.argument("provider")
+@click.argument("key")
+@click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
+              help="配置作用域")
+def api_key(provider: str, key: str, scope: str):
+    """设置 API Key
+
+    例如：grassflow config api-key openai sk-xxx
+    """
+    try:
+        from core.config import config_manager
+
+        config_manager.set_api_key(provider, key, scope=scope)
+        display.print_success(f"Set {provider} API key ({scope})")
+
+    except Exception as e:
+        display.print_error(f"Error: {e}")
+        sys.exit(1)
+
+
+@config.command()
+@click.argument("provider")
+def show_key(provider: str):
+    """显示 API Key（脱敏）"""
+    try:
+        from core.config import config_manager
+
+        key = config_manager.get_api_key(provider)
+        if key:
+            # 脱敏显示
+            if len(key) > 8:
+                masked = key[:4] + "*" * (len(key) - 8) + key[-4:]
+            else:
+                masked = "***"
+            click.echo(f"{provider}: {masked}")
+        else:
+            click.echo(f"{provider}: (not set)")
+
+    except Exception as e:
+        display.print_error(f"Error: {e}")
+        sys.exit(1)
+
+
+@config.command()
+def path():
+    """显示配置文件路径"""
+    try:
+        from core.config import config_manager
+
+        click.echo(f"Global config: {config_manager.global_config_file}")
+        click.echo(f"Project config: {config_manager.project_config_file}")
+        click.echo(f"\nConfig directory: {config_manager.global_config_dir}")
+        click.echo(f"Workflows directory: {config_manager.global_config_dir / 'workflows'}")
+        click.echo(f"Plugins directory: {config_manager.global_config_dir / 'plugins'}")
+
+    except Exception as e:
+        display.print_error(f"Error: {e}")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()

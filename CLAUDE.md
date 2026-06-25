@@ -188,15 +188,86 @@ on_fail: "retry"     # 重试，配合 retry_count
 
 ### 配置管理
 
+支持多级配置（参考 Claude Code）：
+- **全局配置**：`~/.Grass/config.json`
+- **项目配置**：`.grass/config.json`
+- **环境变量**：`GRASSFLOW_*`
+
+**配置优先级**：环境变量 > 项目配置 > 全局配置 > 默认值
+
 ```json
-// ~/.grassflow/config.json
+// ~/.Grass/config.json
 {
-  "default_model": "gpt-4",
+  "version": "1.0.0",
   "api_keys": {
     "openai": "sk-xxx",
-    "anthropic": "sk-xxx"
-  }
+    "anthropic": "sk-xxx",
+    "deepseek": null,
+    "ollama": null
+  },
+  "llm": {
+    "default_model": "gpt-4",
+    "default_provider": "openai",
+    "temperature": 0.7,
+    "max_tokens": 4096,
+    "timeout": 60,
+    "retry_count": 3,
+    "retry_delay": 1.0
+  },
+  "workflow": {
+    "auto_save": true,
+    "auto_validate": true,
+    "max_parallel": 10,
+    "default_on_fail": "stop",
+    "execution_timeout": 300
+  },
+  "display": {
+    "theme": "dark",
+    "show_timestamps": true,
+    "show_agent_names": true,
+    "log_level": "INFO",
+    "compact_mode": false
+  },
+  "server": {
+    "host": "localhost",
+    "port": 8000,
+    "cors_origins": ["*"],
+    "debug": false
+  },
+  "workflows_dir": "~/.Grass/workflows",
+  "db_path": "~/.Grass/grassflow.db",
+  "plugins_dir": "~/.Grass/plugins"
 }
+```
+
+**CLI 配置命令**：
+```bash
+# 查看配置
+grassflow config list                    # 列出所有配置
+grassflow config list --scope global     # 只看全局配置
+grassflow config list --json             # JSON 格式输出
+grassflow config get llm.default_model   # 获取配置值
+grassflow config path                    # 显示配置文件路径
+
+# 修改配置
+grassflow config set llm.default_model gpt-4 --scope global
+grassflow config api-key openai sk-xxx   # 设置 API Key
+grassflow config show-key openai         # 显示 API Key（脱敏）
+
+# 重置配置
+grassflow config reset --scope global    # 重置全局配置
+grassflow config reset --scope project   # 重置项目配置
+grassflow config reset --scope all       # 重置所有配置
+```
+
+**环境变量覆盖**：
+```bash
+# 设置环境变量
+export GRASSFLOW_LLM_DEFAULT_MODEL=claude-3
+export GRASSFLOW_API_KEYS_OPENAI=sk-xxx
+
+# 运行时会自动应用
+grassflow run workflow.af
 ```
 
 ### 预设积木类型（GUI 后续迭代）
@@ -315,12 +386,16 @@ grassflow/                        # 单仓库 monorepo
 ## 数据持久化
 
 ```
-~/.grassflow/
-├── config.json                   # 全局配置（API Key、默认模型）
-├── workflows/                    # 工作流定义（JSON）
+~/.Grass/                           # 全局配置目录
+├── config.json                     # 全局配置（API Key、默认模型等）
+├── workflows/                      # 工作流定义（JSON）
 │   ├── ticket_processing.json
 │   └── competitor_analysis.json
-└── grassflow.db                  # 执行记录（SQLite）
+├── plugins/                        # 插件目录
+└── grassflow.db                    # 执行记录（SQLite）
+
+.grass/                             # 项目配置目录（可选）
+└── config.json                     # 项目级配置（覆盖全局配置）
 ```
 
 ---
@@ -332,6 +407,23 @@ grassflow/                        # 单仓库 monorepo
 - 前端：TypeScript 严格模式（GUI 后续迭代）
 - 代码风格：遵循各语言主流规范
 - 版本控制：Git
+
+### Git 提交规范
+
+**修改前**：检查是否已提交仓库，如果未提交则先提交当前状态
+```bash
+git status
+git add .
+git commit -m "描述当前状态"
+```
+
+**修改后**：立即提交更改
+```bash
+git add .
+git commit -m "描述本次修改"
+```
+
+**重要**：每次修改代码前必须确保仓库是干净状态，修改完成后必须立即提交。
 
 ---
 

@@ -26,10 +26,12 @@ class ExecutionDatabase:
         初始化数据库
 
         Args:
-            db_path: 数据库文件路径，默认为 ~/.grassflow/grassflow.db
+            db_path: 数据库文件路径，默认为 ~/.Grass/grassflow.db
         """
         if db_path is None:
-            db_path = Path.home() / ".grassflow" / "grassflow.db"
+            # 延迟导入避免循环依赖
+            from core.config import config_manager
+            db_path = Path(config_manager.get("db_path", "~/.Grass/grassflow.db")).expanduser()
 
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

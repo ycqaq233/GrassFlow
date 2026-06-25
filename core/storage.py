@@ -28,10 +28,12 @@ class WorkflowStorage:
         初始化存储
 
         Args:
-            base_dir: 基础目录，默认为 ~/.grassflow/workflows
+            base_dir: 基础目录，默认为 ~/.Grass/workflows
         """
         if base_dir is None:
-            base_dir = Path.home() / ".grassflow" / "workflows"
+            # 延迟导入避免循环依赖
+            from core.config import config_manager
+            base_dir = Path(config_manager.get("workflows_dir", "~/.Grass/workflows")).expanduser()
 
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
