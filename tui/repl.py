@@ -798,7 +798,13 @@ class GrassFlowREPL:
 
         # 如果有 Agent Loop，异步处理
         if self._agent_loop:
-            self._process_with_agent_loop(text)
+            # 在 prompt_toolkit 的 asyncio 事件循环中创建后台任务
+            # 这样流式输出可以直接在主线程上调用 app.invalidate()
+            if self.app and self.app.loop and self.app.loop.is_running():
+                self.app.loop.create_task(self._run_agent_loop_async(text))
+            else:
+                # 降级：使用后台线程同步方式（丢失流式输出）
+                self._process_with_agent_loop(text)
         else:
             self.add_output(
                 "No agent loop available. Set up an LLM provider to enable AI responses.\n"
@@ -826,6 +832,108 @@ class GrassFlowREPL:
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
+
+    async def _run_agent_loop_async(self, text: str) -> None:
+        """在 prompt_toolkit 事件循环（主线程）中运行 Agent Loop
+
+        与 _process_with_agent_loop 的区别：
+        - 不需要后台线程，直接在 pt 的 asyncio 事件循环中运行
+        - 每次 text_delta 后直接调用 app.invalidate()，实现真正的流式输出
+        - 不使用 _ui_update_queue / _push_ui 等线程间通信机制
+        """
+        self._agent_running = True
+        try:
+            from tui.agent_loop import AgentLoop, LoopEvent
+
+            agent_loop = self._agent_loop
+            history = self._build_history()
+            system_prompt = self._get_system_prompt()
+
+            async for event in agent_loop.process_streaming(text, history, system_prompt):
+                etype = event.type
+                edata = event.data
+
+                if etype in ("loop_start", "loop_end"):
+                    pass
+
+                elif etype == "text_delta":
+                    token = edata.get("text", "")
+                    if self.output and self.output[-1].role == "assistant":
+                        self.output[-1].text += token
+                    else:
+                        self.add_output(token, role="assistant")
+                    if self.app:
+                        self.app.invalidate()
+
+                elif etype == "text_end":
+                    if self.app:
+                        self.app.invalidate()
+
+                elif etype == "thinking_delta":
+                    token = edata.get("text", "")
+                    if (self.output and self.output[-1].role == "system"
+                            and self.output[-1].text.startswith("[thinking]")):
+                        self.output[-1].text += token
+                    else:
+                        self.add_output(f"[thinking] {token}", role="system")
+                    if self.app:
+                        self.app.invalidate()
+
+                elif etype == "tool_call_start":
+                    tool_name = edata.get("name", "?")
+                    tool_args = edata.get("args", {})
+                    self.add_output(f"[tool] Calling {tool_name}...", role="tool")
+                    if tool_args:
+                        self.add_output(
+                            f"  args: {json.dumps(tool_args, ensure_ascii=False)[:300]}",
+                            role="tool",
+                        )
+                    if self.app:
+                        self.app.invalidate()
+
+                elif etype == "tool_call_end":
+                    pass  # tool_call_start 已通知
+
+                elif etype == "tool_result":
+                    result = edata.get("result", edata.get("output", ""))
+                    is_err = edata.get("is_error", edata.get("success", True) is False)
+                    if is_err:
+                        self.add_output(f"[tool result] [ERROR] {str(result)[:500]}", role="error")
+                    else:
+                        self.add_output(f"[tool result] {str(result)[:800]}", role="tool")
+                    if self.app:
+                        self.app.invalidate()
+
+                elif etype == "error":
+                    msg = edata.get("message", str(edata))
+                    self.add_output(f"[error] {msg}", role="error")
+                    if self.app:
+                        self.app.invalidate()
+
+                elif etype == "interrupted":
+                    self.add_output("Interrupted.", role="system")
+                    if self.app:
+                        self.app.invalidate()
+                    break
+
+                elif etype == "usage":
+                    if isinstance(edata, dict):
+                        self._token_count = edata.get("total_tokens", self._token_count)
+                        self._api_call_count += 1
+                    if self.app:
+                        self.app.invalidate()
+
+        except ImportError:
+            self.add_output(
+                "AgentLoop module not found. Install required dependencies.",
+                role="error",
+            )
+        except Exception as e:
+            self.add_output(f"Agent error: {e}\n{traceback.format_exc()}", role="error")
+        finally:
+            self._agent_running = False
+            if self.app:
+                self.app.invalidate()
 
     async def _async_agent_loop(self, text: str) -> None:
         """异步 Agent Loop 处理（在后台线程中运行）
