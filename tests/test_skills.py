@@ -320,7 +320,7 @@ class TestLoadSkillFile:
     def test_load_extra_metadata(self, sample_skill_extra_metadata):
         info = load_skill_file(sample_skill_extra_metadata)
         assert info.name == "advanced-skill"
-        assert info.metadata.get("version") == "2.0"
+        assert info.version == "2.0"
         assert info.metadata.get("author") == "test-user"
 
     def test_load_nonexistent_file(self, tmp_path):
@@ -354,7 +354,7 @@ class TestSkillInfoFormatting:
             slash=True,
             location="/some/path/SKILL.md",
             content="# Test\n\nHello world",
-            metadata={"version": "1.0"},
+            version="1.0",
         )
 
     def test_to_list_line(self, skill_info):
@@ -374,7 +374,7 @@ class TestSkillInfoFormatting:
         assert "A test skill for testing" in detail
         assert "**Slash command:** yes" in detail
         assert "/some/path/SKILL.md" in detail
-        assert "version: 1.0" in detail
+        assert "**Version:** 1.0" in detail
         assert "# Test" in detail
 
     def test_to_full(self, skill_info):
@@ -676,7 +676,7 @@ This is a test skill for integration testing.
         assert skill.name == "my-skill"
         assert skill.description == "An integration test skill"
         assert skill.slash is True
-        assert skill.metadata.get("version") == "1.0"
+        assert skill.version == "1.0"
 
         # 5. 验证渐进式披露
         list_output = manager.format_list()
@@ -684,7 +684,7 @@ This is a test skill for integration testing.
 
         detail_output = manager.format_detail("my-skill")
         assert "integration test skill" in detail_output
-        assert "version: 1.0" in detail_output
+        assert "**Version:** 1.0" in detail_output
 
         full_output = manager.format_full("my-skill")
         assert "---" in full_output

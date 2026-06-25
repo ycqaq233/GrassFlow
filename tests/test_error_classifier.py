@@ -222,9 +222,12 @@ class TestGrassFlowError:
         delay = error.get_retry_delay(0)
         assert delay > 0
 
-        # 延迟应该随尝试次数增加
-        delay2 = error.get_retry_delay(1)
-        assert delay2 >= delay
+        # 延迟应该随尝试次数增加（考虑抖动，使用多次采样）
+        delays_0 = [error.get_retry_delay(0) for _ in range(10)]
+        delays_1 = [error.get_retry_delay(1) for _ in range(10)]
+        avg_0 = sum(delays_0) / len(delays_0)
+        avg_1 = sum(delays_1) / len(delays_1)
+        assert avg_1 >= avg_0 * 0.8  # 允许 20% 的抖动容差
 
     def test_to_dict(self):
         """测试转换为字典"""
