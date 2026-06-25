@@ -82,7 +82,16 @@ class StreamHandler:
             if HAS_RICH and self.console:
                 self.console.print()  # 换行
 
-            async for event in client.stream_events(messages, system=system):
+            # 构建完整消息列表（包含系统提示）
+            full_messages = []
+            if system:
+                for msg in system:
+                    full_messages.append({"role": "system", "content": msg.content})
+            for msg in messages:
+                full_messages.append({"role": msg.role, "content": msg.content})
+
+            # 使用 stream_chat 方法
+            async for event in client.stream_chat(full_messages):
                 # 检查中断
                 if self._interrupted:
                     break
