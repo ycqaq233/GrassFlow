@@ -8,6 +8,7 @@ httpx>=0.25.0
 # TUI 依赖
 rich>=13.0.0
 click>=8.0.0
+prompt_toolkit>=3.0.0
 
 # Server 依赖
 fastapi>=0.100.0
