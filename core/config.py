@@ -13,7 +13,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,13 +21,12 @@ logger = logging.getLogger(__name__)
 
 class APIKeys(BaseModel):
     """API Keys 配置"""
+    model_config = ConfigDict(extra="allow")
+
     openai: Optional[str] = None
     anthropic: Optional[str] = None
     deepseek: Optional[str] = None
     ollama: Optional[str] = None
-
-    class Config:
-        extra = "allow"
 
 
 class LLMConfig(BaseModel):
@@ -69,6 +68,8 @@ class ServerConfig(BaseModel):
 
 class GrassFlowConfig(BaseModel):
     """GrassFlow 全局配置"""
+    model_config = ConfigDict(extra="allow")
+
     version: str = "1.0.0"
     api_keys: APIKeys = Field(default_factory=APIKeys)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -78,9 +79,6 @@ class GrassFlowConfig(BaseModel):
     workflows_dir: str = "~/.Grass/workflows"
     db_path: str = "~/.Grass/grassflow.db"
     plugins_dir: str = "~/.Grass/plugins"
-
-    class Config:
-        extra = "allow"
 
 
 class ConfigManager:
