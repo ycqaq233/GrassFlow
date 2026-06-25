@@ -373,11 +373,13 @@ class TestToolRegistry:
     def test_filter_by_source(self):
         registry = ToolRegistry()
         registry.register(EchoTool())  # BUILTIN
-        # 手动注册一个 plugin 来源
-        td = PluginTool()
-        registry.register(td)
+        # 手动注册一个 plugin 来源的 ToolDef
+        td = ToolDef(id="plugin_tool", description="from plugin", source=ToolSource.PLUGIN)
+        registry.register_tool_def(td)
         builtins = registry.filter_by_source(ToolSource.BUILTIN)
+        plugins = registry.filter_by_source(ToolSource.PLUGIN)
         assert len(builtins) == 1
+        assert len(plugins) == 1
 
     def test_filter_by_tag(self):
         registry = ToolRegistry()

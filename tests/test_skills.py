@@ -538,10 +538,11 @@ class TestSkillManager:
 
     def test_reload(self, manager):
         _ = manager.list()  # 触发加载
-        assert manager._skills is not None
+        old_skills = manager._skills
+        assert old_skills is not None
         manager.reload()
-        # reload 后重新懒加载
-        assert manager._skills is None
+        # reload 后应该重新加载（新的字典对象）
+        assert manager._skills is not old_skills
 
     def test_slash_skills(self, tmp_path):
         """测试 slash 属性过滤"""

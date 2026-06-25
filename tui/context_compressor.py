@@ -15,11 +15,9 @@ GrassFlow 上下文压缩器
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional
 
 from core.llm import LLMClient, LLMError
 
@@ -515,6 +513,42 @@ class ContextCompressor:
             return True
 
         return False
+
+    async def _generate_summary(self, messages: List[ChatMessage]) -> str:
+        """
+        使用 LLM 生成消息摘要
+
+        Args:
+            messages: 需要摘要的消息列表
+
+        Returns:
+            生成的摘要文本
+
+        Raises:
+            LLMError: LLM 调用失败
+        """
+        prompt = build_compaction_prompt(
+            messages_to_compact=messages,
+            previous_summary=self._previous_summary,
+        )
+
+        try:
+            response = await self.llm_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,  # 低温度以获得稳定的摘要
+                max_tokens=self.summary_max_tokens,
+            )
+            summary = response.content.strip()
+
+            if not summary:
+                raise LLMError("LLM 返回了空摘要")
+
+            return summary
+
+        except LLMError:
+            raise
+        except Exception as e:
+            raise LLMError(f"摘要生成失败: {e}")
 
     async def compact(
         self,

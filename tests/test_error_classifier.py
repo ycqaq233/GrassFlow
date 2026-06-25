@@ -39,27 +39,6 @@ classify_error = _mod.classify_error
 create_retry_executor = _mod.create_retry_executor
 DEFAULT_RETRY_POLICIES = _mod.DEFAULT_RETRY_POLICIES
 DEFAULT_SEVERITY_MAP = _mod.DEFAULT_SEVERITY_MAP
-    ErrorCategory,
-    ErrorSeverity,
-    ErrorContext,
-    RetryPolicy,
-    GrassFlowError,
-    RateLimitError,
-    AuthExpiredError,
-    ContextOverflowError,
-    ProviderError,
-    NetworkError,
-    ToolError,
-    PermissionDeniedError,
-    TimeoutError,
-    ValidationError,
-    ErrorClassifier,
-    RetryExecutor,
-    classify_error,
-    create_retry_executor,
-    DEFAULT_RETRY_POLICIES,
-    DEFAULT_SEVERITY_MAP,
-)
 
 
 # ============ 枚举测试 ============

@@ -31,6 +31,26 @@ from .tool_registry import (
     ToolExecutionError,
     ToolRegistrationError,
 )
+from .error_classifier import (
+    ErrorCategory,
+    ErrorSeverity,
+    ErrorContext,
+    RetryPolicy,
+    GrassFlowError,
+    RateLimitError,
+    AuthExpiredError,
+    ContextOverflowError,
+    ProviderError,
+    NetworkError,
+    ToolError as GrassFlowToolExecError,
+    PermissionDeniedError,
+    TimeoutError as GrassFlowTimeoutError,
+    ValidationError as GrassFlowValidationError,
+    ErrorClassifier,
+    RetryExecutor,
+    classify_error,
+    create_retry_executor,
+)
 
 __all__ = [
     "Agent",
