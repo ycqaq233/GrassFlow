@@ -365,6 +365,7 @@ class GrassFlowREPL:
         self.mode = REPLMode.NORMAL
         self._running = False
         self._should_exit = False
+        self._exit_requested = False  # 防止重复调用 app.exit()
         self._agent_running = False
 
         # ---- 队列 ----
@@ -809,8 +810,6 @@ class GrassFlowREPL:
         """使用 AgentLoop 异步处理消息"""
         self._agent_running = True
 
-        from prompt_toolkit.eventloop import call_soon_threadsafe
-
         # 在后台线程中运行异步 Agent Loop
         def _run():
             try:
@@ -822,9 +821,8 @@ class GrassFlowREPL:
                 self._ui_update_queue.put(("error", {"message": f"Agent error: {e}"}))
             finally:
                 self._agent_running = False
-                # 通知主线程刷新并消费队列中剩余的所有更新
+                # 通知主线程，由 on_invalidate 定时器消费
                 self._ui_update_queue.put(("agent_done", {}))
-                call_soon_threadsafe(self._process_ui_updates)
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -833,16 +831,12 @@ class GrassFlowREPL:
         """异步 Agent Loop 处理（在后台线程中运行）
 
         UI 更新通过线程安全队列 _ui_update_queue 传递到主线程，
-        避免从非 UI 线程直接调用 prompt_toolkit 的 invalidate()。
+        主线程上的 on_invalidate 定时器会定期消费队列，无需 call_soon_threadsafe。
         """
-        from prompt_toolkit.eventloop import call_soon_threadsafe
 
         def _push_ui(action: str, **kwargs):
-            """将 UI 更新推入线程安全队列，并通过 call_soon_threadsafe 通知主线程消费"""
+            """将 UI 更新推入线程安全队列，由 on_invalidate 定时器在主线程消费"""
             self._ui_update_queue.put((action, kwargs))
-            # 通知主线程立即消费队列中的更新，解决全屏 TUI 模式不渲染流式输出的问题
-            # 参见 docs/diagnose-streaming.md 的根因分析
-            call_soon_threadsafe(self._process_ui_updates)
 
         try:
             from tui.agent_loop import AgentLoop, LoopEvent
@@ -1422,6 +1416,7 @@ Be concise and helpful. Use tools when needed to complete tasks."""
         """运行 REPL 主循环"""
         self._running = True
         self._should_exit = False
+        self._exit_requested = False
 
         # 初始化会话
         self._init_session()
@@ -1455,7 +1450,8 @@ Be concise and helpful. Use tools when needed to complete tasks."""
         def _process_ui_updates_from_agent():
             """从线程安全队列消费 Agent Loop 产出的 UI 更新（在 UI 线程执行）"""
             self._process_ui_updates()
-            if self._should_exit:
+            if self._should_exit and not self._exit_requested:
+                self._exit_requested = True
                 self.app.exit()
 
         # prompt_toolkit 的 on_invalidate 在每次渲染前被调用，是安全的 UI 线程回调
