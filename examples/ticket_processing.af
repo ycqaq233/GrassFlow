@@ -1,0 +1,46 @@
+# 工单处理工作流示例
+# 展示 GrassFlow DSL 语法
+
+workflow ticket_processing {
+  # Agent 声明
+  agent classify {
+    model: "gpt-4"
+    prompt: "分类工单: {input}"
+    input_schema: { "ticket": "string" }
+    output_schema: { "category": "string" }
+  }
+
+  agent priority {
+    model: "gpt-4"
+    prompt: "判断优先级: {input}"
+    input_schema: { "ticket": "string" }
+    output_schema: { "priority": "string" }
+  }
+
+  agent route {
+    type: "condition"
+    rules: ["urgent", "normal", "info"]
+  }
+
+  agent human {
+    type: "manual"
+    prompt: "人工处理工单"
+  }
+
+  agent bot {
+    model: "gpt-4"
+    prompt: "自动回复: {input}"
+    input_schema: { "ticket": "string", "category": "string" }
+    output_schema: { "response": "string" }
+  }
+
+  # 执行流
+  # classify 和 priority 并行执行
+  (classify, priority)
+
+  # 等待两者完成后，将结果传递给 route
+  -> route
+
+  # 根据 route 的输出进行条件分支
+  -> [urgent] human, [normal] bot
+}

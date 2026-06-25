@@ -1,0 +1,54 @@
+# 竞品分析工作流示例
+# 展示并行执行和结果聚合
+
+workflow competitor_analysis {
+  # Agent 声明
+  agent search_competitor_a {
+    model: "gpt-4"
+    prompt: "搜索竞品A的信息: {input}"
+    input_schema: { "company": "string" }
+    output_schema: { "info": "string" }
+  }
+
+  agent search_competitor_b {
+    model: "gpt-4"
+    prompt: "搜索竞品B的信息: {input}"
+    input_schema: { "company": "string" }
+    output_schema: { "info": "string" }
+  }
+
+  agent search_competitor_c {
+    model: "gpt-4"
+    prompt: "搜索竞品C的信息: {input}"
+    input_schema: { "company": "string" }
+    output_schema: { "info": "string" }
+  }
+
+  agent analyze {
+    model: "gpt-4"
+    prompt: "分析竞品信息并生成报告"
+    input_schema: {
+      "competitor_a": "object",
+      "competitor_b": "object",
+      "competitor_c": "object"
+    }
+    output_schema: { "report": "string" }
+  }
+
+  agent report {
+    model: "gpt-4"
+    prompt: "生成最终报告: {input}"
+    input_schema: { "analysis": "object" }
+    output_schema: { "final_report": "string" }
+  }
+
+  # 执行流
+  # 三个搜索 Agent 并行执行
+  (search_competitor_a, search_competitor_b, search_competitor_c)
+
+  # 等待所有搜索完成后，将结果传递给 analyze
+  -> analyze
+
+  # 分析完成后生成报告
+  -> report
+}

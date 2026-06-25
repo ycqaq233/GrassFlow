@@ -1,0 +1,371 @@
+# GrassFlow — 可视化多Agent积木编排平台
+
+## 项目概述
+
+GrassFlow 是一个**声明式多Agent编排平台**，用户可以通过"拼积木"的方式创建、连接和调度多个AI Agent，实现复杂任务的自动化分解与并行执行。
+
+> 取名 GrassFlow（野草 + 流程）：像野草一样自由蔓延，Agent 编排自然生长。
+
+### 核心理念
+
+> 用户只需声明"谁依赖谁"，系统自动搞定一切。
+
+与传统Agent工具（如Claude Code单窗口单Agent）不同，GrassFlow 允许用户：
+- 以模块化方式创建多个任务级Agent
+- 声明Agent之间的依赖关系
+- 自动解析执行顺序和并行度
+- 实时监控每个Agent的执行状态
+
+---
+
+## 创新点
+
+### 1. GUI + TUI 双模式
+
+| 模式 | 目标用户 | 场景 |
+|------|---------|------|
+| **GUI模式** | 非技术用户 | 可视化拖拽、积木式连线、所见即所得 |
+| **TUI模式** | 开发者/AI | 声明式语法、可脚本化、可让AI自动生成编排 |
+
+**TUI语法示例**：
+```
+research(A,B,C) -> analyze(A,B,C) -> report
+```
+
+### 2. 丰富的Agent交互方式
+
+突破传统"线性传递"的限制，支持多种交互模式：
+
+| 交互类型 | 描述 | 示例 |
+|---------|------|------|
+| **顺序传递** | A输出 → B输入 | `A -> B` |
+| **条件分支** | A根据结果决定发给哪个Agent | `A -> [success] B, [fail] C` |
+| **立即执行** | 先开始，遇到依赖再等待 | `A \| B` (B立即开始，遇到A的输入时等待) |
+| **广播分发** | A的输出同时发给多个Agent | `A -> (B, C, D)` |
+| **聚合等待** | 等待多个Agent全部完成 | `(A, B, C) -> D` |
+
+### 3. 监控Agent机制
+
+用Agent监控Agent，解决多Agent系统的核心痛点：
+- 检查输出是否符合预期Schema
+- 检测执行时间是否异常
+- 检测结果质量（如：输出过短可能意味着敷衍）
+- 发现偏差时发出警告
+
+---
+
+## 技术架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        用户界面层                            │
+│  ┌─────────────────┐    ┌─────────────────────────────────┐ │
+│  │   GUI 模式       │    │   TUI 模式                       │ │
+│  │  (React Flow)    │    │  (DSL Parser + Rich)            │ │
+│  │  - 积木拖拽      │    │  - 声明式 DSL 语法               │ │
+│  │  - 多种连线类型  │    │  - AI 可自动生成                  │ │
+│  │  - 实时状态动画  │    │  - 终端进度展示                   │ │
+│  └────────┬────────┘    └───────────────┬─────────────────┘ │
+│           │                             │                   │
+│  ┌────────┴─────────────────────────────┴─────────────────┐ │
+│  │              共享 DAG 表示层（JSON）                     │ │
+│  │   nodes[] / edges[] / conditions[] / interactionTypes[] │ │
+│  └──────────────────────────┬──────────────────────────────┘ │
+├─────────────────────────────┼───────────────────────────────┤
+│                        后端引擎层                            │
+│  ┌──────────────────────────┴──────────────────────────────┐ │
+│  │                   DAG 调度引擎                           │ │
+│  │  - 拓扑排序 + 依赖解析                                   │ │
+│  │  - 交互类型处理（条件/广播/聚合/立即执行）                │ │
+│  │  - asyncio 并行调度                                      │ │
+│  └──┬───────────────────────────────────────────┬──────────┘ │
+│     │                                           │            │
+│  ┌──┴──────────────┐    ┌──────────────────────┴──────────┐ │
+│  │  Agent Runtime   │    │      Monitor Agent              │ │
+│  │  - LLM 调用      │    │  - Schema 校验                  │ │
+│  │  - 工具执行      │    │  - 超时检测                      │ │
+│  │  - 结果格式化    │    │  - 质量检查                      │ │
+│  └─────────────────┘    └─────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 技术栈
+
+| 层级 | 技术选型 |
+|------|---------|
+| **GUI前端** | React + React Flow + TypeScript + Zustand + TailwindCSS |
+| **TUI前端** | Python Rich |
+| **后端** | Python + FastAPI + asyncio |
+| **数据持久化** | SQLite + JSON |
+| **AI层** | OpenAI API / Anthropic API + LiteLLM |
+| **通信** | WebSocket (实时状态推送) |
+| **桌面应用** | Electron（后续迭代） |
+
+---
+
+## 核心设计
+
+### Agent 定义
+
+```python
+class Agent:
+    """所有 Agent 的基类"""
+    name: str
+    input_schema: dict        # JSON Schema
+    output_schema: dict       # JSON Schema
+    model: str = "gpt-4"
+    prompt: str = ""
+    on_fail: str = "stop"     # stop / skip / retry
+    retry_count: int = 3
+
+    async def run(self, input_data: dict) -> dict:
+        raise NotImplementedError
+```
+
+### DSL 语法规范
+
+```grassflow
+# 基础顺序
+A -> B -> C
+
+# 并行执行
+(A, B, C) -> D
+
+# 立即执行（先启动，遇依赖等待）
+A | B
+
+# 条件分支（ConditionAgent 输出 route 字段）
+route -> [urgent] human, [normal] bot
+
+# 组合使用
+(A | B) -> route -> [urgent] human, [normal] bot
+
+# 完整工作流定义
+workflow ticket_processing {
+  agent classify {
+    model: "gpt-4"
+    prompt: "分类工单: {input}"
+    input_schema: { "ticket": "string" }
+    output_schema: { "category": "string" }
+  }
+  agent route {
+    type: "condition"
+    rules: ["urgent", "normal", "info"]
+  }
+  agent human { type: "manual" }
+  agent bot {
+    model: "gpt-4"
+    prompt: "自动回复: {input}"
+  }
+
+  classify | priority
+  -> route
+  -> [urgent] human, [normal] bot
+}
+```
+
+### 数据传递机制
+
+```python
+class WorkflowContext:
+    """只读数据传递"""
+    def set(self, agent_id: str, data: dict):
+        """Agent 只能写自己的 key"""
+        self._data[agent_id] = data
+
+    def get(self, agent_id: str) -> dict:
+        """可以读任何 Agent 的输出"""
+        return self._data.get(agent_id, {})
+```
+
+### 失败策略
+
+```python
+on_fail: "stop"      # 默认：任何失败，整个工作流停止
+on_fail: "skip"      # 跳过该 Agent，用空结果继续
+on_fail: "retry"     # 重试，配合 retry_count
+```
+
+### 配置管理
+
+```json
+// ~/.grassflow/config.json
+{
+  "default_model": "gpt-4",
+  "api_keys": {
+    "openai": "sk-xxx",
+    "anthropic": "sk-xxx"
+  }
+}
+```
+
+### 预设积木类型（GUI 后续迭代）
+
+| 类别 | 积木 | 说明 |
+|------|------|------|
+| AI 类（蓝色） | 🤖 LLM Agent | 调用大模型 |
+| | 🔍 Search Agent | 搜索网络/知识库 |
+| | 📝 Writer Agent | 专门写作 |
+| | 📊 Analyzer Agent | 数据分析 |
+| 控制类（橙色） | 🔀 Condition | 条件分支 |
+| | ⏳ Immediate | 立即执行 |
+| | ⏸️ Human | 人工审批暂停点 |
+| IO 类（绿色） | 📥 Input | 工作流输入 |
+| | 📤 Output | 工作流输出 |
+
+### 连线类型（GUI 后续迭代）
+
+| 线型 | 含义 | 样式 |
+|------|------|------|
+| 实线 | 顺序依赖 | ━━━━━ |
+| 虚线 | 立即执行 | ╌╌╌╌╌ |
+| 粗线 | 条件分支 | ═════ |
+
+---
+
+## 项目目标
+
+### 短期目标（两周MVP — TUI 优先）
+
+1. ✅ Agent 基类 + Schema 系统
+2. ✅ DAG 拓扑排序 + asyncio 并行调度
+3. ✅ DSL 解析器（顺序/并行/条件/立即执行）
+4. ✅ ConditionAgent（条件分支）
+5. ✅ LLM API 调用集成
+6. ✅ 只读数据传递（Context）
+7. ✅ 可配置失败策略（stop/skip/retry）
+8. ✅ 工作流保存/加载（JSON）
+9. ✅ 终端进度展示（Rich）
+10. ✅ CLI 入口（`grassflow run/list/save`）
+11. ✅ 监控报告（事后检查）
+12. ✅ 执行记录（SQLite）
+
+### 中期目标（GUI + 扩展）
+
+1. Electron 桌面应用
+2. React Flow 画布 + 左侧积木面板
+3. 多种连线类型（实线/虚线/粗线）
+4. 广播分发、聚合等待、超时降级
+5. AI 自动生成 TUI 编排
+6. 工作流模板市场
+7. 本地模型支持（Ollama）
+
+### 长期目标（产品化）
+
+1. 用户认证 + 多租户
+2. 生产级性能优化
+3. A2A/MCP 协议集成
+4. 嵌入式运行时（可视化设计导出为可执行代码）
+
+---
+
+## 与竞品的差异化
+
+| 维度 | Langflow | n8n | CrewAI | **GrassFlow (本项目)** |
+|------|----------|-----|--------|----------------------|
+| **定位** | 全栈AI平台 | 业务自动化 | 代码框架 | 轻量纯编排 |
+| **交互方式** | GUI | GUI | 代码 | GUI + TUI |
+| **依赖声明** | 手动连线 | 手动连线 | 代码 | 声明式 DSL 语法 |
+| **交互类型** | 线性 | 线性+条件 | 线性 | 线性+条件+广播+聚合+立即执行 |
+| **AI生成编排** | ❌ | ❌ | ❌ | ✅ (TUI模式) |
+| **监控Agent** | ❌ | ❌ | ❌ | ✅ |
+| **分发方式** | pip/Docker | npm/Docker | pip | pip (TUI) + exe (GUI) |
+
+---
+
+## 文件结构
+
+```
+grassflow/                        # 单仓库 monorepo
+├── core/                         # 共享核心（独立 Python 包）
+│   ├── agent.py                  # Agent 基类 + Schema 系统
+│   ├── dag.py                    # DAG 引擎 + 拓扑排序
+│   ├── scheduler.py              # asyncio 并行调度器
+│   ├── context.py                # 只读数据传递 Context
+│   ├── monitor.py                # 监控 Agent（事后检查）
+│   └── models.py                 # 数据模型
+│
+├── tui/                          # TUI 入口（pip install grassflow）
+│   ├── cli.py                    # CLI 命令入口
+│   ├── dsl_parser.py             # DSL 语法解析器
+│   ├── runner.py                 # 工作流执行器
+│   └── display.py                # 终端进度展示（Rich）
+│
+├── server/                       # FastAPI 后端
+│   ├── app.py                    # FastAPI 应用
+│   ├── api/
+│   │   ├── workflows.py          # 工作流 CRUD API
+│   │   └── executions.py         # 执行记录 API
+│   └── ws.py                     # WebSocket 实时推送
+│
+├── gui/                          # Electron 前端（后续迭代）
+│   ├── electron/                 # Electron 壳
+│   ├── src/                      # React + React Flow
+│   └── package.json
+│
+├── examples/                     # 示例工作流 (.gf 文件)
+├── tests/                        # 测试
+├── setup.py                      # Python 包配置
+├── CLAUDE.md                     # 项目说明
+└── 项目制作计划.md
+```
+
+---
+
+## 数据持久化
+
+```
+~/.grassflow/
+├── config.json                   # 全局配置（API Key、默认模型）
+├── workflows/                    # 工作流定义（JSON）
+│   ├── ticket_processing.json
+│   └── competitor_analysis.json
+└── grassflow.db                  # 执行记录（SQLite）
+```
+
+---
+
+## 开发规范
+
+- Python 环境：使用项目目录下的虚拟环境 `.venv`
+- 后端：Python + FastAPI + asyncio
+- 前端：TypeScript 严格模式（GUI 后续迭代）
+- 代码风格：遵循各语言主流规范
+- 版本控制：Git
+
+---
+
+## 推荐技能使用指南
+
+在开发过程中，遇到以下场景时**主动调用对应技能**：
+
+### 开发阶段
+
+| 场景 | 技能 | 说明 |
+|------|------|------|
+| 每个阶段完成后审查 | `/grill-me` | 压测当前实现的设计决策 |
+| 核心模块开发（dag.py, scheduler.py, agent.py） | `/tdd` | 测试驱动开发，先写测试再写实现 |
+| 验证 DSL 语法或 DAG 调度方案 | `/prototype` | 构建一次性原型验证可行性 |
+| 遇到 async 调度或复杂 bug | `/diagnose` | 系统化诊断：复现→最小化→假设→修复 |
+
+### 架构与质量
+
+| 场景 | 技能 | 说明 |
+|------|------|------|
+| MVP 完成后重构 | `/improve-codebase-architecture` | 找重构机会，降低耦合 |
+| 迷失在细节时 | `/zoom-out` | 拉远视角，理解全局 |
+| Git 操作保护 | `/git-guardrails` | 阻止危险 git 命令 |
+
+### 持续改进
+
+| 场景 | 技能 | 说明 |
+|------|------|------|
+| 命令失败或用户纠正时 | `/self-improving-agent` | 自动捕获错误和改进点 |
+| 需要创建新技能时 | `/write-a-skill` | 创建项目专用技能 |
+
+### 后续迭代（GUI 阶段）
+
+| 场景 | 技能 | 说明 |
+|------|------|------|
+| Electron GUI 视觉设计 | `/frontend-design` | UI 设计指导，避免模板化 |
+| 项目计划拆解为 issue | `/to-issues` | 把制作计划拆成可独立领取的任务 |
