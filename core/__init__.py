@@ -115,6 +115,29 @@ from .llm_protocol import (
     ProtocolLLMManager,
     protocol_manager,
 )
+from .skills import (
+    SkillInfo,
+    SkillManager,
+    SkillError,
+    SkillNotFoundError,
+    SkillParseError,
+    SkillFrontmatterError,
+    SkillNameMismatchError,
+    load_skill_file,
+    load_skills,
+    discover_skill_files,
+    parse_frontmatter,
+)
+from .workflow_generator import (
+    WorkflowGenerator,
+    WorkflowGeneratorError,
+    GenerationResult,
+    ValidationResult,
+    WorkflowSuggestion,
+    WorkflowComplexity,
+    generate_workflow_from_description,
+    validate_workflow_dsl,
+)
 
 __all__ = [
     "Agent",
@@ -247,4 +270,25 @@ __all__ = [
     "ProtocolLLMClient",
     "ProtocolLLMManager",
     "protocol_manager",
+    # skills
+    "SkillInfo",
+    "SkillManager",
+    "SkillError",
+    "SkillNotFoundError",
+    "SkillParseError",
+    "SkillFrontmatterError",
+    "SkillNameMismatchError",
+    "load_skill_file",
+    "load_skills",
+    "discover_skill_files",
+    "parse_frontmatter",
+    # workflow_generator
+    "WorkflowGenerator",
+    "WorkflowGeneratorError",
+    "GenerationResult",
+    "ValidationResult",
+    "WorkflowSuggestion",
+    "WorkflowComplexity",
+    "generate_workflow_from_description",
+    "validate_workflow_dsl",
 ]

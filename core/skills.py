@@ -877,5 +877,97 @@ class SkillManager:
             "directories": self.directories,
         }
 
+    # ── 批量操作 ──────────────────────────────────────────────────────────
+
+    def get_skills_by_tags(self, tags: List[str]) -> Dict[str, List[SkillInfo]]:
+        """按标签分组获取 Skills
+
+        Args:
+            tags: 标签列表
+
+        Returns:
+            {tag: [SkillInfo, ...]} 字典
+        """
+        result: Dict[str, List[SkillInfo]] = {tag: [] for tag in tags}
+        for skill in self.list():
+            for tag in skill.tags:
+                if tag in result:
+                    result[tag].append(skill)
+        return result
+
+    def search(self, query: str) -> List[SkillInfo]:
+        """搜索 Skills（匹配名称、描述或内容）
+
+        Args:
+            query: 搜索词
+
+        Returns:
+            匹配的 SkillInfo 列表
+        """
+        return self.filter(search_term=query)
+
+    def get_related_skills(self, name: str) -> List[SkillInfo]:
+        """获取与指定 Skill 相关的 Skills（基于标签）
+
+        Args:
+            name: Skill 名称
+
+        Returns:
+            相关的 SkillInfo 列表
+        """
+        skill = self.get(name)
+        if not skill or not skill.tags:
+            return []
+
+        related = []
+        for other in self.list():
+            if other.name == name:
+                continue
+            if any(tag in other.tags for tag in skill.tags):
+                related.append(other)
+        return related
+
+    # ── 导出功能 ──────────────────────────────────────────────────────────
+
+    def export_list_markdown(self, output_path: Optional[str] = None) -> str:
+        """导出 Skills 列表为 Markdown 文件
+
+        Args:
+            output_path: 输出文件路径（可选）
+
+        Returns:
+            Markdown 内容
+        """
+        content = self.format_list()
+        if output_path:
+            Path(output_path).write_text(content, encoding="utf-8")
+        return content
+
+    def export_detail_markdown(self, name: str, output_path: Optional[str] = None) -> str:
+        """导出单个 Skill 详情为 Markdown 文件
+
+        Args:
+            name: Skill 名称
+            output_path: 输出文件路径（可选）
+
+        Returns:
+            Markdown 内容
+        """
+        content = self.format_detail(name)
+        if output_path:
+            Path(output_path).write_text(content, encoding="utf-8")
+        return content
+
+    # ── 缓存管理 ──────────────────────────────────────────────────────────
+
+    def clear_cache(self) -> None:
+        """清除缓存，强制下次访问时重新加载"""
+        self._skills = None
+
+    @property
+    def is_loaded(self) -> bool:
+        """检查是否已加载 Skills"""
+        return self._skills is not None
+
     def __repr__(self) -> str:
         return f"SkillManager(count={self.count}, dirs={self._search_dirs})"
