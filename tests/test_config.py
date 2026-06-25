@@ -68,8 +68,8 @@ class TestLLMConfig:
     def test_default_values(self):
         """测试默认值"""
         config = LLMConfig()
-        assert config.default_model == "gpt-4"
-        assert config.default_provider == "openai"
+        assert config.default_model == "deepseek-chat"
+        assert config.default_provider == "deepseek"
         assert config.temperature == 0.7
         assert config.max_tokens == 4096
         assert config.timeout == 60
@@ -128,7 +128,7 @@ class TestGrassFlowConfig:
         """测试默认值"""
         config = GrassFlowConfig()
         assert config.version == "1.0.0"
-        assert isinstance(config.api_keys, APIKeys)
+        assert isinstance(config.provider, dict)
         assert isinstance(config.llm, LLMConfig)
         assert isinstance(config.workflow, WorkflowConfig)
         assert isinstance(config.display, DisplayConfig)
@@ -152,7 +152,7 @@ class TestGrassFlowConfig:
         data = config.model_dump()
         assert isinstance(data, dict)
         assert "version" in data
-        assert "api_keys" in data
+        assert "provider" in data
         assert "llm" in data
 
 
@@ -283,7 +283,14 @@ class TestConfigManager:
 
     def test_get_api_key(self, config_manager):
         """测试获取 API Key"""
-        config = GrassFlowConfig(api_keys=APIKeys(openai="sk-xxx"))
+        from core.config import ProviderConfig, ProviderOptions
+        config = GrassFlowConfig(
+            provider={
+                "openai": ProviderConfig(
+                    options=ProviderOptions(apiKey="sk-xxx")
+                )
+            }
+        )
         config_manager.save_global_config(config)
 
         key = config_manager.get_api_key("openai")
@@ -369,7 +376,7 @@ class TestConfigIntegration:
         # 4. 验证合并结果
         merged = manager.load_config()
         assert merged.llm.default_model == "gpt-3.5-turbo"
-        assert merged.api_keys.openai == "sk-xxx"
+        assert manager.get_api_key("openai") == "sk-xxx"
 
         # 5. 列出配置
         configs = manager.list_configs()

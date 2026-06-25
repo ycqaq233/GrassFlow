@@ -19,6 +19,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class APIKeys(BaseModel):
+    """API Keys 配置（向后兼容）"""
+    model_config = ConfigDict(extra="allow")
+
+    openai: Optional[str] = None
+    anthropic: Optional[str] = None
+    deepseek: Optional[str] = None
+    ollama: Optional[str] = None
+
+
 class ProviderModelConfig(BaseModel):
     """Provider 模型配置"""
     model_config = ConfigDict(extra="allow")
@@ -345,7 +355,10 @@ class ConfigManager:
     def get_api_key(self, provider: str) -> Optional[str]:
         """获取 API Key"""
         config = self.load_config()
-        return getattr(config.api_keys, provider, None)
+        provider_config = config.provider.get(provider)
+        if provider_config:
+            return provider_config.options.apiKey
+        return None
 
     def set_api_key(self, provider: str, key: str, scope: str = "global") -> None:
         """设置 API Key"""
@@ -354,7 +367,11 @@ class ConfigManager:
         else:
             config = self.load_project_config() or GrassFlowConfig()
 
-        setattr(config.api_keys, provider, key)
+        # 获取或创建 provider 配置
+        if provider not in config.provider:
+            config.provider[provider] = ProviderConfig()
+
+        config.provider[provider].options.apiKey = key
 
         if scope == "global":
             self.save_global_config(config)
