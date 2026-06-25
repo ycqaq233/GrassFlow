@@ -150,7 +150,7 @@ class SkillInfo:
 
 # ── Frontmatter 解析 ─────────────────────────────────────────────────────────
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n?---\s*\n?", re.DOTALL)
 
 
 def _parse_yaml_simple(text: str) -> Dict[str, Any]:

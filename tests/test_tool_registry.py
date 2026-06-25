@@ -242,7 +242,7 @@ class TestBaseTool:
         tool = EchoTool()
         td = tool.to_tool_def()
         assert td.id == "echo"
-        assert td._execute is not None
+        assert td.execute_fn is not None
 
     @pytest.mark.asyncio
     async def test_echo_tool_execute(self):
@@ -649,9 +649,10 @@ class TestParameterValidation:
                 "required": ["a", "b"],
             },
         )
-        td._execute = lambda args, ctx: asyncio.coroutine(
-            lambda: ToolResult.success(str(args["a"] + args["b"]))
-        )()
+        async def _add(args, ctx):
+            return ToolResult.success(str(args["a"] + args["b"]))
+
+        td.execute_fn = _add
 
         result = await td.execute({"a": 1, "b": 2}, ToolContext())
         assert result.output == "3"

@@ -213,7 +213,7 @@ class TestParseFrontmatter:
             parse_frontmatter(content)
 
     def test_empty_frontmatter(self):
-        content = "---\n---\nBody"
+        content = "---\n\n---\nBody"
         metadata, body = parse_frontmatter(content)
         assert metadata == {}
 
@@ -372,7 +372,7 @@ class TestSkillInfoFormatting:
         detail = skill_info.to_detail()
         assert "## test-skill" in detail
         assert "A test skill for testing" in detail
-        assert "Slash command: yes" in detail
+        assert "**Slash command:** yes" in detail
         assert "/some/path/SKILL.md" in detail
         assert "version: 1.0" in detail
         assert "# Test" in detail

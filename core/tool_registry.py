@@ -232,7 +232,7 @@ class ToolDef(BaseModel):
             ToolInvalidArgumentsError: 参数校验失败
             ToolExecutionError: 执行过程异常
         """
-        if self._execute is None:
+        if self.execute_fn is None:
             raise ToolNotFoundError(f"Tool '{self.id}' has no execute function registered")
 
         ctx = ctx or ToolContext()
@@ -249,7 +249,7 @@ class ToolDef(BaseModel):
         logger.debug("Executing tool '%s' with args: %s", self.id, _sanitize_args(validated_args))
 
         try:
-            result = await self._execute(validated_args, ctx)
+            result = await self.execute_fn(validated_args, ctx)
             elapsed_ms = int((time.monotonic() - start_time) * 1000)
             result.metadata.setdefault("tool_id", self.id)
             result.metadata.setdefault("elapsed_ms", elapsed_ms)
@@ -372,7 +372,7 @@ def register_tool(
             permission=permission,
             tags=tags or [],
         )
-        tool_def._execute = func
+        tool_def.execute_fn = func
 
         if auto_register:
             _DECORATOR_REGISTRY[tool_id] = tool_def
@@ -465,7 +465,7 @@ class BaseTool(ABC):
             permission=self.permission,
             tags=self.tags,
         )
-        tool_def._execute = self.run
+        tool_def.execute_fn = self.run
         return tool_def
 
 
@@ -522,7 +522,7 @@ class MCPToolAdapter:
             permission=self.permission,
             tags=[f"mcp:{self.server_name}", *self.tags],
         )
-        tool_def._execute = self._call_mcp
+        tool_def.execute_fn = self._call_mcp
         return tool_def
 
     async def _call_mcp(
@@ -630,7 +630,7 @@ class ToolRegistry:
             permission=permission,
             tags=tags or [],
         )
-        tool_def._execute = func
+        tool_def.execute_fn = func
         self._do_register(tool_def)
 
     def register_from_decorators(self) -> int:

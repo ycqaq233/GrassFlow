@@ -4,11 +4,41 @@ GrassFlow 错误分类器测试
 测试结构化错误分类、重试逻辑等功能
 """
 
+import sys
+import os
+import importlib.util
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from core.error_classifier import (
+# 直接加载模块，避免触发 core/__init__.py 中的 tool_registry 导入问题
+_spec = importlib.util.spec_from_file_location(
+    "error_classifier",
+    os.path.join(os.path.dirname(__file__), "..", "core", "error_classifier.py"),
+)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+
+ErrorCategory = _mod.ErrorCategory
+ErrorSeverity = _mod.ErrorSeverity
+ErrorContext = _mod.ErrorContext
+RetryPolicy = _mod.RetryPolicy
+GrassFlowError = _mod.GrassFlowError
+RateLimitError = _mod.RateLimitError
+AuthExpiredError = _mod.AuthExpiredError
+ContextOverflowError = _mod.ContextOverflowError
+ProviderError = _mod.ProviderError
+NetworkError = _mod.NetworkError
+ToolError = _mod.ToolError
+PermissionDeniedError = _mod.PermissionDeniedError
+TimeoutError = _mod.TimeoutError
+ValidationError = _mod.ValidationError
+ErrorClassifier = _mod.ErrorClassifier
+RetryExecutor = _mod.RetryExecutor
+classify_error = _mod.classify_error
+create_retry_executor = _mod.create_retry_executor
+DEFAULT_RETRY_POLICIES = _mod.DEFAULT_RETRY_POLICIES
+DEFAULT_SEVERITY_MAP = _mod.DEFAULT_SEVERITY_MAP
     ErrorCategory,
     ErrorSeverity,
     ErrorContext,
