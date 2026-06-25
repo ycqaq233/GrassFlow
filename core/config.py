@@ -1,7 +1,7 @@
 """
 GrassFlow 配置管理
 
-参考 Claude Code 的配置形式，支持多级配置：
+参考 opencode 的配置形式，支持多级配置：
 - 全局配置：~/.Grass/config.json
 - 项目配置：.grass/config.json
 - 环境变量：GRASSFLOW_*
@@ -19,20 +19,38 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class APIKeys(BaseModel):
-    """API Keys 配置"""
+class ProviderModelConfig(BaseModel):
+    """Provider 模型配置"""
     model_config = ConfigDict(extra="allow")
 
-    openai: Optional[str] = None
-    anthropic: Optional[str] = None
-    deepseek: Optional[str] = None
-    ollama: Optional[str] = None
+    name: Optional[str] = None
+    limit: Optional[Dict[str, int]] = None
+    modalities: Optional[Dict[str, List[str]]] = None
+    options: Optional[Dict[str, Any]] = None
+
+
+class ProviderOptions(BaseModel):
+    """Provider 选项"""
+    model_config = ConfigDict(extra="allow")
+
+    apiKey: Optional[str] = None
+    baseURL: Optional[str] = None
+
+
+class ProviderConfig(BaseModel):
+    """Provider 配置"""
+    model_config = ConfigDict(extra="allow")
+
+    name: Optional[str] = None
+    npm: Optional[str] = None
+    models: Dict[str, ProviderModelConfig] = Field(default_factory=dict)
+    options: ProviderOptions = Field(default_factory=ProviderOptions)
 
 
 class LLMConfig(BaseModel):
     """LLM 配置"""
-    default_model: str = "gpt-4"
-    default_provider: str = "openai"
+    default_model: str = "deepseek-chat"
+    default_provider: str = "deepseek"
     temperature: float = 0.7
     max_tokens: int = 4096
     timeout: int = 60
@@ -71,7 +89,7 @@ class GrassFlowConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     version: str = "1.0.0"
-    api_keys: APIKeys = Field(default_factory=APIKeys)
+    provider: Dict[str, ProviderConfig] = Field(default_factory=dict)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)

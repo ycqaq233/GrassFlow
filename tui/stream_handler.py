@@ -174,30 +174,42 @@ class LLMClientFactory:
             from core.config import config_manager
             config = config_manager.load_config()
 
-            # 获取配置
-            provider = config.llm.default_provider
-            model = config.llm.default_model
+            # 获取默认 provider 和 model
+            provider_name = config.llm.default_provider
+            model_name = config.llm.default_model
 
-            # 获取对应的 API key
-            api_keys = config.api_keys.model_dump()
-            api_key = api_keys.get(provider)
-
-            if not api_key:
-                # 尝试找到任何可用的 API key
-                for p, key in api_keys.items():
-                    if key:
-                        provider = p
-                        api_key = key
+            # 获取 provider 配置
+            provider_config = config.provider.get(provider_name)
+            if not provider_config:
+                # 尝试找到任何可用的 provider
+                for name, pconfig in config.provider.items():
+                    if pconfig.options.apiKey:
+                        provider_name = name
+                        provider_config = pconfig
                         break
+
+            if not provider_config:
+                return None
+
+            # 获取 API key 和 base URL
+            api_key = provider_config.options.apiKey
+            base_url = provider_config.options.baseURL
 
             if not api_key:
                 return None
 
+            # 检查模型是否在 provider 的模型列表中
+            if provider_config.models and model_name not in provider_config.models:
+                # 使用 provider 的第一个模型
+                if provider_config.models:
+                    model_name = list(provider_config.models.keys())[0]
+
             # 使用 ProtocolLLMClient.from_provider 创建客户端
             return ProtocolLLMClient.from_provider(
-                provider_name=provider,
-                model=model,
+                provider_name=provider_name,
+                model=model_name,
                 api_key=api_key,
+                base_url=base_url,
             )
 
         except Exception as e:
