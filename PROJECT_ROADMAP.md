@@ -163,9 +163,134 @@ GrassFlow 目标架构:
 - `core/mcp_server.py` - MCP 服务器
 - `core/permission.py` - 权限控制
 
-### 阶段 4: Agent 组件系统 (2-3周)
+### 阶段 4: DSL 语法增强 + Agent 组件系统 (3-4周)
 
-**目标**: 实现 Agent 组件的自由组装
+**目标**: 先扩展 DSL 语法支持组件系统，再实现组件的自由组装
+
+> **设计原则**: 所有 Agent 组件系统必须先为 DSL 服务
+> - 所有组件以及组件之间的关系都应该可以使用 DSL 语法表示
+> - 如果组件相关的设计不能通过 DSL 语法表示，则应该先设计 DSL 语法
+
+#### 4.1 DSL 语法增强 (1-2周)
+
+**当前 DSL 语法**:
+```grassflow
+workflow ticket_processing {
+  agent classify {
+    model: "gpt-4"
+    prompt: "分类工单: {input}"
+    input_schema: { "ticket": "string" }
+    output_schema: { "category": "string" }
+  }
+
+  (classify, priority) -> route -> [urgent] human, [normal] bot
+}
+```
+
+**增强后的 DSL 语法** (支持组件系统):
+```grassflow
+# 组件定义 (可复用的 Agent 模板)
+component code-reviewer {
+  description: "代码审查专家"
+  version: "1.0.0"
+
+  # 预装载提示词
+  system_prompt: """
+    你是一个专业的代码审查专家...
+    审查重点：
+    - 代码质量
+    - 安全漏洞
+    - 性能问题
+  """
+
+  # 连线接口定义
+  port input code: string "待审查的代码"
+  port input context: object "上下文信息"
+  port output review_result: object "审查结果"
+  port output issues: array "发现的问题列表"
+
+  # MCP 配置
+  mcp github {
+    tools: [create_issue, add_comment]
+  }
+  mcp sonarqube {
+    tools: [analyze_code, get_metrics]
+  }
+
+  # 模型配置
+  model default: "gpt-4"
+  model fallback: "gpt-3.5-turbo"
+  model temperature: 0.3
+
+  # 工具权限
+  permission allow: [read_file, write_file, search_code]
+  permission deny: [delete_file, execute_command]
+  permission ask: [commit_changes, push_code]
+}
+
+# 组件实例化 (在工作流中使用组件)
+workflow my-review {
+  # 实例化组件
+  agent reviewer use code-reviewer {
+    # 覆盖默认配置
+    model temperature: 0.5
+  }
+
+  # 自定义 Agent (也可以使用组件的接口)
+  agent analyzer {
+    model: "gpt-4"
+    prompt: "分析代码: {code}"
+    # 声明接口
+    port input code: string
+    port output analysis: object
+  }
+
+  # 连接 (使用接口名称)
+  analyzer.code -> reviewer.code
+  analyzer.analysis -> reviewer.context
+
+  # 或使用简写
+  (analyzer -> reviewer).code
+  (analyzer -> reviewer).analysis -> context
+
+  # 条件分支
+  reviewer.issues -> [has_issues] fixer, [no_issues] approver
+}
+
+# 组件继承
+component advanced-reviewer extends code-reviewer {
+  # 添加新的接口
+  port input requirements: array "需求文档"
+
+  # 覆盖提示词
+  system_prompt: """
+    你是一个高级代码审查专家...
+    除了基础审查，还需要检查：
+    - 是否符合需求
+    - 架构合理性
+  """
+
+  # 添加新的 MCP
+  mcp jira {
+    tools: [create_ticket, update_ticket]
+  }
+}
+```
+
+| 任务 | 说明 | 优先级 |
+|------|------|--------|
+| DSL 语法设计 | 组件定义、实例化、接口连接、继承 | 🔴 高 |
+| DSL 解析器增强 | 支持新语法 | 🔴 高 |
+| 组件定义格式 | YAML + DSL 双向转换 | 🔴 高 |
+| 接口连接语法 | 端口映射、条件分支 | 🔴 高 |
+
+**交付物**:
+- `docs/dsl-v2-spec.md` - DSL v2 语法规范
+- `tui/dsl_parser_v2.py` - 增强的 DSL 解析器
+- `core/component_dsl.py` - 组件 DSL 转换器
+- `examples/dsl-v2/` - v2 语法示例
+
+#### 4.2 Agent 组件系统实现 (1-2周)
 
 | 任务 | 说明 | 优先级 |
 |------|------|--------|
@@ -173,58 +298,6 @@ GrassFlow 目标架构:
 | 组件注册表 | 自定义 Agent 组件的注册和发现 | 🔴 高 |
 | 组件编辑器 | GUI/TUI 中可视化编辑 Agent 组件 | 🟡 中 |
 | 组件市场 | 分享和导入社区 Agent 组件 | 🟢 低 |
-
-**Agent 组件规格**:
-```yaml
-# agent_component.yaml
-name: code-reviewer
-description: 代码审查 Agent
-version: 1.0.0
-
-# 预装载提示词
-system_prompt: |
-  你是一个专业的代码审查专家...
-  审查重点：
-  - 代码质量
-  - 安全漏洞
-  - 性能问题
-
-# 连线接口定义
-ports:
-  inputs:
-    - name: code
-      type: string
-      description: 待审查的代码
-    - name: context
-      type: object
-      description: 上下文信息
-  outputs:
-    - name: review_result
-      type: object
-      description: 审查结果
-    - name: issues
-      type: array
-      description: 发现的问题列表
-
-# MCP 配置
-mcp_servers:
-  - name: github
-    tools: [create_issue, add_comment]
-  - name: sonarqube
-    tools: [analyze_code, get_metrics]
-
-# 模型配置
-model:
-  default: gpt-4
-  fallback: gpt-3.5-turbo
-  temperature: 0.3
-
-# 工具权限
-permissions:
-  allow: [read_file, write_file, search_code]
-  deny: [delete_file, execute_command]
-  ask: [commit_changes, push_code]
-```
 
 **交付物**:
 - `core/agent_component.py` - Agent 组件定义

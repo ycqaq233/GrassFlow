@@ -124,6 +124,12 @@ class Agent:
 
 ### DSL 语法规范
 
+> **设计原则**: 所有 Agent 组件系统必须先为 DSL 服务
+> - 所有组件以及组件之间的关系都应该可以使用 DSL 语法表示
+> - 如果组件相关的设计不能通过 DSL 语法表示，则应该先设计 DSL 语法
+
+#### DSL v1 (当前)
+
 ```grassflow
 # 基础顺序
 A -> B -> C
@@ -161,6 +167,97 @@ workflow ticket_processing {
   classify | priority
   -> route
   -> [urgent] human, [normal] bot
+}
+```
+
+#### DSL v2 (计划中 - 支持组件系统)
+
+```grassflow
+# 组件定义 (可复用的 Agent 模板)
+component code-reviewer {
+  description: "代码审查专家"
+  version: "1.0.0"
+
+  # 预装载提示词
+  system_prompt: """
+    你是一个专业的代码审查专家...
+    审查重点：
+    - 代码质量
+    - 安全漏洞
+    - 性能问题
+  """
+
+  # 连线接口定义
+  port input code: string "待审查的代码"
+  port input context: object "上下文信息"
+  port output review_result: object "审查结果"
+  port output issues: array "发现的问题列表"
+
+  # MCP 配置
+  mcp github {
+    tools: [create_issue, add_comment]
+  }
+  mcp sonarqube {
+    tools: [analyze_code, get_metrics]
+  }
+
+  # 模型配置
+  model default: "gpt-4"
+  model fallback: "gpt-3.5-turbo"
+  model temperature: 0.3
+
+  # 工具权限
+  permission allow: [read_file, write_file, search_code]
+  permission deny: [delete_file, execute_command]
+  permission ask: [commit_changes, push_code]
+}
+
+# 组件实例化 (在工作流中使用组件)
+workflow my-review {
+  # 实例化组件
+  agent reviewer use code-reviewer {
+    # 覆盖默认配置
+    model temperature: 0.5
+  }
+
+  # 自定义 Agent (也可以使用组件的接口)
+  agent analyzer {
+    model: "gpt-4"
+    prompt: "分析代码: {code}"
+    # 声明接口
+    port input code: string
+    port output analysis: object
+  }
+
+  # 连接 (使用接口名称)
+  analyzer.code -> reviewer.code
+  analyzer.analysis -> reviewer.context
+
+  # 或使用简写
+  (analyzer -> reviewer).code
+  (analyzer -> reviewer).analysis -> context
+
+  # 条件分支
+  reviewer.issues -> [has_issues] fixer, [no_issues] approver
+}
+
+# 组件继承
+component advanced-reviewer extends code-reviewer {
+  # 添加新的接口
+  port input requirements: array "需求文档"
+
+  # 覆盖提示词
+  system_prompt: """
+    你是一个高级代码审查专家...
+    除了基础审查，还需要检查：
+    - 是否符合需求
+    - 架构合理性
+  """
+
+  # 添加新的 MCP
+  mcp jira {
+    tools: [create_ticket, update_ticket]
+  }
 }
 ```
 
