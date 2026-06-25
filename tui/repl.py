@@ -522,6 +522,7 @@ class REPL:
     - 支持命令和普通消息
     - 中断处理（Ctrl+C 优雅退出）
     - 消息历史和上下文
+    - 流式输出支持
 
     使用方式：
         repl = REPL()
@@ -532,6 +533,7 @@ class REPL:
         self,
         console: Optional[Any] = None,
         on_message: Optional[Callable[[str], Optional[str]]] = None,
+        enable_streaming: bool = True,
     ):
         """
         初始化 REPL
@@ -539,6 +541,7 @@ class REPL:
         Args:
             console: Rich Console 实例
             on_message: 消息回调函数，接收用户输入，返回响应
+            enable_streaming: 是否启用流式输出
         """
         if HAS_RICH:
             self.console = console or Console()
@@ -554,6 +557,27 @@ class REPL:
         self.on_message = on_message
         self._running = False
         self._original_sigint = None
+
+        # 流式输出支持
+        self.enable_streaming = enable_streaming
+        self._stream_handler = None
+        self._llm_client = None
+
+        if enable_streaming:
+            self._init_streaming()
+
+    def _init_streaming(self):
+        """初始化流式处理器"""
+        try:
+            from tui.stream_handler import StreamHandler, LLMClientFactory
+            self._stream_handler = StreamHandler(console=self.console)
+            self._llm_client = LLMClientFactory.create_from_config()
+            if self._llm_client:
+                self.console.print("[dim]  LLM streaming enabled (DeepSeek)[/dim]" if HAS_RICH else "LLM streaming enabled")
+            else:
+                self.console.print("[dim]  LLM streaming disabled (no API key)[/dim]" if HAS_RICH else "LLM streaming disabled")
+        except Exception as e:
+            self.console.print(f"[dim]  Streaming init failed: {e}[/dim]" if HAS_RICH else f"Streaming init failed: {e}")
 
     def _get_prompt_text(self) -> str:
         """获取提示符文本"""
@@ -749,6 +773,11 @@ class REPL:
                 error_msg = Message(MessageRole.ERROR, str(e))
                 self.messages.append(error_msg)
                 self.renderer.render_message(error_msg)
+
+        # 如果启用了流式输出且有 LLM 客户端，使用流式输出
+        elif self._stream_handler and self._llm_client:
+            self._handle_streaming_message(text)
+
         else:
             # 默认回显模式（用于测试）
             system_msg = Message(
@@ -757,6 +786,65 @@ class REPL:
             )
             self.messages.append(system_msg)
             self.renderer.render_message(system_msg)
+
+    def _handle_streaming_message(self, text: str) -> None:
+        """
+        处理流式消息
+
+        Args:
+            text: 用户消息
+        """
+        import asyncio
+
+        # 构建消息历史
+        messages = []
+        for msg in self.messages:
+            if msg.role == MessageRole.USER:
+                messages.append(Message(role=MessageRole.USER, content=msg.content))
+            elif msg.role == MessageRole.ASSISTANT:
+                messages.append(Message(role=MessageRole.ASSISTANT, content=msg.content))
+
+        # 添加当前消息
+        messages.append(Message(role=MessageRole.USER, content=text))
+
+        # 系统提示
+        system = [Message(
+            role=MessageRole.SYSTEM,
+            content="You are GrassFlow AI assistant. Help users with workflow creation and management."
+        )]
+
+        try:
+            # 显示助手消息头
+            if HAS_RICH:
+                self.console.print(Text("  Assistant: ", style="bold blue"), end="")
+
+            # 运行流式输出
+            response = asyncio.run(
+                self._stream_handler.stream_llm_response(
+                    self._llm_client,
+                    messages,
+                    system=system,
+                )
+            )
+
+            # 记录助手消息
+            if response:
+                assistant_msg = Message(MessageRole.ASSISTANT, response)
+                self.messages.append(assistant_msg)
+
+        except KeyboardInterrupt:
+            # 用户中断
+            if self._stream_handler:
+                self._stream_handler.interrupt()
+            if HAS_RICH:
+                self.console.print("\n[dim]  Interrupted[/dim]")
+            else:
+                print("\nInterrupted")
+
+        except Exception as e:
+            error_msg = Message(MessageRole.ERROR, str(e))
+            self.messages.append(error_msg)
+            self.renderer.render_message(error_msg)
 
     def _execute_workflow(self, filepath: str) -> None:
         """执行工作流"""
@@ -999,27 +1087,33 @@ class REPL:
 
 def create_repl(
     on_message: Optional[Callable[[str], Optional[str]]] = None,
+    enable_streaming: bool = True,
 ) -> REPL:
     """
     创建 REPL 实例
 
     Args:
         on_message: 消息处理回调
+        enable_streaming: 是否启用流式输出
 
     Returns:
         REPL 实例
     """
-    return REPL(on_message=on_message)
+    return REPL(on_message=on_message, enable_streaming=enable_streaming)
 
 
-def run_repl(on_message: Optional[Callable[[str], Optional[str]]] = None) -> None:
+def run_repl(
+    on_message: Optional[Callable[[str], Optional[str]]] = None,
+    enable_streaming: bool = True,
+) -> None:
     """
     运行 REPL
 
     Args:
         on_message: 消息处理回调
+        enable_streaming: 是否启用流式输出
     """
-    repl = create_repl(on_message)
+    repl = create_repl(on_message, enable_streaming)
     repl.run()
 
 

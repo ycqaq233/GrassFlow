@@ -757,5 +757,12 @@ def path():
         sys.exit(1)
 
 
+@main.command()
+def repl():
+    """启动交互式 REPL 会话"""
+    from tui.repl import run_repl
+    run_repl()
+
+
 if __name__ == "__main__":
     main()
