@@ -75,7 +75,10 @@ def _get_configured_models() -> Dict[str, List[Tuple[str, str, Optional[int]]]]:
                     # 尝试从已知模型获取显示名称
                     if provider_name in KNOWN_MODELS and model_id in KNOWN_MODELS[provider_name]:
                         display_name = KNOWN_MODELS[provider_name][model_id]["display"]
-                    context = model_config.limit.get("context") if model_config.limit else None
+                    context = model_config.limit.get("context") if (model_config.limit and model_config.limit.get("context")) else None
+                    # 如果配置中没有上下文窗口大小，从已知模型获取
+                    if context is None and provider_name in KNOWN_MODELS and model_id in KNOWN_MODELS[provider_name]:
+                        context = KNOWN_MODELS[provider_name][model_id]["context"]
                     models.append((model_id, display_name, context))
                 if models:
                     result[provider_name] = models

@@ -723,7 +723,7 @@ def config():
     pass
 
 
-@config.command()
+@config.command(name="get")
 @click.argument("key")
 @click.option("--scope", "-s", type=click.Choice(["global", "project", "merged"]), default="merged",
               help="配置作用域")
@@ -754,7 +754,7 @@ def config_get(key: str, scope: str):
         sys.exit(1)
 
 
-@config.command()
+@config.command(name="set")
 @click.argument("key")
 @click.argument("value")
 @click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
@@ -880,7 +880,7 @@ def _get_nested_attr(data: dict, key: str):
     return current
 
 
-@config.command()
+@config.command(name="edit")
 @click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
               help="编辑哪个作用域的配置")
 def config_edit(scope: str):
@@ -919,7 +919,7 @@ def config_edit(scope: str):
         sys.exit(1)
 
 
-@config.command()
+@config.command(name="validate")
 def config_validate():
     """验证配置文件格式"""
     try:
@@ -977,7 +977,7 @@ def config_validate():
         sys.exit(1)
 
 
-@config.command()
+@config.command(name="providers")
 def config_providers():
     """列出配置的 providers"""
     try:
@@ -1030,7 +1030,7 @@ def config_providers():
         sys.exit(1)
 
 
-@config.command()
+@config.command(name="path")
 def config_path():
     """显示配置文件路径"""
     try:
@@ -1047,7 +1047,7 @@ def config_path():
         sys.exit(1)
 
 
-@config.command()
+@config.command(name="reset")
 @click.option("--scope", "-s", type=click.Choice(["global", "project", "all"]), default="all",
               help="重置哪个作用域的配置")
 @click.option("--force", "-f", is_flag=True, help="强制重置，不提示确认")
@@ -1067,7 +1067,7 @@ def config_reset(scope: str, force: bool):
         sys.exit(1)
 
 
-@config.command()
+@config.command(name="api-key")
 @click.argument("provider")
 @click.argument("key")
 @click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
@@ -1088,7 +1088,7 @@ def config_api_key(provider: str, key: str, scope: str):
         sys.exit(1)
 
 
-@config.command()
+@config.command(name="show-key")
 @click.argument("provider")
 def config_show_key(provider: str):
     """显示 API Key（脱敏）"""
