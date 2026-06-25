@@ -1451,7 +1451,8 @@ Be concise and helpful. Use tools when needed to complete tasks."""
                 self.app.exit()
 
         # prompt_toolkit 的 on_invalidate 在每次渲染前被调用，是安全的 UI 线程回调
-        self.app.on_invalidate += _process_ui_updates_from_agent
+        # 使用 lambda 包装忽略 sender 参数（prompt_toolkit Event 系统会传入 sender）
+        self.app.on_invalidate += lambda _: _process_ui_updates_from_agent()
 
         # 使用 asyncio 事件循环运行
         try:
