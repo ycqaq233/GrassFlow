@@ -1092,27 +1092,48 @@ class SessionManager:
         """
         清空会话（删除消息和断点，但保留会话本身）
 
-        用于重新开始同一会话。
+        用于重新开始同一会话。所有操作在单个连接/事务中完成。
         """
         self.get_session(session_id)
 
-        self._db.delete_messages(session_id)
-        self._db.delete_checkpoints(session_id)
+        now = datetime.now().isoformat()
+        clear_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
 
-        session = self.get_session(session_id)
-        session.status = SessionStatus.IDLE
-        session.message_count = 0
-        session.updated_at = datetime.now()
-        self._db.update_session(session)
-
-        self._db.add_message(
-            SessionMessage(
-                session_id=session_id,
-                role=MessageRole.SYSTEM,
-                content="Session cleared",
-                metadata={"event": "session_cleared"},
+        with self._db._get_connection() as conn:
+            # 删除消息和断点
+            conn.execute(
+                "DELETE FROM session_messages WHERE session_id = ?",
+                (session_id,),
             )
-        )
+            conn.execute(
+                "DELETE FROM session_checkpoints WHERE session_id = ?",
+                (session_id,),
+            )
+            # 重置会话状态
+            conn.execute(
+                """
+                UPDATE sessions
+                SET status = ?, message_count = 0, updated_at = ?
+                WHERE id = ?
+                """,
+                (SessionStatus.IDLE.value, now, session_id),
+            )
+            # 添加清除记录消息
+            conn.execute(
+                """
+                INSERT INTO session_messages (id, session_id, role, content, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clear_msg_id,
+                    session_id,
+                    MessageRole.SYSTEM.value,
+                    "Session cleared",
+                    json.dumps({"event": "session_cleared"}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            conn.commit()
 
     def export_session(self, session_id: str) -> Dict[str, Any]:
         """

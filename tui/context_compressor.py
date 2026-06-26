@@ -324,8 +324,8 @@ def select_messages_for_compaction(
                 # 这一轮会超出预算，尝试在这轮内找到截断点
                 remaining = keep_recent_tokens - accumulated
                 if remaining > 0:
-                    # 在这轮内从后往前找截断点
-                    for j in range(turn_end - 1, turn_begin - 1, -1):
+                    # 在这轮内从前往后找截断点：保留最新的消息，截掉最旧的
+                    for j in range(turn_begin, turn_end):
                         partial_tokens = estimate_messages_tokens(messages[j:turn_end])
                         if partial_tokens <= remaining:
                             tail_start = j
@@ -794,12 +794,18 @@ class AutoCompactingContext:
         if self.compressor.should_compact(self.messages):
             result = await self.compressor.compact(self.messages)
             if result.tokens_saved > 0:
-                # 重建消息列表
-                self.messages = await self.compressor.compact_and_rebuild(
-                    self.messages,
-                    system_prompt=self.system_prompt,
-                    force=True,
+                # 直接用 compact() 的结果重建消息列表，不再二次调用 compact
+                rebuilt: List[ChatMessage] = []
+                if self.system_prompt:
+                    rebuilt.append(ChatMessage(role="system", content=self.system_prompt))
+                rebuilt.append(
+                    ChatMessage(
+                        role="system",
+                        content=f"[上下文压缩摘要 - 第 {self.compressor._compaction_count} 次压缩]\n\n{result.summary}",
+                    )
                 )
+                rebuilt.extend(result.tail_messages)
+                self.messages = rebuilt
                 self._notify_compact(result)
                 return result
 
