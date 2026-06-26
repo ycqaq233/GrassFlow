@@ -171,7 +171,7 @@ class ToolExecutor:
         session_id: str = "",
     ) -> ToolExecutionResult:
         """执行单个工具调用"""
-        tool_id = tool_call.name
+        tool_id = tool_call.id
         tool_args: Dict[str, Any] = {}
 
         # 解析参数
@@ -196,7 +196,7 @@ class ToolExecutor:
 
         start = time.monotonic()
         try:
-            result = await self._registry.invoke(tool_id, tool_args, ctx)
+            result = await self._registry.invoke(tool_call.name, tool_args, ctx)
             elapsed_ms = (time.monotonic() - start) * 1000
             return ToolExecutionResult(
                 tool_id=tool_id,
@@ -626,8 +626,18 @@ class AgentLoop:
                             msg.tool_calls = tcs
                         proto_messages.append(msg)  # 包含 system 消息，由 stream_chat 自动分离
 
+                    # 扁平化消息时保留 tool_call_id 和 name
+                    _stream_msgs = []
+                    for m in proto_messages:
+                        _msg = {"role": m.role, "content": m.content}
+                        if hasattr(m, "tool_call_id") and m.tool_call_id:
+                            _msg["tool_call_id"] = m.tool_call_id
+                        if hasattr(m, "name") and m.name:
+                            _msg["name"] = m.name
+                        _stream_msgs.append(_msg)
+
                     async for event in self._client.stream_chat(
-                        messages=[{"role": m.role, "content": m.content} for m in proto_messages],
+                        messages=_stream_msgs,
                         temperature=0.7,
                     ):
                         if self._abort_signal.is_set():
@@ -712,15 +722,15 @@ class AgentLoop:
                             )
                             break
 
+                        self._state.tool_call_count += 1
+                        result = await self._tool_executor.execute(tc)
+                        self._state.last_activity_time = time.monotonic()
+
                         yield LoopEvent.of(
                             LoopEventType.TOOL_CALL_END.value,
                             name=tc.name,
                             args=tc.arguments,
                         )
-
-                        self._state.tool_call_count += 1
-                        result = await self._tool_executor.execute(tc)
-                        self._state.last_activity_time = time.monotonic()
 
                         yield LoopEvent.of(
                             LoopEventType.TOOL_RESULT.value,
@@ -864,13 +874,18 @@ class AgentLoop:
 
         for attempt in range(self._max_retries):
             try:
-                # 转换消息格式并调用
+                # 转换消息格式并调用（保留 tool_call_id 和 name）
                 chat_messages: List[Dict[str, str]] = []
                 for m in messages:
-                    chat_messages.append({
+                    msg: Dict[str, Any] = {
                         "role": m.get("role", "user"),
                         "content": m.get("content", ""),
-                    })
+                    }
+                    if m.get("tool_call_id"):
+                        msg["tool_call_id"] = m["tool_call_id"]
+                    if m.get("name"):
+                        msg["name"] = m["name"]
+                    chat_messages.append(msg)
 
                 response = await self._client.chat(
                     messages=chat_messages,
@@ -879,6 +894,20 @@ class AgentLoop:
 
                 # 转换回 LLMResponse（ProtocolLLMClient.chat 返回 _LegacyLLMResponse）
                 raw_usage = response.usage if hasattr(response, 'usage') and response.usage else {}
+                # 提取 tool_calls（如果有）
+                tool_calls = None
+                if hasattr(response, 'tool_calls') and response.tool_calls:
+                    raw_tcs = response.tool_calls
+                    tool_calls = []
+                    for tc in raw_tcs:
+                        if isinstance(tc, ToolCall):
+                            tool_calls.append(tc)
+                        elif isinstance(tc, dict):
+                            tool_calls.append(ToolCall(
+                                id=tc.get("id", ""),
+                                name=tc.get("name", tc.get("function", {}).get("name", "")),
+                                arguments=tc.get("arguments", tc.get("function", {}).get("arguments", "")),
+                            ))
                 return LLMResponse(
                     text=response.content,
                     model=response.model,
@@ -888,6 +917,7 @@ class AgentLoop:
                         total_tokens=raw_usage.get("total_tokens", 0),
                     ),
                     finish_reason=response.finish_reason,
+                    tool_calls=tool_calls,
                 )
 
             except Exception as e:
