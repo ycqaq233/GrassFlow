@@ -19,11 +19,27 @@ try:
     from rich.syntax import Syntax
     from rich.columns import Columns
     from rich import box
+    from rich.markup import escape as _markup_escape
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
 
-from core.models import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+try:
+    from core.models import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+    HAS_MODELS = True
+except ImportError:
+    HAS_MODELS = False
+    # Provide stub types so the module loads even without core.models
+    from enum import Enum as _Enum
+    from typing import Any as _Any
+    class ExecutionStatus(str, _Enum):  # type: ignore[no-redef]
+        PENDING = "pending"
+        RUNNING = "running"
+        COMPLETED = "completed"
+        FAILED = "failed"
+        SKIPPED = "skipped"
+    ExecutionRecord = None  # type: ignore[assignment,misc]
+    AgentExecutionRecord = None  # type: ignore[assignment,misc]
 
 
 class NotificationLevel(Enum):
@@ -37,6 +53,14 @@ class NotificationLevel(Enum):
 
 class Display:
     """终端展示"""
+
+    STATUS_COLORS = {
+        "pending": "yellow",
+        "running": "blue",
+        "completed": "green",
+        "failed": "red",
+        "skipped": "dim",
+    }
 
     def __init__(self, console: Optional[Any] = None):
         """
@@ -82,7 +106,7 @@ class Display:
             print(f"Executing workflow: {workflow_name}")
             return
 
-        self.console.print(f"[bold green]Executing workflow:[/bold green] {workflow_name}")
+        self.console.print(f"[bold {self._theme_color('success', 'green')}]Executing workflow:[/bold {self._theme_color('success', 'green')}] {workflow_name}")
         self.console.print()
 
     def print_agent_status(self, agent_name: str, status: str, duration: Optional[int] = None) -> None:
@@ -95,20 +119,12 @@ class Display:
             duration: 耗时（毫秒）
         """
         if not HAS_RICH:
-            duration_str = f" ({duration}ms)" if duration else ""
+            duration_str = f" ({duration}ms)" if duration is not None else ""
             print(f"  {agent_name}: {status}{duration_str}")
             return
 
-        status_colors = {
-            "pending": "yellow",
-            "running": "blue",
-            "completed": "green",
-            "failed": "red",
-            "skipped": "dim",
-        }
-
-        color = status_colors.get(status, "white")
-        duration_str = f" ({duration}ms)" if duration else ""
+        color = self.STATUS_COLORS.get(status, "white")
+        duration_str = f" ({duration}ms)" if duration is not None else ""
 
         self.console.print(f"  [{color}]{agent_name}: {status}{duration_str}[/{color}]")
 
@@ -119,6 +135,10 @@ class Display:
         Args:
             record: 执行记录
         """
+        if not HAS_MODELS:
+            self.print_error("Cannot display execution result: core.models not available")
+            return
+
         if not HAS_RICH:
             print(f"\nExecution Complete")
             print(f"Status: {record.status.value}")
@@ -156,7 +176,7 @@ class Display:
             agent_table.add_column("Error", style="red")
 
             for name, agent_record in record.agent_records.items():
-                status_color = "green" if agent_record.status == ExecutionStatus.COMPLETED else "red"
+                status_color = self.STATUS_COLORS.get(agent_record.status.value, "white")
                 duration = f"{agent_record.duration_ms}ms" if agent_record.duration_ms else "N/A"
                 error = agent_record.error or ""
 
@@ -180,7 +200,7 @@ class Display:
             print(f"Error: {error}")
             return
 
-        self.console.print(f"[bold red]Error:[/bold red] {error}")
+        self.console.print(f"[bold {self._theme_color('error', 'red')}]Error:[/bold {self._theme_color('error', 'red')}] {error}")
 
     def print_success(self, message: str) -> None:
         """
@@ -193,7 +213,7 @@ class Display:
             print(message)
             return
 
-        self.console.print(f"[bold green]{message}[/bold green]")
+        self.console.print(f"[bold {self._theme_color('success', 'green')}]{message}[/bold {self._theme_color('success', 'green')}]")
 
     def print_info(self, message: str) -> None:
         """
@@ -207,6 +227,26 @@ class Display:
             return
 
         self.console.print(message)
+
+    # ========================================================================
+    # 主题辅助方法
+    # ========================================================================
+
+    def _theme_color(self, key: str, fallback: str) -> str:
+        """从活动主题获取颜色，失败时回退到 fallback"""
+        try:
+            from tui.themes import get_active_theme
+            return get_active_theme().get_color(key, fallback)
+        except Exception:
+            return fallback
+
+    def _get_code_theme(self) -> str:
+        """获取代码语法高亮主题"""
+        try:
+            from tui.themes import get_active_theme
+            return get_active_theme().code_theme
+        except Exception:
+            return "monokai"
 
     # ========================================================================
     # 工具调用渲染
@@ -307,20 +347,21 @@ class Display:
         # 渲染结果内容
         if result is not None:
             result_str = self._format_result(result)
-            if compact and len(result_str) > 500:
-                result_str = result_str[:500] + f"\n{prefix}  ... [dim](truncated, {len(result_str)} chars total)[/dim]"
+            original_len = len(result_str)
+            if compact and original_len > 500:
+                result_str = result_str[:500] + f"\n{prefix}  ... [dim](truncated, {original_len} chars total)[/dim]"
 
             if "\n" in result_str or len(result_str) > 80:
                 # 多行结果用 Panel 包裹
                 panel = Panel(
-                    result_str,
+                    Text(result_str, style=""),
                     border_style="dim",
                     box=box.SIMPLE,
                     padding=(0, 1),
                 )
-                self.console.print(Text(f"{prefix}  ", style=""), panel)
+                self.console.print(Text(f"{prefix}  ", style="") + panel)
             else:
-                self.console.print(f"{prefix}  {result_str}")
+                self.console.print(f"{prefix}  {_markup_escape(result_str)}")
 
     def render_tool_call_live(
         self,
@@ -496,11 +537,19 @@ class Display:
             sub.append(subtitle, style="dim")
             lines.append(sub)
 
+        if len(lines) > 1:
+            parts = []
+            for i, line in enumerate(lines):
+                if i > 0:
+                    parts.append(Text("\n"))
+                parts.append(line)
+            banner_content = Text.assemble(*parts)
+        else:
+            banner_content = lines[0]
+
         banner = Panel(
-            Text.assemble(*[Text("\n") if i > 0 else Text("") for i, _ in enumerate(lines)] + lines)
-            if len(lines) > 1
-            else lines[0],
-            border_style="green",
+            banner_content,
+            border_style=self._theme_color("success", "green"),
             box=box.DOUBLE,
         )
 
@@ -524,7 +573,7 @@ class Display:
             return
 
         if text:
-            self.console.rule(f"[{style}]{text}[/{style}]")
+            self.console.rule(f"[{self._theme_color('dim', style)}]{text}[/{self._theme_color('dim', style)}]")
         else:
             self.console.rule(style=style)
 
@@ -734,7 +783,7 @@ class Display:
         syntax = Syntax(
             code,
             language,
-            theme="monokai",
+            theme=self._get_code_theme(),
             line_numbers=line_numbers,
             background_color="default",
         )
@@ -919,5 +968,47 @@ class ProgressDisplay:
 
 
 # 全局展示实例
-display = Display()
-progress_display = ProgressDisplay()
+def create_display(console: Optional[Any] = None, **kwargs) -> Display:
+    """创建独立的 Display 实例
+
+    Args:
+        console: Rich Console 实例，None 则创建默认 Console
+        **kwargs: 传递给 Console() 的额外参数
+
+    Returns:
+        新的 Display 实例
+    """
+    if HAS_RICH and console is None:
+        console = Console(**kwargs)
+    return Display(console=console)
+
+
+def _create_default_console() -> Any:
+    """创建默认 Console，尝试应用主题"""
+    if not HAS_RICH:
+        return None
+    try:
+        from tui.themes import get_active_theme
+        from rich.theme import Theme
+        theme = get_active_theme()
+        rich_theme = Theme(styles=theme.get_rich_style().to_rich_theme())
+        return Console(theme=rich_theme)
+    except Exception:
+        return Console()
+
+
+def _default_display_factory() -> Display:
+    return Display(console=_create_default_console())
+
+
+_default_display = _default_display_factory()
+
+
+def get_display() -> Display:
+    """获取全局 Display 单例"""
+    return _default_display
+
+
+# 兼容旧代码的模块级名称
+display = _default_display
+progress_display = ProgressDisplay(console=_create_default_console() if HAS_RICH else None)

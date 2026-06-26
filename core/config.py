@@ -9,6 +9,7 @@ GrassFlow 配置管理
 配置优先级：环境变量 > 项目配置 > 全局配置 > 默认值
 """
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -75,6 +76,7 @@ class WorkflowConfig(BaseModel):
     max_parallel: int = 10
     default_on_fail: str = "stop"
     execution_timeout: int = 300
+    max_iterations: int = 30
 
 
 class DisplayConfig(BaseModel):
@@ -109,6 +111,26 @@ class GrassFlowConfig(BaseModel):
     db_path: str = "~/.Grass/grassflow.db"
     plugins_dir: str = "~/.Grass/plugins"
 
+    def model_post_init(self, __context: Any) -> None:
+        """Post-init: expand paths and warn on unknown fields."""
+        self.workflows_dir = os.path.expanduser(self.workflows_dir)
+        self.db_path = os.path.expanduser(self.db_path)
+        self.plugins_dir = os.path.expanduser(self.plugins_dir)
+
+        # Warn on extra (unknown) fields — likely typos
+        known_fields = set(self.model_fields.keys())
+        extra_fields = set(self.__pydantic_extra__ or {}) - known_fields
+        if extra_fields:
+            logger.warning(
+                "Unknown config keys (possible typos): %s. "
+                "Known fields: %s",
+                ", ".join(sorted(extra_fields)),
+                ", ".join(sorted(known_fields)),
+            )
+
+
+_NOT_LOADED = object()  # Sentinel: distinguishes 'not yet loaded' from 'loaded as None'
+
 
 class ConfigManager:
     """配置管理器
@@ -137,9 +159,9 @@ class ConfigManager:
         self.global_config_file = self.global_config_dir / "config.json"
         self.project_config_file = self.project_config_dir / "config.json"
 
-        self._global_config: Optional[GrassFlowConfig] = None
-        self._project_config: Optional[GrassFlowConfig] = None
-        self._merged_config: Optional[GrassFlowConfig] = None
+        self._global_config = _NOT_LOADED
+        self._project_config = _NOT_LOADED
+        self._merged_config = _NOT_LOADED
 
     def ensure_global_dir(self) -> None:
         """确保全局配置目录存在"""
@@ -155,7 +177,7 @@ class ConfigManager:
 
     def load_global_config(self) -> GrassFlowConfig:
         """加载全局配置"""
-        if self._global_config:
+        if self._global_config is not _NOT_LOADED:
             return self._global_config
 
         self.ensure_global_dir()
@@ -176,7 +198,7 @@ class ConfigManager:
 
     def load_project_config(self) -> Optional[GrassFlowConfig]:
         """加载项目配置"""
-        if self._project_config is not None:
+        if self._project_config is not _NOT_LOADED:
             return self._project_config
 
         if self.project_config_file.exists():
@@ -193,52 +215,71 @@ class ConfigManager:
         return self._project_config
 
     def _apply_env_vars(self, config: GrassFlowConfig) -> GrassFlowConfig:
-        """应用环境变量覆盖"""
-        data = config.model_dump()
+        """Apply env var overrides using recursive config-tree walking.
 
-        # 遍历环境变量
+        Env var format: GRASSFLOW_SECTION_FIELD=value
+        Underscores in field names are ambiguous with nesting separators,
+        so we walk the config tree level by level, trying longest-prefix match.
+        """
+        data = copy.deepcopy(config.model_dump())
+
         for key, value in os.environ.items():
-            if key.startswith(self.ENV_PREFIX):
-                # 移除前缀并转换为小写
-                config_key = key[len(self.ENV_PREFIX):].lower()
+            if not key.startswith(self.ENV_PREFIX):
+                continue
+            config_key = key[len(self.ENV_PREFIX):].lower()  # e.g. 'provider_openai_options_apikey'
+            parts = config_key.split('_')
+            if not parts:
+                continue
 
-                # 处理嵌套配置
-                parts = config_key.split("_")
-                if len(parts) >= 2:
-                    # 例如：GRASSFLOW_LLM_DEFAULT_MODEL -> llm.default_model
-                    section = parts[0]
-                    field = "_".join(parts[1:])
-                    if section in data and isinstance(data[section], dict):
-                        # 尝试转换类型
-                        try:
-                            # 尝试作为 JSON 解析
-                            value = json.loads(value)
-                        except (json.JSONDecodeError, ValueError):
-                            # 保持字符串
-                            pass
-                        data[section][field] = value
-                elif config_key in data:
-                    # 顶层配置
-                    try:
-                        value = json.loads(value)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                    data[config_key] = value
+            # Try to walk the config tree matching segments
+            current = data
+            matched_path: list[str] = []
+            remaining = list(parts)
+            success = True
+
+            while remaining:
+                # Try longest prefix first (greedy match for keys like 'default_model')
+                found = False
+                for length in range(len(remaining), 0, -1):
+                    candidate = '_'.join(remaining[:length])
+                    if isinstance(current, dict) and candidate in current:
+                        matched_path.append(candidate)
+                        next_val = current[candidate]
+                        if isinstance(next_val, dict) and remaining[length:]:
+                            # More segments remain; descend into nested dict
+                            current = next_val
+                            remaining = remaining[length:]
+                            found = True
+                            break
+                        elif not remaining[length:]:
+                            # Leaf node reached; set value
+                            try:
+                                parsed = json.loads(value)
+                            except (json.JSONDecodeError, ValueError):
+                                parsed = value
+                            current[candidate] = parsed
+                            found = True
+                            break
+                if not found:
+                    success = False
+                    break
+
+            if not success:
+                logger.debug(f"Env var {key} did not match any config path, skipped")
 
         return GrassFlowConfig(**data)
 
     def _merge_configs(self, base: GrassFlowConfig, override: GrassFlowConfig) -> GrassFlowConfig:
-        """合并配置，override 覆盖 base"""
-        base_data = base.model_dump()
-        override_data = override.model_dump()
+        """Merge configs, override takes precedence."""
+        base_data = copy.deepcopy(base.model_dump())
+        override_data = copy.deepcopy(override.model_dump())
 
-        # 深度合并
         def deep_merge(base: dict, override: dict) -> dict:
             result = base.copy()
             for key, value in override.items():
                 if key in result and isinstance(result[key], dict) and isinstance(value, dict):
                     result[key] = deep_merge(result[key], value)
-                elif key in override:  # 覆盖 override 中存在的字段，包括显式 None
+                else:
                     result[key] = value
             return result
 
@@ -250,7 +291,7 @@ class ConfigManager:
 
         优先级：环境变量 > 项目配置 > 全局配置 > 默认值
         """
-        if self._merged_config:
+        if self._merged_config is not _NOT_LOADED:
             return self._merged_config
 
         # 加载全局配置
@@ -276,7 +317,8 @@ class ConfigManager:
         with open(self.global_config_file, "w", encoding="utf-8") as f:
             json.dump(config.model_dump(), f, indent=2, ensure_ascii=False)
         self._global_config = config
-        self._merged_config = None  # 清除缓存
+        self._merged_config = _NOT_LOADED   # Invalidate merged cache
+        self._project_config = _NOT_LOADED  # Also invalidate project cache to force re-read on next merge
 
     def save_project_config(self, config: GrassFlowConfig) -> None:
         """保存项目配置"""
@@ -284,7 +326,8 @@ class ConfigManager:
         with open(self.project_config_file, "w", encoding="utf-8") as f:
             json.dump(config.model_dump(), f, indent=2, ensure_ascii=False)
         self._project_config = config
-        self._merged_config = None  # 清除缓存
+        self._merged_config = _NOT_LOADED  # Invalidate merged cache
+        self._global_config = _NOT_LOADED  # Also invalidate global cache to force re-read on next merge
 
     def update_global_config(self, **kwargs) -> GrassFlowConfig:
         """更新全局配置"""
@@ -402,16 +445,16 @@ class ConfigManager:
             scope: 重置范围（all, global, project）
         """
         if scope in ("all", "global"):
-            self._global_config = None
+            self._global_config = _NOT_LOADED
             if self.global_config_file.exists():
                 self.global_config_file.unlink()
 
         if scope in ("all", "project"):
-            self._project_config = None
+            self._project_config = _NOT_LOADED
             if self.project_config_file.exists():
                 self.project_config_file.unlink()
 
-        self._merged_config = None
+        self._merged_config = _NOT_LOADED
 
     @property
     def config(self) -> GrassFlowConfig:

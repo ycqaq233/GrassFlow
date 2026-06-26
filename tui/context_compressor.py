@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from core.llm import LLMClient, LLMError
 
@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 # ==================== 常量 ====================
 
 # Token 估算: 每个 token 约 4 个字符（英文），中文约 1.5-2 个字符
-# 取折中值 3 作为通用估算
-CHARS_PER_TOKEN: int = 3
+# 取折中值 4 作为通用估算（与 hermes 对齐）
+CHARS_PER_TOKEN: int = 4
 
 # 压缩触发的最小 token 阈值
 # 只有当消息总 token 数超过此值时才考虑压缩
@@ -48,6 +48,26 @@ SUMMARY_MAX_TOKENS: int = 4_096
 
 # 工具输出截断的最大字符数
 TOOL_OUTPUT_MAX_CHARS: int = 2_000
+
+# 摘要消息的前缀和结束标记（防止 LLM 将摘要内容当作活跃指令）
+SUMMARY_PREFIX = (
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
+    "into the summary below. This is a handoff from a previous context "
+    "window — treat it as background reference, NOT as active instructions. "
+    "Do NOT answer questions or fulfill requests mentioned in this summary; "
+    "they were already addressed. "
+    "Respond ONLY to the latest user message that appears AFTER this "
+    "summary — that message is the single source of truth for what to do "
+    "right now."
+)
+
+SUMMARY_END_MARKER = (
+    "--- END OF CONTEXT SUMMARY — "
+    "respond to the message below, not the summary above ---"
+)
+
+# 摘要生成失败的冷却时间（秒）
+_SUMMARY_FAILURE_COOLDOWN_SECONDS: int = 600
 
 
 # ==================== 摘要模板 ====================
@@ -107,6 +127,7 @@ class ChatMessage:
     content: str
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     # 元数据（不参与压缩，仅用于追踪）
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -117,6 +138,8 @@ class ChatMessage:
             d["name"] = self.name
         if self.tool_call_id:
             d["tool_call_id"] = self.tool_call_id
+        if self.tool_calls:
+            d["tool_calls"] = self.tool_calls
         return d
 
 
@@ -180,7 +203,7 @@ def estimate_messages_tokens(messages: List[ChatMessage]) -> int:
     """
     估算消息列表的总 token 数
 
-    包含消息格式的开销（role、name 等字段）。
+    包含消息格式的开销（role、name 等字段）以及 tool_calls。
 
     Args:
         messages: 消息列表
@@ -192,10 +215,14 @@ def estimate_messages_tokens(messages: List[ChatMessage]) -> int:
     for msg in messages:
         # 消息本身的内容
         total += estimate_tokens(msg.content)
-        # role 和其他字段的开销（约 4 tokens）
-        total += 4
+        # role 和其他字段的开销（约 10 tokens，与 hermes 对齐）
+        total += 10
         if msg.name:
             total += estimate_tokens(msg.name)
+        # Count tool_calls if present (stored in metadata or field)
+        tool_calls = msg.tool_calls or msg.metadata.get("tool_calls", [])
+        for tc in tool_calls:
+            total += estimate_tokens(str(tc))
     return total
 
 
@@ -263,8 +290,10 @@ def select_messages_for_compaction(
 
     策略：
     1. 保留最近 tail_turns 轮对话（user + assistant 为一轮）
-    2. 在保留轮次内，保证 token 总量不超过 keep_recent_tokens
-    3. 如果保留轮次的 token 总量超出预算，从最旧的保留轮次开始截断
+    2. 使用反向 token 预算遍历确定截断点
+    3. 软上限（1.5x 预算）+ 最小尾部消息数保护
+    4. 确保最后的 user 和 assistant 消息留在尾部
+    5. 对齐 tool_call/tool_result 边界
 
     Args:
         messages: 完整消息列表
@@ -280,64 +309,105 @@ def select_messages_for_compaction(
     # 找到所有 "轮次" 的起始位置（以 user 消息为标记）
     turn_starts: List[int] = []
     for i, msg in enumerate(messages):
-        # 跳过 system 消息，它们不计入轮次
         if msg.role == "user":
             turn_starts.append(i)
 
     if not turn_starts:
-        # 没有 user 消息，全部作为 tail
         return [], messages
 
-    # 保留最近 tail_turns 轮
     if len(turn_starts) <= tail_turns:
-        # 轮次不足，全部保留
         return [], messages
 
-    # 从最近的 tail_turns 轮开始
     recent_turn_start_idx = len(turn_starts) - tail_turns
-    recent_start = turn_starts[recent_turn_start_idx]
+    head_end = turn_starts[recent_turn_start_idx]
 
-    # 在保留区域内，检查 token 预算
-    # 从最近往最旧方向累加，超出预算则截断
-    tail_start = recent_start
+    # Backward walk with soft ceiling (1.5x budget)
+    soft_ceiling = int(keep_recent_tokens * 1.5)
+    min_tail = max(3, tail_turns * 2)  # at least 6 messages in tail
+    n = len(messages)
+    accumulated = 0
+    cut_idx = n
 
-    # 从最近一轮开始往回检查 token 预算
-    total_tokens = 0
-    for i in range(recent_turn_start_idx, len(turn_starts)):
-        turn_begin = turn_starts[i]
-        turn_end = turn_starts[i + 1] if i + 1 < len(turn_starts) else len(messages)
-        turn_msgs = messages[turn_begin:turn_end]
-        turn_tokens = estimate_messages_tokens(turn_msgs)
-        total_tokens += turn_tokens
+    for i in range(n - 1, head_end - 1, -1):
+        msg_tokens = estimate_messages_tokens([messages[i]])
+        if accumulated + msg_tokens > soft_ceiling and (n - i) >= min_tail:
+            break
+        accumulated += msg_tokens
+        cut_idx = i
 
-    # 如果保留轮次的 token 总量超出预算，从最旧的保留轮次开始截断
-    if total_tokens > keep_recent_tokens:
-        # 从最近的轮次往前遍历，找到截断点
-        accumulated = 0
-        for i in range(len(turn_starts) - 1, recent_turn_start_idx - 1, -1):
-            turn_begin = turn_starts[i]
-            turn_end = turn_starts[i + 1] if i + 1 < len(turn_starts) else len(messages)
-            turn_msgs = messages[turn_begin:turn_end]
-            turn_tokens = estimate_messages_tokens(turn_msgs)
+    # Ensure at least min_tail messages protected
+    fallback_cut = max(head_end, n - min_tail)
+    cut_idx = min(cut_idx, fallback_cut)
 
-            if accumulated + turn_tokens > keep_recent_tokens:
-                # 这一轮会超出预算，尝试在这轮内找到截断点
-                remaining = keep_recent_tokens - accumulated
-                if remaining > 0:
-                    # 在这轮内从前往后找截断点：保留最新的消息，截掉最旧的
-                    for j in range(turn_begin, turn_end):
-                        partial_tokens = estimate_messages_tokens(messages[j:turn_end])
-                        if partial_tokens <= remaining:
-                            tail_start = j
-                            break
-                break
+    # If everything fits in budget, force cut after head
+    if cut_idx <= head_end:
+        cut_idx = max(fallback_cut, head_end + 1)
 
-            accumulated += turn_tokens
+    # Ensure last user message is in tail
+    cut_idx = _ensure_last_user_message_in_tail(messages, cut_idx, head_end)
+    # Ensure last assistant message is in tail
+    cut_idx = _ensure_last_assistant_message_in_tail(messages, cut_idx, head_end)
 
-    head = messages[:tail_start]
-    tail = messages[tail_start:]
+    # Align boundary backward to avoid splitting tool_call/result groups
+    cut_idx = _align_boundary_backward(messages, cut_idx)
+    # Align boundary forward past any orphan tool results
+    cut_idx = _align_boundary_forward(messages, cut_idx)
 
+    head = messages[:cut_idx]
+    tail = messages[cut_idx:]
     return head, tail
+
+
+def _ensure_last_user_message_in_tail(
+    messages: List[ChatMessage], cut_idx: int, head_end: int
+) -> int:
+    """Guarantee the most recent user message is in the protected tail."""
+    last_user_idx = -1
+    for i in range(len(messages) - 1, head_end - 1, -1):
+        if messages[i].role == "user":
+            last_user_idx = i
+            break
+    if last_user_idx >= 0 and last_user_idx < cut_idx:
+        logger.debug("Anchoring tail to last user message at index %d", last_user_idx)
+        return max(last_user_idx, head_end + 1)
+    return cut_idx
+
+
+def _ensure_last_assistant_message_in_tail(
+    messages: List[ChatMessage], cut_idx: int, head_end: int
+) -> int:
+    """Guarantee the most recent assistant message is in the protected tail."""
+    last_asst_idx = -1
+    for i in range(len(messages) - 1, head_end - 1, -1):
+        if messages[i].role == "assistant":
+            last_asst_idx = i
+            break
+    if last_asst_idx >= 0 and last_asst_idx < cut_idx:
+        logger.debug("Anchoring tail to last assistant message at index %d", last_asst_idx)
+        return max(last_asst_idx, head_end + 1)
+    return cut_idx
+
+
+def _align_boundary_backward(messages: List[ChatMessage], idx: int) -> int:
+    """Pull boundary backward to avoid splitting tool_call/result groups."""
+    if idx <= 0 or idx >= len(messages):
+        return idx
+    check = idx - 1
+    # Walk backward past consecutive tool results
+    while check >= 0 and messages[check].role == "tool":
+        check -= 1
+    # If we landed on parent assistant with tool_calls, pull boundary before it
+    if (check >= 0 and messages[check].role == "assistant"
+            and messages[check].metadata.get("tool_calls")):
+        idx = check
+    return idx
+
+
+def _align_boundary_forward(messages: List[ChatMessage], idx: int) -> int:
+    """Push boundary forward past any orphan tool results."""
+    while idx < len(messages) and messages[idx].role == "tool":
+        idx += 1
+    return idx
 
 
 # ==================== 摘要生成 ====================
@@ -433,6 +503,14 @@ class ContextCompressor:
         self._previous_summary: Optional[str] = None
         self._compaction_count: int = 0
 
+        # Anti-thrashing protection (Fix #5)
+        self._ineffective_compression_count: int = 0
+        self._last_compression_savings_pct: float = 100.0
+
+        # Summary failure cooldown (Fix #10)
+        self._summary_failure_cooldown_until: float = 0.0
+        self._last_summary_error: Optional[str] = None
+
     @property
     def previous_summary(self) -> Optional[str]:
         """获取上一次的摘要"""
@@ -510,11 +588,18 @@ class ContextCompressor:
         # 条件 2: 接近上下文限制（使用率 > 75%）
         limit = self.usable_limit()
         if limit > 0 and current_tokens > limit * 0.75:
+            # Anti-thrashing: back off if recent compressions were ineffective
+            if self._ineffective_compression_count >= 2:
+                logger.warning(
+                    "Compression skipped — last %d compressions saved <10%% each.",
+                    self._ineffective_compression_count,
+                )
+                return False
             return True
 
         return False
 
-    async def _generate_summary(self, messages: List[ChatMessage]) -> str:
+    async def _generate_summary(self, messages: List[ChatMessage]) -> Optional[str]:
         """
         使用 LLM 生成消息摘要
 
@@ -522,11 +607,15 @@ class ContextCompressor:
             messages: 需要摘要的消息列表
 
         Returns:
-            生成的摘要文本
-
-        Raises:
-            LLMError: LLM 调用失败
+            生成的摘要文本，失败时返回静态 fallback 摘要
         """
+        import time
+
+        now = time.monotonic()
+        if now < self._summary_failure_cooldown_until:
+            logger.debug("Skipping summary during cooldown")
+            return None
+
         prompt = build_compaction_prompt(
             messages_to_compact=messages,
             previous_summary=self._previous_summary,
@@ -543,12 +632,50 @@ class ContextCompressor:
             if not summary:
                 raise LLMError("LLM 返回了空摘要")
 
+            self._previous_summary = summary
+            self._summary_failure_cooldown_until = 0.0
+            self._last_summary_error = None
             return summary
 
-        except LLMError:
-            raise
+        except LLMError as e:
+            err_str = str(e).lower()
+            # Transient errors: short cooldown, return fallback
+            is_transient = any(k in err_str for k in ["timeout", "rate limit", "429", "502", "504"])
+            cooldown = 30 if is_transient else _SUMMARY_FAILURE_COOLDOWN_SECONDS
+            self._summary_failure_cooldown_until = time.monotonic() + cooldown
+            self._last_summary_error = str(e)
+            logger.warning("Summary generation failed: %s. Cooldown %ds.", e, cooldown)
+            return self._build_static_fallback_summary(messages, reason=str(e))
         except Exception as e:
-            raise LLMError(f"摘要生成失败: {e}")
+            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+            self._last_summary_error = str(e)
+            logger.warning("Summary generation failed: %s", e)
+            return self._build_static_fallback_summary(messages, reason=str(e))
+
+    def _build_static_fallback_summary(
+        self, messages: List[ChatMessage], reason: Optional[str] = None
+    ) -> str:
+        """Build a deterministic handoff when the LLM summarizer is unavailable."""
+        user_asks: List[str] = []
+        assistant_actions: List[str] = []
+
+        for msg in messages:
+            text = msg.content[:300] if msg.content else ""
+            if msg.role == "user" and text:
+                user_asks.append(text)
+            elif msg.role == "assistant" and text:
+                assistant_actions.append(text[:200])
+
+        active_task = user_asks[-1] if user_asks else "Unknown."
+        actions = "; ".join(assistant_actions[-5:]) if assistant_actions else "None recoverable."
+        reason_text = f" Reason: {reason}." if reason else ""
+
+        return (
+            f"## Historical Task Snapshot\n{active_task}\n\n"
+            f"## Goal\nRecovered from deterministic fallback — LLM summarizer was unavailable.{reason_text}\n\n"
+            f"## Completed Actions\n{actions}\n\n"
+            f"## Constraints\nThis fallback was generated locally. Prefer verifying current state."
+        )
 
     async def compact(
         self,
@@ -620,6 +747,9 @@ class ContextCompressor:
 
         # 生成摘要
         summary = await self._generate_summary(head)
+        if summary is None:
+            logger.warning("Summary generation returned None — using fallback")
+            summary = self._build_static_fallback_summary(head)
 
         # 计算压缩后的 token 数
         summary_msg = ChatMessage(role="system", content=summary)
@@ -630,6 +760,14 @@ class ContextCompressor:
         # 更新状态
         self._previous_summary = summary
         self._compaction_count += 1
+
+        # Anti-thrashing: track savings percentage
+        savings_pct = (tokens_saved / original_tokens * 100) if original_tokens > 0 else 0
+        self._last_compression_savings_pct = savings_pct
+        if savings_pct < 10:
+            self._ineffective_compression_count += 1
+        else:
+            self._ineffective_compression_count = 0
 
         logger.info(
             f"压缩完成: {original_tokens} -> {compacted_tokens} tokens "
@@ -644,6 +782,49 @@ class ContextCompressor:
             original_tokens=original_tokens,
             compacted_tokens=compacted_tokens,
         )
+
+    def _sanitize_tool_pairs(self, messages: List[ChatMessage]) -> List[ChatMessage]:
+        """Fix orphaned tool_call / tool_result pairs after compression."""
+        # Collect surviving tool_call_ids from assistant messages
+        surviving_call_ids: Set[str] = set()
+        for msg in messages:
+            if msg.role == "assistant":
+                for tc in msg.metadata.get("tool_calls", []):
+                    cid = tc.get("id", "") or tc.get("call_id", "")
+                    if cid:
+                        surviving_call_ids.add(cid)
+
+        # Collect tool result call_ids
+        result_call_ids: Set[str] = set()
+        for msg in messages:
+            if msg.role == "tool" and msg.tool_call_id:
+                result_call_ids.add(msg.tool_call_id)
+
+        # Remove orphaned results
+        orphaned_results = result_call_ids - surviving_call_ids
+        if orphaned_results:
+            messages = [m for m in messages if not (m.role == "tool" and m.tool_call_id in orphaned_results)]
+            logger.info("Sanitizer: removed %d orphaned tool result(s)", len(orphaned_results))
+
+        # Add stub results for orphaned calls
+        missing_results = surviving_call_ids - result_call_ids
+        if missing_results:
+            patched: List[ChatMessage] = []
+            for msg in messages:
+                patched.append(msg)
+                if msg.role == "assistant":
+                    for tc in msg.metadata.get("tool_calls", []):
+                        cid = tc.get("id", "") or tc.get("call_id", "")
+                        if cid in missing_results:
+                            patched.append(ChatMessage(
+                                role="tool",
+                                content="[Result from earlier conversation — see context summary above]",
+                                tool_call_id=cid,
+                            ))
+            messages = patched
+            logger.info("Sanitizer: added %d stub tool result(s)", len(missing_results))
+
+        return messages
 
     async def compact_and_rebuild(
         self,
@@ -677,16 +858,19 @@ class ContextCompressor:
         if system_prompt:
             rebuilt.append(ChatMessage(role="system", content=system_prompt))
 
-        # 添加压缩摘要
+        # 添加压缩摘要（带 REFERENCE ONLY 前缀和结束标记）
         rebuilt.append(
             ChatMessage(
                 role="system",
-                content=f"[上下文压缩摘要 - 第 {self._compaction_count} 次压缩]\n\n{result.summary}",
+                content=f"{SUMMARY_PREFIX}\n\n{result.summary}\n\n{SUMMARY_END_MARKER}",
             )
         )
 
         # 添加保留的最近消息
         rebuilt.extend(result.tail_messages)
+
+        # 修复孤立的 tool_call/tool_result 对
+        rebuilt = self._sanitize_tool_pairs(rebuilt)
 
         return rebuilt
 
@@ -694,6 +878,10 @@ class ContextCompressor:
         """重置压缩器状态"""
         self._previous_summary = None
         self._compaction_count = 0
+        self._ineffective_compression_count = 0
+        self._last_compression_savings_pct = 100.0
+        self._summary_failure_cooldown_until = 0.0
+        self._last_summary_error = None
 
 
 # ==================== 自动压缩包装器 ====================
@@ -761,6 +949,9 @@ class AutoCompactingContext:
         # 压缩事件回调
         self._on_compact_callbacks: List[Callable[[CompactionResult], None]] = []
 
+        # 防止压缩后立即再次压缩（Fix #1）
+        self._awaiting_real_usage: bool = False
+
     def on_compact(self, callback: Callable[[CompactionResult], None]) -> None:
         """
         注册压缩事件回调
@@ -790,6 +981,10 @@ class AutoCompactingContext:
         """
         self.messages.append(message)
 
+        # 如果刚完成压缩，等待真实 API usage 回来再决定是否再次压缩
+        if self._awaiting_real_usage:
+            return None
+
         # 检查是否需要压缩
         if self.compressor.should_compact(self.messages):
             result = await self.compressor.compact(self.messages)
@@ -801,11 +996,14 @@ class AutoCompactingContext:
                 rebuilt.append(
                     ChatMessage(
                         role="system",
-                        content=f"[上下文压缩摘要 - 第 {self.compressor._compaction_count} 次压缩]\n\n{result.summary}",
+                        content=f"{SUMMARY_PREFIX}\n\n{result.summary}\n\n{SUMMARY_END_MARKER}",
                     )
                 )
                 rebuilt.extend(result.tail_messages)
+                # 修复孤立的 tool_call/tool_result 对
+                rebuilt = self.compressor._sanitize_tool_pairs(rebuilt)
                 self.messages = rebuilt
+                self._awaiting_real_usage = True
                 self._notify_compact(result)
                 return result
 
@@ -826,6 +1024,11 @@ class AutoCompactingContext:
         return await self.add_message(
             ChatMessage(role="tool", content=content, name=name, tool_call_id=tool_call_id)
         )
+
+    def update_from_response(self, prompt_tokens: int) -> None:
+        """Clear awaiting flag when real usage arrives from API."""
+        if prompt_tokens > 0:
+            self._awaiting_real_usage = False
 
     def get_messages(self) -> List[Dict[str, Any]]:
         """

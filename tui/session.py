@@ -15,6 +15,7 @@ GrassFlow REPL 会话管理器
 
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -130,25 +131,43 @@ class SessionDatabase:
             db_path: 数据库文件路径，默认与 core/db.py 共用 ~/.Grass/grassflow.db
         """
         if db_path is None:
-            from core.config import config_manager
-            db_path = Path(
-                config_manager.get("db_path", "~/.Grass/grassflow.db")
-            ).expanduser()
+            from tui.config_integration import get_db_path
+            db_path = Path(get_db_path()).expanduser()
 
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = None
+        self._init_connection()
         self._init_tables()
 
+    def _init_connection(self) -> None:
+        """Initialize the singleton database connection."""
+        self._conn = sqlite3.connect(
+            str(self.db_path),
+            check_same_thread=False,
+            timeout=5.0,
+        )
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+
     def _get_connection(self) -> sqlite3.Connection:
-        """获取数据库连接"""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        """获取数据库连接（单例模式）"""
+        if self._conn is None:
+            self._init_connection()
+        return self._conn
+
+    def close(self) -> None:
+        """Close the database connection."""
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     def _init_tables(self) -> None:
         """创建会话相关表"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -205,8 +224,8 @@ class SessionDatabase:
 
     def create_session(self, info: SessionInfo) -> SessionInfo:
         """创建新会话"""
-        now = datetime.now().isoformat()
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             conn.execute(
                 """
                 INSERT INTO sessions (id, title, workflow_name, status, directory,
@@ -221,8 +240,8 @@ class SessionDatabase:
                     info.directory,
                     json.dumps(info.metadata, ensure_ascii=False),
                     info.message_count,
-                    info.created_at.isoformat() if info.created_at else now,
-                    info.updated_at.isoformat() if info.updated_at else now,
+                    info.created_at.isoformat(),
+                    info.updated_at.isoformat(),
                 ),
             )
             conn.commit()
@@ -230,7 +249,8 @@ class SessionDatabase:
 
     def get_session(self, session_id: str) -> Optional[SessionInfo]:
         """根据 ID 获取会话"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute(
                 """
                 SELECT id, title, workflow_name, status, directory,
@@ -258,7 +278,8 @@ class SessionDatabase:
 
     def update_session(self, info: SessionInfo) -> None:
         """更新会话信息"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             conn.execute(
                 """
                 UPDATE sessions
@@ -281,7 +302,8 @@ class SessionDatabase:
 
     def delete_session(self, session_id: str) -> bool:
         """删除会话（级联删除消息和断点）"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             conn.commit()
             return cursor.rowcount > 0
@@ -306,7 +328,8 @@ class SessionDatabase:
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute(
                 f"""
                 SELECT id, title, workflow_name, status, directory,
@@ -339,7 +362,8 @@ class SessionDatabase:
 
     def add_message(self, message: SessionMessage) -> SessionMessage:
         """添加消息"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             conn.execute(
                 """
                 INSERT INTO session_messages (id, session_id, role, content, metadata, created_at)
@@ -386,7 +410,8 @@ class SessionDatabase:
             query += " LIMIT ? OFFSET ?"
             params.extend([limit, offset])
 
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute(query, params)
             rows = cursor.fetchall()
 
@@ -406,7 +431,8 @@ class SessionDatabase:
         self, session_id: str, count: int = 20
     ) -> List[SessionMessage]:
         """获取最近 N 条消息（用于 REPL 上下文恢复）"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute(
                 """
                 SELECT id, session_id, role, content, metadata, created_at
@@ -436,7 +462,8 @@ class SessionDatabase:
 
     def delete_messages(self, session_id: str) -> int:
         """删除会话的所有消息"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute(
                 "DELETE FROM session_messages WHERE session_id = ?",
                 (session_id,),
@@ -448,7 +475,8 @@ class SessionDatabase:
 
     def save_checkpoint(self, checkpoint: SessionCheckpoint) -> SessionCheckpoint:
         """保存断点"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             conn.execute(
                 """
                 INSERT INTO session_checkpoints (id, session_id, workflow_state, error, created_at)
@@ -469,7 +497,8 @@ class SessionDatabase:
         self, session_id: str
     ) -> Optional[SessionCheckpoint]:
         """获取最新的断点"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute(
                 """
                 SELECT id, session_id, workflow_state, error, created_at
@@ -495,7 +524,8 @@ class SessionDatabase:
 
     def list_checkpoints(self, session_id: str) -> List[SessionCheckpoint]:
         """列出会话的所有断点"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute(
                 """
                 SELECT id, session_id, workflow_state, error, created_at
@@ -520,13 +550,55 @@ class SessionDatabase:
 
     def delete_checkpoints(self, session_id: str) -> int:
         """删除会话的所有断点"""
-        with self._get_connection() as conn:
+        with self._lock:
+            conn = self._get_connection()
             cursor = conn.execute(
                 "DELETE FROM session_checkpoints WHERE session_id = ?",
                 (session_id,),
             )
             conn.commit()
             return cursor.rowcount
+
+    def clear_session_data(self, session_id: str) -> None:
+        """Clear all messages and checkpoints for a session, then insert a system message.
+
+        All operations in a single transaction.
+        """
+        now = datetime.now().isoformat()
+        clear_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+        with self._lock:
+            conn = self._get_connection()
+            conn.execute(
+                "DELETE FROM session_messages WHERE session_id = ?",
+                (session_id,),
+            )
+            conn.execute(
+                "DELETE FROM session_checkpoints WHERE session_id = ?",
+                (session_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO session_messages (id, session_id, role, content, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clear_msg_id,
+                    session_id,
+                    MessageRole.SYSTEM.value,
+                    "Session cleared",
+                    json.dumps({"event": "session_cleared"}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE sessions
+                SET status = ?, message_count = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (SessionStatus.IDLE.value, now, session_id),
+            )
+            conn.commit()
 
 
 # ==================== 会话管理器 ====================
@@ -572,6 +644,7 @@ class SessionManager:
         """
         self._db = db or SessionDatabase()
         self._active_sessions: Dict[str, SessionInfo] = {}
+        self._lock = threading.Lock()
 
     @property
     def db(self) -> SessionDatabase:
@@ -614,7 +687,8 @@ class SessionManager:
         )
 
         self._db.create_session(session)
-        self._active_sessions[session.id] = session
+        with self._lock:
+            self._active_sessions[session.id] = session
 
         # 自动添加系统消息记录会话创建
         self._db.add_message(
@@ -641,20 +715,17 @@ class SessionManager:
         Raises:
             SessionNotFoundError: 会话不存在
         """
-        # 先查缓存
-        if session_id in self._active_sessions:
-            session = self._db.get_session(session_id)
-            if session:
-                self._active_sessions[session_id] = session
-                return session
-            else:
-                del self._active_sessions[session_id]
+        # 先查缓存，命中则直接返回
+        with self._lock:
+            if session_id in self._active_sessions:
+                return self._active_sessions[session_id]
 
         session = self._db.get_session(session_id)
         if not session:
             raise SessionNotFoundError(f"Session '{session_id}' not found")
 
-        self._active_sessions[session_id] = session
+        with self._lock:
+            self._active_sessions[session_id] = session
         return session
 
     def list_sessions(
@@ -690,7 +761,8 @@ class SessionManager:
         Returns:
             是否成功删除
         """
-        self._active_sessions.pop(session_id, None)
+        with self._lock:
+            self._active_sessions.pop(session_id, None)
         return self._db.delete_session(session_id)
 
     def rename_session(self, session_id: str, new_title: str) -> SessionInfo:
@@ -960,8 +1032,8 @@ class SessionManager:
             )
         )
 
-        # 如果会话之前是 BUSY 状态，重置为 IDLE
-        if session.status == SessionStatus.BUSY:
+        # 恢复会话时，非 IDLE 状态都重置为 IDLE
+        if session.status != SessionStatus.IDLE:
             session.status = SessionStatus.IDLE
             session.updated_at = datetime.now()
             self._db.update_session(session)
@@ -1092,48 +1164,10 @@ class SessionManager:
         """
         清空会话（删除消息和断点，但保留会话本身）
 
-        用于重新开始同一会话。所有操作在单个连接/事务中完成。
+        用于重新开始同一会话。
         """
         self.get_session(session_id)
-
-        now = datetime.now().isoformat()
-        clear_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
-
-        with self._db._get_connection() as conn:
-            # 删除消息和断点
-            conn.execute(
-                "DELETE FROM session_messages WHERE session_id = ?",
-                (session_id,),
-            )
-            conn.execute(
-                "DELETE FROM session_checkpoints WHERE session_id = ?",
-                (session_id,),
-            )
-            # 重置会话状态
-            conn.execute(
-                """
-                UPDATE sessions
-                SET status = ?, message_count = 0, updated_at = ?
-                WHERE id = ?
-                """,
-                (SessionStatus.IDLE.value, now, session_id),
-            )
-            # 添加清除记录消息
-            conn.execute(
-                """
-                INSERT INTO session_messages (id, session_id, role, content, metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    clear_msg_id,
-                    session_id,
-                    MessageRole.SYSTEM.value,
-                    "Session cleared",
-                    json.dumps({"event": "session_cleared"}, ensure_ascii=False),
-                    now,
-                ),
-            )
-            conn.commit()
+        self._db.clear_session_data(session_id)
 
     def export_session(self, session_id: str) -> Dict[str, Any]:
         """
@@ -1162,6 +1196,12 @@ class SessionManager:
             导入的会话信息
         """
         session = SessionInfo(**data["session"])
+
+        # 如果会话已存在，先删除旧数据
+        with self._lock:
+            self._active_sessions.pop(session.id, None)
+        self._db.delete_session(session.id)
+
         self._db.create_session(session)
 
         for msg_data in data.get("messages", []):
@@ -1172,6 +1212,8 @@ class SessionManager:
             ckpt = SessionCheckpoint(**ckpt_data)
             self._db.save_checkpoint(ckpt)
 
+        with self._lock:
+            self._active_sessions[session.id] = session
         return session
 
 

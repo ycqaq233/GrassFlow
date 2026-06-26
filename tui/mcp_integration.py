@@ -28,7 +28,39 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.tool_registry import (
+    MCPToolAdapter,
+    ToolDef,
+    ToolRegistry,
+    ToolSource,
+    get_default_registry,
+)
+
 logger = logging.getLogger(__name__)
+
+# ==================== stderr 日志 ====================
+
+_mcp_stderr_log_fh = None
+
+def _get_mcp_stderr_log():
+    """Return a file handle for MCP subprocess stderr.
+    Falls back to os.devnull if log dir creation fails.
+    """
+    global _mcp_stderr_log_fh
+    if _mcp_stderr_log_fh is not None:
+        return _mcp_stderr_log_fh
+    try:
+        log_dir = Path.home() / '.Grass' / 'logs'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / 'mcp-stderr.log'
+        _mcp_stderr_log_fh = open(log_path, 'a', encoding='utf-8', errors='replace', buffering=1)
+        _mcp_stderr_log_fh.fileno()  # sanity check
+    except Exception:
+        try:
+            _mcp_stderr_log_fh = open(os.devnull, 'w', encoding='utf-8')
+        except Exception:
+            _mcp_stderr_log_fh = None
+    return _mcp_stderr_log_fh
 
 # ==================== 常量 ====================
 
@@ -97,6 +129,7 @@ class _ServerState:
     request_id: int = 0
     connected: bool = False
     stopping: bool = False
+    rpc_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def next_request_id(self) -> int:
         self.request_id += 1
@@ -216,11 +249,16 @@ class MCPManager:
         if tasks:
             # 等待所有服务器完成初始化（或失败），设置超时
             done, pending = await asyncio.wait(tasks, timeout=10.0)
+            failed = 0
             for t in done:
                 if t.exception():
                     logger.error("MCP 服务器启动失败: %s", t.exception())
+                    failed += 1
             # pending 的任务仍在后台运行（长生命周期）
-            logger.info("MCP 服务器启动完成: %d/%d 就绪", len(done), len(tasks))
+            ready = len(done) - failed + len(pending)
+            logger.info("MCP 服务器启动完成: %d/%d 就绪", ready, len(tasks))
+            # Register discovered MCP tools into the global tool registry
+            self.register_tools_to_registry()
 
     async def stop_all(self) -> None:
         """停止所有 MCP 服务器"""
@@ -252,6 +290,9 @@ class MCPManager:
                 attempt = 0
                 state.connected = True
 
+                # Re-register tools after reconnect
+                self.register_tools_to_registry()
+
                 # 等待进程结束（或被停止）
                 if state.process:
                     await state.process.wait()
@@ -265,7 +306,9 @@ class MCPManager:
                 if attempt >= MAX_RECONNECT_ATTEMPTS:
                     logger.error("MCP 服务器 %r 进程反复退出，重连 %d 次后放弃", name, attempt)
                     break
-                logger.warning("MCP 服务器 %r 进程退出，准备重连 (%d/%d)", name, attempt, MAX_RECONNECT_ATTEMPTS)
+                delay = RECONNECT_BASE_DELAY * (2 ** (attempt - 1))
+                logger.warning("MCP 服务器 %r 进程退出，%.1fs 后重连 (%d/%d)", name, delay, attempt, MAX_RECONNECT_ATTEMPTS)
+                await asyncio.sleep(delay)
 
             except Exception as exc:
                 state.connected = False
@@ -297,11 +340,12 @@ class MCPManager:
         env = os.environ.copy()
         env.update(config.env)
 
+        errlog = _get_mcp_stderr_log()
         process = await asyncio.create_subprocess_exec(
             *cmd_parts,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=errlog.fileno() if errlog is not None else asyncio.subprocess.DEVNULL,
             env=env,
             cwd=config.cwd,
         )
@@ -309,11 +353,24 @@ class MCPManager:
         state = self._servers[name]
         state.process = process
 
-        # MCP 握手：initialize -> notifications/initialized
-        await self._do_handshake(name, process, config)
+        try:
+            # MCP 握手：initialize -> notifications/initialized
+            await self._do_handshake(name, process, config)
 
-        # 工具发现
-        await self._discover_tools(name, process, config)
+            # 工具发现
+            await self._discover_tools(name, process, config)
+        except Exception:
+            # Kill leaked process on handshake/discovery failure
+            try:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=3.0)
+            except Exception:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            state.process = None
+            raise
 
         logger.info("MCP 服务器 %r 就绪，发现 %d 个工具", name, len(state.tools))
 
@@ -384,9 +441,9 @@ class MCPManager:
                 },
             },
         }
-        await self._send_message(process, init_request)
-
-        response = await self._read_message(process, timeout=config.connect_timeout)
+        async with state.rpc_lock:
+            await self._send_message(process, init_request)
+            response = await self._read_message(process, timeout=config.connect_timeout, expected_id=init_request['id'])
         if response is None:
             raise MCPConnectionError(f"服务器 {name!r} initialize 无响应")
         if "error" in response:
@@ -402,22 +459,24 @@ class MCPManager:
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
         }
-        await self._send_message(process, initialized_notification)
+        async with state.rpc_lock:
+            await self._send_message(process, initialized_notification)
         logger.debug("MCP 服务器 %r 握手完成", name)
 
     async def _discover_tools(self, name: str, process: asyncio.subprocess.Process,
                               config: MCPServerConfig) -> None:
         """通过 tools/list 发现服务器提供的工具"""
         state = self._servers[name]
+        state.tools.clear()  # Clear stale tools before rediscovery
 
         list_request = {
             "jsonrpc": "2.0",
             "id": state.next_request_id(),
             "method": "tools/list",
         }
-        await self._send_message(process, list_request)
-
-        response = await self._read_message(process, timeout=config.timeout)
+        async with state.rpc_lock:
+            await self._send_message(process, list_request)
+            response = await self._read_message(process, timeout=config.timeout, expected_id=list_request['id'])
         if response is None:
             logger.warning("MCP 服务器 %r tools/list 无响应", name)
             return
@@ -495,11 +554,12 @@ class MCPManager:
             },
         }
 
-        await self._send_message(target_state.process, call_request)
-
-        response = await self._read_message(
-            target_state.process, timeout=target_state.config.timeout
-        )
+        async with target_state.rpc_lock:
+            await self._send_message(target_state.process, call_request)
+            response = await self._read_message(
+                target_state.process, timeout=target_state.config.timeout,
+                expected_id=call_request['id']
+            )
         if response is None:
             raise MCPToolCallError(f"工具 {tool_name} 调用超时")
         if "error" in response:
@@ -527,7 +587,8 @@ class MCPManager:
 
     @staticmethod
     async def _read_message(process: asyncio.subprocess.Process,
-                            timeout: float = 30.0) -> Optional[Dict[str, Any]]:
+                            timeout: float = 30.0,
+                            expected_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """从 stdout 读取一条 JSON-RPC 消息
 
         协议格式：
@@ -541,22 +602,20 @@ class MCPManager:
         if process.stdout is None:
             return None
 
+        loop = asyncio.get_running_loop()
+        msg_deadline = loop.time() + timeout
+
         async def _read_line() -> Optional[bytes]:
             """读取一行（以 \\r\\n 结尾），使用 deadline 累计超时"""
-            buf = b""
-            deadline = asyncio.get_event_loop().time() + timeout
-            while True:
-                remaining = deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError()
-                ch = await asyncio.wait_for(
-                    process.stdout.read(1), timeout=remaining  # type: ignore[arg-type]
-                )
-                if not ch:
-                    return None  # EOF
-                buf += ch
-                if buf.endswith(b"\r\n"):
-                    return buf[:-2]  # 去掉 \r\n
+            remaining = msg_deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            line = await asyncio.wait_for(
+                process.stdout.readline(), timeout=remaining  # type: ignore[arg-type]
+            )
+            if not line:
+                return None  # EOF
+            return line.rstrip(b"\r\n")
 
         try:
             # 读取 Content-Length 头
@@ -566,7 +625,6 @@ class MCPManager:
                 if line is None:
                     return None
                 if line == b"":
-                    # 空行，头部结束
                     break
                 header_str = line.decode("utf-8").strip()
                 if header_str.lower().startswith("content-length:"):
@@ -576,19 +634,38 @@ class MCPManager:
                 logger.warning("收到无 Content-Length 的消息")
                 return None
 
-            # 读取消息体
+            # 读取消息体 -- 使用剩余 deadline
             body = b""
             remaining = content_length
             while remaining > 0:
+                time_left = msg_deadline - loop.time()
+                if time_left <= 0:
+                    raise asyncio.TimeoutError()
                 chunk = await asyncio.wait_for(
-                    process.stdout.read(remaining), timeout=timeout
+                    process.stdout.read(remaining), timeout=time_left
                 )
                 if not chunk:
                     return None  # EOF
                 body += chunk
                 remaining -= len(chunk)
 
-            return json.loads(body.decode("utf-8"))
+            msg = json.loads(body.decode("utf-8"))
+
+            # Skip notifications (no id field) -- read next message
+            if 'id' not in msg:
+                logger.debug("Skipping MCP notification: %s", msg.get('method', 'unknown'))
+                return await MCPManager._read_message(
+                    process, timeout=max(0, msg_deadline - loop.time()), expected_id=expected_id
+                )
+
+            # Validate response id matches request
+            if expected_id is not None and msg.get('id') != expected_id:
+                logger.warning(
+                    "MCP response id mismatch: expected %d, got %s",
+                    expected_id, msg.get('id')
+                )
+
+            return msg
 
         except asyncio.TimeoutError:
             logger.warning("读取 MCP 消息超时 (%.1fs)", timeout)
@@ -605,6 +682,34 @@ class MCPManager:
         for state in self._servers.values():
             tools.extend(state.tools.values())
         return tools
+
+    def register_tools_to_registry(self, registry: Optional[ToolRegistry] = None) -> int:
+        """Register all discovered MCP tools into the ToolRegistry.
+        Returns the number of tools registered.
+        """
+        if registry is None:
+            registry = get_default_registry()
+
+        count = 0
+        for state in self._servers.values():
+            for tool in state.tools.values():
+                if registry.has(tool.name):
+                    continue
+                adapter = MCPToolAdapter(
+                    server_name=tool.server_name,
+                    tool_id=tool.name,
+                    description=tool.description,
+                    parameters=tool.input_schema,
+                    mcp_client=self,
+                )
+                tool_def = adapter.to_tool_def()
+                try:
+                    registry.register_tool_def(tool_def)
+                    count += 1
+                except Exception as e:
+                    logger.warning("Failed to register MCP tool %s: %s", tool.name, e)
+        logger.info("Registered %d MCP tools into ToolRegistry", count)
+        return count
 
     def get_tool(self, tool_name: str) -> Optional[MCPTool]:
         """按名称获取工具"""

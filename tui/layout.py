@@ -293,6 +293,7 @@ def make_output_text_cb(
             result.append(("class:msg-system", "  Welcome to GrassFlow REPL!\n"))
             result.append(("class:msg-system", "  Type /help for available commands.\n"))
             result.append(("class:msg-system", "  Ctrl+X N for new session, Ctrl+X Q to exit.\n"))
+            result.append(("[SetCursorPosition]", ""))
             return result
 
         for entry in output:
@@ -310,6 +311,11 @@ def make_output_text_cb(
             # 添加时间戳 + 前缀
             result.append(("class:msg-system", f"[{timestamp}]"))
             result.append((f"class:{style}", f"{prefix}{entry.text}\n"))
+
+        # Place cursor at end of text so prompt_toolkit's scroll algorithm
+        # sees cursor_position.y = line_count-1 instead of 0. Without this,
+        # _scroll_when_linewrapping clamps vertical_scroll to 0 every render.
+        result.append(("[SetCursorPosition]", ""))
 
         return result
 
@@ -463,6 +469,9 @@ def build_layout(
         prompt_toolkit Layout 实例
     """
     # 输出区域（可滚动）
+    # Store last known rendered height (win.height is None before first render).
+    _last_height = {"value": 20}
+
     output_window = Window(
         content=FormattedTextControl(
             text=output_text_cb,
@@ -470,9 +479,24 @@ def build_layout(
         ),
         wrap_lines=True,
         always_hide_cursor=True,
+        allow_scroll_beyond_bottom=True,  # allow manual scroll past content end
         scroll_offsets=ScrollOffsets(top=2, bottom=2),
         right_margins=[ScrollbarMargin()],
     )
+
+    # Monkey-patch _scroll to track rendered height.
+    # prompt_toolkit's _scroll_when_linewrapping clamps vertical_scroll based
+    # on cursor_position.y. With [SetCursorPosition] at end of text, the cursor
+    # is at the last line, so _scroll always clamps to show the end.
+    _original_scroll = output_window._scroll
+
+    def _overridden_scroll(ui_content, width, height):
+        _last_height["value"] = height
+        _original_scroll(ui_content, width, height)
+
+    output_window._scroll = _overridden_scroll
+    # Expose _last_height for keybinding handlers (win.height is None pre-render).
+    output_window._gf_last_height = _last_height
 
     # 构建整体布局
     root_container = HSplit([
@@ -594,7 +618,6 @@ class KeybindingCallbacks:
         self.get_app = get_app
         self.get_output_window = get_output_window
         self.process_input = process_input
-        self.set_user_scrolled: Optional[Callable[[], None]] = None
 
 
 def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
@@ -756,8 +779,6 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     @kb.add("c-up")
     def handle_scroll_up(event: KeyPressEvent) -> None:
         """Ctrl+Up：向上滚动输出区域"""
-        if callbacks.set_user_scrolled:
-            callbacks.set_user_scrolled()
         if callbacks.get_output_window:
             win = callbacks.get_output_window()
             if win:
@@ -767,20 +788,19 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     @kb.add("c-down")
     def handle_scroll_down(event: KeyPressEvent) -> None:
         """Ctrl+Down：向下滚动输出区域"""
-        if callbacks.set_user_scrolled:
-            callbacks.set_user_scrolled()
         if callbacks.get_output_window:
             win = callbacks.get_output_window()
             if win:
-                win.vertical_scroll += 3
+                content_h = win.content.line_count
+                h = getattr(win, "_gf_last_height", {}).get("value", 20)
+                max_scroll = max(0, content_h - h)
+                win.vertical_scroll = min(win.vertical_scroll + 3, max_scroll)
                 event.app.invalidate()
 
     # 鼠标滚轮：prompt_toolkit 将滚轮事件映射为 <scroll-up>/<scroll-down>
     @kb.add("<scroll-up>")
     def handle_mouse_scroll_up(event: KeyPressEvent) -> None:
         """鼠标滚轮向上：向上滚动输出区域"""
-        if callbacks.set_user_scrolled:
-            callbacks.set_user_scrolled()
         if callbacks.get_output_window:
             win = callbacks.get_output_window()
             if win:
@@ -790,12 +810,13 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     @kb.add("<scroll-down>")
     def handle_mouse_scroll_down(event: KeyPressEvent) -> None:
         """鼠标滚轮向下：向下滚动输出区域"""
-        if callbacks.set_user_scrolled:
-            callbacks.set_user_scrolled()
         if callbacks.get_output_window:
             win = callbacks.get_output_window()
             if win:
-                win.vertical_scroll += 5
+                content_h = win.content.line_count
+                h = getattr(win, "_gf_last_height", {}).get("value", 20)
+                max_scroll = max(0, content_h - h)
+                win.vertical_scroll = min(win.vertical_scroll + 5, max_scroll)
                 event.app.invalidate()
 
     return kb
@@ -828,5 +849,4 @@ def build_keybindings_from_repl(repl: Any) -> KeyBindings:
         get_output_window=lambda: repl._output_window,
         process_input=repl._process_user_input,
     )
-    callbacks.set_user_scrolled = lambda: setattr(repl, "_user_scrolled", True)
     return build_keybindings(callbacks)

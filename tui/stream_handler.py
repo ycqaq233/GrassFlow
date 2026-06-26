@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import json
 import re
 import sys
 import time
@@ -30,7 +31,8 @@ except ImportError:
     HAS_RICH = False
 
 from core.llm_protocol import (
-    LLMEvent, LLMEventType, ProtocolLLMClient, ProtocolLLMManager,
+    LLMEvent, LLMEventType, LLMProtocolError, LLMErrorCode,
+    ProtocolLLMClient, ProtocolLLMManager,
     OpenAIChatProtocol, Endpoint, Auth, SSEFraming, Message
 )
 
@@ -127,8 +129,6 @@ class ThinkingParser:
 
     def __init__(self):
         self.state = ThinkingState.NORMAL
-        self._thinking_buffer: List[str] = []
-        self._normal_buffer: List[str] = []
         self._pending = ""  # 部分匹配缓冲区
 
     def feed(self, token: str) -> List[Tuple[ThinkingState, str]]:
@@ -201,8 +201,20 @@ class ThinkingParser:
                 # 找下一个 <thinking>
                 open_idx = self._pending.find(self.THINKING_OPEN)
                 if open_idx == -1:
-                    results.append((ThinkingState.NORMAL, self._pending))
-                    self._pending = ""
+                    # 没有找到，检查尾部部分匹配
+                    if len(self._pending) > len(self.THINKING_OPEN):
+                        for i in range(1, len(self.THINKING_OPEN)):
+                            if self._pending.endswith(self.THINKING_OPEN[:i]):
+                                safe = self._pending[:-i]
+                                if safe:
+                                    results.append((ThinkingState.NORMAL, safe))
+                                self._pending = self._pending[-i:]
+                                break
+                        else:
+                            results.append((ThinkingState.NORMAL, self._pending))
+                            self._pending = ""
+                    else:
+                        break
                 else:
                     if open_idx > 0:
                         results.append((ThinkingState.NORMAL, self._pending[:open_idx]))
@@ -223,8 +235,6 @@ class ThinkingParser:
     def reset(self) -> None:
         """重置解析器状态"""
         self.state = ThinkingState.NORMAL
-        self._thinking_buffer.clear()
-        self._normal_buffer.clear()
         self._pending = ""
 
 
@@ -252,7 +262,7 @@ class MarkdownSegmenter:
         self._code_buffer: List[str] = []
         self._text_buffer: List[str] = []
 
-    def feed(self, line: str) -> Optional[Tuple[str, Optional[str]]]:
+    def feed(self, line: str) -> Optional[Tuple[str, str, Optional[str]]]:
         """
         喂入一行文本
 
@@ -260,8 +270,8 @@ class MarkdownSegmenter:
             line: 一行文本
 
         Returns:
-            (类型, 内容) 或 None (未完成)
-            类型: "text", "code_start", "code_content", "code_end"
+            (类型, 内容, 语言) 或 None (未完成)
+            类型: "text", "code_end"
         """
         stripped = line.rstrip("\n")
 
@@ -271,15 +281,20 @@ class MarkdownSegmenter:
                 self._code_language = stripped[3:].strip()
                 self._code_buffer.clear()
 
-                # 先输出缓冲的文本
-                result = None
+                # 先输出缓冲的文本（如果有）
                 if self._text_buffer:
-                    result = ("text", "\n".join(self._text_buffer))
+                    text_result = ("text", "\n".join(self._text_buffer), None)
                     self._text_buffer.clear()
-
-                return result  # code_start 由 consumer 处理
+                    return text_result
+                return None
             else:
                 self._text_buffer.append(stripped)
+                # 空行或标题行表示段落边界，立即输出已缓冲内容
+                if not stripped or stripped.startswith("#"):
+                    if self._text_buffer:
+                        result = ("text", "\n".join(self._text_buffer), None)
+                        self._text_buffer.clear()
+                        return result
                 return None
         else:
             if stripped.startswith(self.CODE_FENCE):
@@ -293,10 +308,10 @@ class MarkdownSegmenter:
                 self._code_buffer.append(stripped)
                 return None
 
-    def flush(self) -> Optional[Tuple[str, Optional[str]]]:
+    def flush(self) -> Optional[Tuple[str, str, Optional[str]]]:
         """刷新缓冲区
 
-        注意：返回值可能是 2-tuple ("text", content) 或 3-tuple ("code_end", code, lang)。
+        返回 3-tuple (类型, 内容, 语言或None)。
         调用方需根据 result[0] 判断类型。
         """
         # 如果在代码块内刷新，输出未闭合的代码块内容
@@ -309,7 +324,7 @@ class MarkdownSegmenter:
             return ("code_end", code, lang)
 
         if self._text_buffer:
-            result = ("text", "\n".join(self._text_buffer))
+            result = ("text", "\n".join(self._text_buffer), None)
             self._text_buffer.clear()
             return result
         return None
@@ -465,6 +480,10 @@ class StreamHandler:
 
             return self._current_text
 
+        except LLMProtocolError as e:
+            if self.on_error:
+                self.on_error(e)
+            raise
         except Exception as e:
             if self.on_error:
                 self.on_error(e)
@@ -496,9 +515,13 @@ class StreamHandler:
 
         elif event.type == LLMEventType.PROVIDER_ERROR:
             error_msg = event.data.get("message", "Unknown error")
-            if HAS_RICH and self.console:
-                self.console.print(f"\n[bold red]Error:[/bold red] {error_msg}")
-            raise Exception(error_msg)
+            error_code = event.data.get("code", "unknown")
+            raise LLMProtocolError(
+                message=error_msg,
+                code=LLMErrorCode(error_code) if error_code in LLMErrorCode._value2member_map_ else LLMErrorCode.UNKNOWN,
+                module="StreamHandler",
+                method="_handle_event",
+            )
 
     def _process_token(self, token: str) -> None:
         """处理单个 token"""
@@ -526,11 +549,26 @@ class StreamHandler:
         # 兼容两种格式: {"tool_call": ToolCall(...)} 或 {"tool_name": ..., "arguments": ...}
         tc = event.data.get("tool_call")
         if tc is not None:
-            tool_name = getattr(tc, "name", None) or event.data.get("tool_name", "unknown")
-            tool_args = getattr(tc, "arguments", None) or {}
+            if isinstance(tc, dict):
+                tool_name = tc.get("name") or event.data.get("tool_name", "unknown")
+                raw_args = tc.get("arguments", {})
+            else:
+                tool_name = getattr(tc, "name", None) or event.data.get("tool_name", "unknown")
+                raw_args = getattr(tc, "arguments", None) or {}
         else:
             tool_name = event.data.get("tool_name", "unknown")
-            tool_args = event.data.get("arguments", {})
+            raw_args = event.data.get("arguments", {})
+
+        # 统一将 arguments 转为 dict
+        if isinstance(raw_args, str):
+            try:
+                tool_args = json.loads(raw_args)
+            except (json.JSONDecodeError, ValueError):
+                tool_args = {}
+        elif isinstance(raw_args, dict):
+            tool_args = raw_args
+        else:
+            tool_args = {}
 
         if self.on_tool_call:
             self.on_tool_call(tool_name, tool_args)
@@ -540,7 +578,8 @@ class StreamHandler:
         else:
             print(f"\nCalling tool: {tool_name}")
             if tool_args:
-                print(f"  args: {tool_args}")
+                safe_args = self._sanitize_tool_args(tool_args)
+                print(f"  args: {safe_args}")
 
     # -----------------------------------------------------------------------
     # 渲染方法
@@ -672,7 +711,8 @@ class StreamHandler:
             sys.stdout.flush()
 
     def _flush_output(self) -> None:
-        """刷新所有缓冲输出"""
+        """刷新所有缓冲输出（循环直到所有缓冲区为空）"""
+        # 步骤 1: 刷新 output buffer -> thinking parser
         flushed = self._output_buffer.flush()
         if flushed:
             if self.enable_thinking_render:
@@ -680,7 +720,13 @@ class StreamHandler:
             else:
                 self._render_raw(flushed)
 
-        # 刷新 Markdown 分割器缓冲区
+        # 步骤 2: 刷新 thinking parser 残留 -> _render_content
+        thinking_results = self._thinking_parser.flush()
+        for state, content in thinking_results:
+            if content:
+                self._render_content(content)
+
+        # 步骤 3: 刷新 markdown segmenter（_render_content 可能已添加内容）
         remaining = self._markdown_segmenter.flush()
         if remaining and HAS_RICH and self.console:
             if remaining[0] == "text":
@@ -689,16 +735,10 @@ class StreamHandler:
                 code, lang = remaining[1], remaining[2]
                 self._render_code_block(code, lang)
 
-        # 刷新行缓冲区
+        # 步骤 4: 刷新行缓冲区
         if self._line_buffer and HAS_RICH and self.console:
             self.console.print(Markdown(self._line_buffer))
             self._line_buffer = ""
-
-        # 刷新 thinking 解析器
-        thinking_results = self._thinking_parser.flush()
-        for state, content in thinking_results:
-            if content and HAS_RICH and self.console:
-                self._render_content(content)
 
     @staticmethod
     def _format_arg(value: Any) -> str:
@@ -710,6 +750,20 @@ class StreamHandler:
         elif isinstance(value, (dict, list)):
             return f"{{{len(value)} items}}" if isinstance(value, dict) else f"[{len(value)} items]"
         return str(value)
+
+    @staticmethod
+    def _sanitize_tool_args(tool_args: dict) -> dict:
+        """对工具参数做脱敏处理，防止敏感信息泄露"""
+        _SENSITIVE_KEYS = {"key", "token", "password", "secret", "api_key", "apikey", "authorization", "credential"}
+        safe = {}
+        for k, v in tool_args.items():
+            if any(s in k.lower() for s in _SENSITIVE_KEYS):
+                safe[k] = "[REDACTED]"
+            elif isinstance(v, str) and len(v) > 100:
+                safe[k] = v[:50] + "..." + v[-20:]
+            else:
+                safe[k] = v
+        return safe
 
 
 # ---------------------------------------------------------------------------
@@ -734,12 +788,10 @@ class LLMClientFactory:
             ProtocolLLMClient 实例，如果配置不完整则返回 None
         """
         try:
-            from core.config import config_manager
-            config = config_manager.load_config()
+            from tui.config_integration import load_config_readonly, get_model_config
 
-            # 获取默认 provider 和 model
-            provider_name = config.llm.default_provider
-            model_name = config.llm.default_model
+            config = load_config_readonly()
+            provider_name, model_name = get_model_config()
 
             # 获取 provider 配置
             provider_config = config.provider.get(provider_name)

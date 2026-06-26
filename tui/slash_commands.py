@@ -59,6 +59,7 @@ class CommandDef:
     args_hint: str      # "[provider:model]"
     handler_name: str   # "_cmd_model"
     visible: bool = True
+    subcommands: tuple = ()
 
 
 # ---------------------------------------------------------------------------
@@ -124,10 +125,10 @@ def _cmd_model(repl, args: List[str]) -> None:
 
 def _cmd_list_models(repl, args: List[str]) -> None:
     """列出可用模型"""
-    from core.config import config_manager
+    from tui.config_integration import load_config_readonly
 
     try:
-        config = config_manager.load_config()
+        config = load_config_readonly()
         lines = ["", "  Available models:"]
         for provider_name, provider_config in config.provider.items():
             lines.append(f"\n  [{provider_name}]")
@@ -211,11 +212,11 @@ def _cmd_theme(repl, args: List[str]) -> None:
 
 def _cmd_provider(repl, args: List[str]) -> None:
     """切换 provider"""
-    from core.config import config_manager
+    from tui.config_integration import load_config_readonly
 
     if not args:
         try:
-            config = config_manager.load_config()
+            config = load_config_readonly()
             default = config.llm.default_provider
             repl.add_output(f"Current provider: {default}\nUsage: /provider <provider_name>", role="system")
         except Exception:
@@ -223,6 +224,18 @@ def _cmd_provider(repl, args: List[str]) -> None:
         return
 
     name = args[0]
+    # Persist to session metadata
+    if repl.session:
+        repl.session.metadata["provider"] = name
+    # Persist to config
+    try:
+        from tui.config_integration import config_manager
+        config = config_manager.load_config()
+        config.llm.default_provider = name
+        config_manager.save_config(config)
+    except Exception as e:
+        repl.add_output(f"Failed to persist provider change: {e}", role="error")
+        return
     repl.add_output(f"Provider set to: {name}", role="system")
 
 
@@ -297,10 +310,10 @@ def _cmd_templates(repl, args: List[str]) -> None:
 
 def _cmd_config(repl, args: List[str]) -> None:
     """查看配置"""
-    from core.config import config_manager
+    from tui.config_integration import load_config_readonly
 
     try:
-        config = config_manager.load_config()
+        config = load_config_readonly()
         info = {
             "provider": config.llm.default_provider,
             "model": config.llm.default_model,
@@ -381,8 +394,8 @@ def _cmd_think(repl, args: List[str]) -> None:
         repl.session.metadata["thinking"] = parsed
 
     enabled = parsed.get("enabled", False)
-    effort = parsed.get("effort", "off")
     if enabled:
+        effort = parsed.get("effort", "medium")
         repl.add_output(f"Thinking mode: ON (effort: {effort})", role="system")
     else:
         repl.add_output("Thinking mode: OFF", role="system")
@@ -394,27 +407,19 @@ def _cmd_resume(repl, args: List[str]) -> None:
 
 
 def _cmd_retry(repl, args: List[str]) -> None:
-    """重试上一条消息"""
-    if not repl.session:
-        repl.add_output("No active session.", role="error")
-        return
-
-    # 获取最后一条用户消息
-    messages = repl.session.get_messages() if hasattr(repl.session, "get_messages") else []
-    last_user_msg = None
-    for msg in reversed(messages):
-        if hasattr(msg, "role") and msg.role == "user":
-            last_user_msg = msg
+    """重试上一条消息 — 直接重发，不依赖 fall-through 机制"""
+    # Find the last user message in output history
+    last_user_text = None
+    for entry in reversed(repl.output):
+        if entry.role == "user":
+            last_user_text = entry.text
             break
-
-    if not last_user_msg:
+    if not last_user_text:
         repl.add_output("No user message to retry.", role="error")
         return
-
-    content = last_user_msg.content if hasattr(last_user_msg, "content") else str(last_user_msg)
-    repl.add_output(f"Retrying: {content[:100]}...", role="system")
-    # 触发重新发送（通过 _process_user_input 流程）
-    repl._retry_last = True
+    repl.add_output(f"Retrying: {last_user_text[:100]}...", role="system")
+    # Directly invoke agent with the last user message
+    repl._handle_agent_message(last_user_text)
 
 
 def _cmd_fork(repl, args: List[str]) -> None:
@@ -452,9 +457,8 @@ def _cmd_agent(repl, args: List[str]) -> None:
 def _cmd_mcp(repl, args: List[str]) -> None:
     """MCP 服务器管理"""
     try:
-        from core.config import config_manager
-        config = config_manager.load_config()
-        mcp_servers = getattr(config, "mcp_servers", None)
+        from tui.config_integration import get_mcp_servers
+        mcp_servers = get_mcp_servers()
         if mcp_servers:
             lines = ["  MCP servers:"]
             for name, srv in mcp_servers.items():
@@ -657,37 +661,32 @@ def _handle_undo(repl) -> None:
     if not repl.output:
         repl.add_output("Nothing to undo.", role="system")
         return
-
-    # 从末尾向前查找第一个非 system 条目（跳过 "Undone:"/"Redone:" 等反馈消息）
+    # Skip system messages at the end
     idx = len(repl.output) - 1
     while idx >= 0 and repl.output[idx].role == "system":
         idx -= 1
-
     if idx < 0:
         repl.add_output("Nothing to undo.", role="system")
         return
-
     entry = repl.output.pop(idx)
     repl._undo_stack.append(entry)
+    # Clear redo stack — new undo invalidates redo history
+    repl._redo_stack.clear()
     repl.add_output(f"Undone: {entry.text[:80]}...", role="system")
 
 
 def _handle_redo(repl) -> None:
-    """重做"""
-    if not repl._undo_stack:
+    """重做 — 从 _redo_stack 恢复"""
+    if not repl._redo_stack:
         repl.add_output("Nothing to redo.", role="system")
         return
-
-    # 跳过 system 消息（与 _handle_undo 一致，避免自我污染）
-    while repl._undo_stack and repl._undo_stack[-1].role == "system":
-        repl._undo_stack.pop()
-
-    if not repl._undo_stack:
-        repl.add_output("Nothing to redo.", role="system")
-        return
-
-    entry = repl._undo_stack.pop()
-    repl.output.append(entry)
+    # 移除 undo 产生的 'Undone:' 反馈消息，避免残留污染输出
+    for i in range(len(repl.output) - 1, -1, -1):
+        if repl.output[i].role == "system" and repl.output[i].text.startswith("Undone:"):
+            repl.output.pop(i)
+            break
+    entry = repl._redo_stack.pop()
+    repl.add_output(entry.text, role=entry.role, metadata=getattr(entry, 'metadata', None))
 
 
 def _handle_list_models(repl) -> None:
@@ -914,8 +913,9 @@ COMMAND_REGISTRY: List[CommandDef] = [
         description="切换 YOLO 模式",
         category="Configuration",
         aliases=(),
-        args_hint="",
+        args_hint="[on|off|status]",
         handler_name="_cmd_yolo",
+        subcommands=("on", "off", "status"),
     ),
 
     # Info
@@ -989,7 +989,6 @@ _HANDLER_MAP: Dict[str, Callable] = {
     "_cmd_new_session": _cmd_new_session,
     "_cmd_clear": _cmd_clear,
     "_cmd_compact": _cmd_compact,
-    "_cmd_list_sessions": _cmd_list_sessions,
     "_cmd_init": _cmd_init,
     "_cmd_undo": _cmd_undo,
     "_cmd_redo": _cmd_redo,
@@ -1110,6 +1109,8 @@ class SlashCommandCompleter(Completer):
         "theme": ["default", "dark", "light", "cyber", "ocean"],
         "mcp": ["list", "start", "stop", "status", "add", "remove", "test"],
         "skills": ["list", "view", "search", "install"],
+        "yolo": ["on", "off", "status"],
+        "connect": ["openai", "anthropic", "deepseek", "ollama"],
     }
 
     def __init__(self):
@@ -1133,8 +1134,8 @@ class SlashCommandCompleter(Completer):
         # /model: 从 config 读取模型名补全
         if cmd_name == "model":
             try:
-                from core.config import config_manager
-                config = config_manager.load_config()
+                from tui.config_integration import load_config_readonly
+                config = load_config_readonly()
                 for provider_name, provider_config in config.provider.items():
                     if provider_config.models:
                         for model_name, model_info in provider_config.models.items():

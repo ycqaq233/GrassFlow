@@ -49,6 +49,7 @@ class GrassFlowTheme:
     label: str = "#DAA520"          # 标签色
 
     # UI 元素
+    code_theme: str = "monokai"        # Rich Syntax 高亮主题
     prompt_symbol: str = "❯"
     spinner_style: str = "dots"
     tool_prefix: str = "┊"
@@ -94,6 +95,7 @@ class GrassFlowTheme:
                 "status_critical": self.status_critical,
             },
             "ui": {
+                "code_theme": self.code_theme,
                 "prompt_symbol": self.prompt_symbol,
                 "spinner_style": self.spinner_style,
                 "tool_prefix": self.tool_prefix,
@@ -119,6 +121,7 @@ class GrassFlowTheme:
             text=colors.get("text", "#c9d1d9"),
             border=colors.get("border", "#CD7F32"),
             label=colors.get("label", "#DAA520"),
+            code_theme=ui.get("code_theme", "monokai"),
             prompt_symbol=ui.get("prompt_symbol", "❯"),
             spinner_style=ui.get("spinner_style", "dots"),
             tool_prefix=ui.get("tool_prefix", "┊"),

@@ -53,6 +53,7 @@ from core.tool_registry import (
     ToolSource,
     get_default_registry,
 )
+from tui.permission_handler import get_permission_handler, PermissionHandler
 
 logger = logging.getLogger(__name__)
 
@@ -160,10 +161,12 @@ class ToolExecutor:
         registry: Optional[ToolRegistry] = None,
         abort_signal: Optional[asyncio.Event] = None,
         agent_name: str = "",
+        permission_handler: Optional[PermissionHandler] = None,
     ):
         self._registry = registry or get_default_registry()
         self._abort_signal = abort_signal
         self._agent_name = agent_name
+        self._permission_handler = permission_handler or get_permission_handler()
 
     async def execute(
         self,
@@ -193,6 +196,35 @@ class ToolExecutor:
             call_id=tool_call.id,
             abort_signal=self._abort_signal,
         )
+
+        # --- 权限检查 ---
+        try:
+            tool_def = self._registry.get(tool_call.name)
+            perm_value = tool_def.permission.value if tool_def else "allow"
+            decision = self._permission_handler.check_permission(
+                tool_name=tool_call.name,
+                tool_args=tool_args,
+                permission=perm_value,
+            )
+            if not decision.approved:
+                if decision.needs_approval:
+                    # 尝试通过回调解析审批
+                    decision = await self._permission_handler.resolve_approval(
+                        tool_name=tool_call.name,
+                        description=decision.description,
+                        args_preview=decision.args_preview,
+                    )
+                if not decision.approved:
+                    return ToolExecutionResult(
+                        tool_id=tool_id,
+                        tool_name=tool_call.name,
+                        success=False,
+                        output=decision.message or f"工具 '{tool_call.name}' 权限检查未通过",
+                        is_error=True,
+                    )
+        except Exception as e:
+            logger.warning(f"Permission check failed for '{tool_call.name}': {e}")
+            # 权限检查异常不应阻塞执行，降级为允许
 
         start = time.monotonic()
         try:
@@ -263,6 +295,7 @@ class AgentLoop:
         base_url: Optional[str] = None,
         enable_doom_loop_detection: bool = True,
         tools: Optional[List[ToolDefinition]] = None,
+        generation_options: Optional[GenerationOptions] = None,
     ):
         """
         初始化 Agent Loop。
@@ -299,6 +332,7 @@ class AgentLoop:
         self._tool_executor = ToolExecutor(
             registry=self._tool_registry,
             abort_signal=self._abort_signal,
+            permission_handler=get_permission_handler(),
         )
 
         # 配置
@@ -307,6 +341,9 @@ class AgentLoop:
         self._default_system_prompt = system_prompt
         self._enable_doom_loop_detection = enable_doom_loop_detection
         self._extra_tools = tools or []
+        self._generation_options = generation_options or GenerationOptions(temperature=0.7)
+        self._provider_name = provider_name
+        self._model_name = model
 
         # 运行时状态
         self._state = LoopState()
@@ -350,12 +387,9 @@ class AgentLoop:
     # ---- 配置方法 ----
 
     def set_permission_callback(self, callback) -> None:
-        """设置许可请求回调。
-
-        callback 签名: async def callback(tool_id: str, permission: str) -> bool
-        返回 True 表示允许，False 表示拒绝。
-        """
+        """设置许可请求回调。"""
         self._permission_callback = callback
+        get_permission_handler().set_approval_callback(callback)
 
     def set_tools(self, tools: List[ToolDefinition]) -> None:
         """设置工具定义列表"""
@@ -388,6 +422,8 @@ class AgentLoop:
             last_activity_time=time.monotonic(),
         )
         self._abort_signal.clear()
+        self._state.current_model = self._model_name
+        self._state.current_provider = self._provider_name
 
         # 重置 Doom Loop 检测器
         if self._doom_detector:
@@ -481,6 +517,12 @@ class AgentLoop:
                             elapsed_ms=result.elapsed_ms,
                         )
 
+                        yield LoopEvent.of(
+                            LoopEventType.TOOL_CALL_END.value,
+                            name=tc.name,
+                            args=tc.arguments,
+                        )
+
                         # 构建 tool result 消息
                         tool_msg = Message(
                             role="tool",
@@ -567,6 +609,8 @@ class AgentLoop:
             last_activity_time=time.monotonic(),
         )
         self._abort_signal.clear()
+        self._state.current_model = self._model_name
+        self._state.current_provider = self._provider_name
 
         if self._doom_detector:
             try:
@@ -630,15 +674,21 @@ class AgentLoop:
                     _stream_msgs = []
                     for m in proto_messages:
                         _msg = {"role": m.role, "content": m.content}
-                        if hasattr(m, "tool_call_id") and m.tool_call_id:
+                        if m.tool_call_id:
                             _msg["tool_call_id"] = m.tool_call_id
-                        if hasattr(m, "name") and m.name:
+                        if m.name:
                             _msg["name"] = m.name
+                        if m.tool_calls:
+                            _msg["tool_calls"] = [
+                                {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
+                                for tc in m.tool_calls
+                            ]
                         _stream_msgs.append(_msg)
 
                     async for event in self._client.stream_chat(
                         messages=_stream_msgs,
-                        temperature=0.7,
+                        temperature=self._generation_options.temperature or 0.7,
+                        max_tokens=self._generation_options.max_tokens,
                     ):
                         if self._abort_signal.is_set():
                             break
@@ -744,6 +794,7 @@ class AgentLoop:
                             "role": "tool",
                             "content": result.output,
                             "tool_call_id": tc.id,
+                            "name": tc.name,
                         }
                         messages.append(tool_msg_data)
 
@@ -875,7 +926,7 @@ class AgentLoop:
         for attempt in range(self._max_retries):
             try:
                 # 转换消息格式并调用（保留 tool_call_id 和 name）
-                chat_messages: List[Dict[str, str]] = []
+                chat_messages: List[Dict[str, Any]] = []
                 for m in messages:
                     msg: Dict[str, Any] = {
                         "role": m.get("role", "user"),
@@ -889,7 +940,8 @@ class AgentLoop:
 
                 response = await self._client.chat(
                     messages=chat_messages,
-                    temperature=0.7,
+                    temperature=self._generation_options.temperature or 0.7,
+                    max_tokens=self._generation_options.max_tokens,
                 )
 
                 # 转换回 LLMResponse（ProtocolLLMClient.chat 返回 _LegacyLLMResponse）
@@ -1028,23 +1080,22 @@ def create_agent_loop_from_config(
         配置好的 AgentLoop 实例
     """
     try:
-        from core.config import config_manager
+        from tui.config_integration import load_config_readonly, get_model_config, get_api_key
 
-        config = config_manager.load_config()
-        provider_name = config.llm.default_provider or "deepseek"
-        model = config.llm.default_model or "deepseek-chat"
+        config = load_config_readonly()
+        provider_name, model = get_model_config()
 
         # 尝试获取 API Key
-        api_key = None
+        api_key = get_api_key(provider_name)
         base_url = None
 
-        # 从 provider 配置获取 api_key 和 base_url
+        # 从 provider 配置获取 base_url
         provider_config = config.provider.get(provider_name)
         if provider_config:
-            # 兼容 camelCase（opencode 格式）和 snake_case 两种命名
             opts = getattr(provider_config, "options", None)
             if opts:
-                api_key = getattr(opts, "apiKey", None) or getattr(opts, "api_key", None)
+                if not api_key:
+                    api_key = getattr(opts, "apiKey", None) or getattr(opts, "api_key", None)
                 base_url = getattr(opts, "baseURL", None) or getattr(opts, "base_url", None)
 
         # 特殊处理 ollama
@@ -1057,9 +1108,7 @@ def create_agent_loop_from_config(
             api_key=api_key,
             base_url=base_url,
             tool_registry=tool_registry,
-            max_iterations=config.workflow.execution_timeout
-            if hasattr(config.workflow, "execution_timeout")
-            else 30,
+            max_iterations=getattr(config.workflow, "max_iterations", 30),
         )
 
     except ImportError:

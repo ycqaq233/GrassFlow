@@ -153,6 +153,17 @@ def _split_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     yaml_content = content[3 : end_match.start() + 3]
     body = content[end_match.end() + 3 :]
 
+    # 优先使用 PyYAML（支持完整 YAML 语法）
+    try:
+        import yaml
+        loader = getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader
+        parsed = yaml.load(yaml_content, Loader=loader)
+        if isinstance(parsed, dict):
+            return parsed, body
+    except Exception:
+        pass
+
+    # 降级到简单解析器
     frontmatter = _parse_yaml_simple(yaml_content)
 
     return frontmatter, body
@@ -163,15 +174,13 @@ def _parse_yaml_simple(yaml_str: str) -> Dict[str, Any]:
 
     支持的特性：
     - key: value 标量
-    - key: [item1, item2] 内联列表
-    - key: |
-      多行字符串（简单支持）
-    - 嵌套 key（2 空格缩进）
+    - key: [item1, item2] 内联列表（带类型转换）
+    - 嵌套 key（任意缩进深度）
 
-    不支持的特性：
-    - 复杂嵌套（>2 层）
+    不支持的特性（使用 PyYAML 处理）：
+    - 多行字符串（|, >）
     - 锚点和引用
-    - 多文档
+    - 多文档流
 
     Args:
         yaml_str: YAML 格式的字符串
@@ -212,7 +221,7 @@ def _parse_yaml_simple(yaml_str: str) -> Dict[str, Any]:
             if value.startswith("[") and value.endswith("]"):
                 items = value[1:-1]
                 result[key] = [
-                    item.strip().strip("\"'")
+                    _coerce_scalar(item.strip())
                     for item in items.split(",")
                     if item.strip()
                 ]
@@ -230,9 +239,15 @@ def _parse_yaml_simple(yaml_str: str) -> Dict[str, Any]:
             else:
                 result[key] = value.strip("\"'")
 
-        # 嵌套 key（2 空格缩进）
-        elif line.startswith("  ") and ":" in line and current_key:
-            nested_key, _, nested_value = line.strip().partition(":")
+        # 嵌套 key（任意缩进深度）
+        elif current_key:
+            stripped_line = line.lstrip()
+            indent = len(line) - len(stripped_line)
+
+            if indent <= 0 or ":" not in stripped_line:
+                continue
+
+            nested_key, _, nested_value = stripped_line.partition(":")
             nested_key = nested_key.strip()
             nested_value = nested_value.strip()
 
@@ -248,7 +263,7 @@ def _parse_yaml_simple(yaml_str: str) -> Dict[str, Any]:
                 if nested_value.startswith("[") and nested_value.endswith("]"):
                     items = nested_value[1:-1]
                     result[current_key][nested_key] = [
-                        item.strip().strip("\"'")
+                        _coerce_scalar(item.strip())
                         for item in items.split(",")
                         if item.strip()
                     ]
@@ -275,6 +290,29 @@ def _is_float(value: str) -> bool:
         return "." in value
     except ValueError:
         return False
+
+
+def _coerce_scalar(value: str) -> Any:
+    """将字符串标量转换为适当的 Python 类型。
+
+    用于内联列表项的类型转换：
+    - true/yes/on -> True
+    - false/no/off -> False
+    - 整数字符串 -> int
+    - 浮点字符串 -> float
+    - 其他 -> 去除引号的字符串
+    """
+    if not value:
+        return ""
+    if value.lower() in ("true", "yes", "on"):
+        return True
+    if value.lower() in ("false", "no", "off"):
+        return False
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if _is_float(value):
+        return float(value)
+    return value.strip('"').strip("'")
 
 
 # ==================== 平台检查 ====================

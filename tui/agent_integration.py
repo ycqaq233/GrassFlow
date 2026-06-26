@@ -362,7 +362,7 @@ class AgentIntegration:
         self,
         text: str,
         console: Any = None,
-    ) -> None:
+    ) -> str:
         """降级回显模式：在无 Agent Loop 时直接回显用户输入
 
         Args:

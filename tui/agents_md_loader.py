@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -58,6 +59,7 @@ TRUNCATE_TAIL_RATIO = 0.2
 # ==================== Git 工具 ====================
 
 
+@lru_cache(maxsize=64)
 def get_git_root(start_dir: Path) -> Optional[Path]:
     """获取 git 仓库根目录。
 
@@ -69,23 +71,11 @@ def get_git_root(start_dir: Path) -> Optional[Path]:
     Returns:
         git 仓库根目录，不是 git 仓库返回 None
     """
-    # 方法 1：直接查找 .git 目录
+    # 方法 1：直接查找 .git（文件或目录均可，worktree 场景 .git 是文件）
     current = start_dir.resolve()
     for parent in [current, *current.parents]:
         if (parent / ".git").exists():
             return parent
-        # Windows: .git 可能是文件（worktree）
-        git_file = parent / ".git"
-        if git_file.is_file():
-            try:
-                content = git_file.read_text(encoding="utf-8").strip()
-                # gitdir: /path/to/.git/worktrees/name
-                if content.startswith("gitdir:"):
-                    # worktree 的 .git 文件指向实际 git 目录
-                    # 但我们只需要返回包含 .git 文件的目录即可
-                    return parent
-            except (OSError, UnicodeDecodeError):
-                pass
 
     # 方法 2：使用 git 命令
     try:
@@ -113,19 +103,24 @@ def get_git_root(start_dir: Path) -> Optional[Path]:
 # ==================== 文件查找 ====================
 
 
-def find_context_file(start_dir: Path) -> Tuple[Optional[Path], Optional[str]]:
+def find_context_file(
+    start_dir: Path,
+    git_root: Optional[Path] = None,
+) -> Tuple[Optional[Path], Optional[str]]:
     """查找上下文文件。
 
     按照 CONTEXT_FILE_CANDIDATES 的优先级查找，第一个匹配的胜出。
 
     Args:
         start_dir: 起始目录
+        git_root: 预计算的 git 根目录，避免重复查找
 
     Returns:
         (文件路径, 文件名) 元组，未找到返回 (None, None)
     """
     start = start_dir.resolve()
-    git_root = get_git_root(start)
+    if git_root is None:
+        git_root = get_git_root(start)
 
     for filename, search_mode in CONTEXT_FILE_CANDIDATES:
         if search_mode == "here":
@@ -196,11 +191,19 @@ def _truncate_content(content: str, filename: str, max_size: int) -> str:
     if len(content) <= max_size:
         return content
 
-    head_chars = int(max_size * TRUNCATE_HEAD_RATIO)
-    tail_chars = int(max_size * TRUNCATE_TAIL_RATIO)
+    # 先构建 marker 获取其实际长度，再动态分配 head/tail
+    placeholder_marker = (
+        f"\n\n[...truncated {filename}: kept X+Y of "
+        f"{len(content)} chars. The middle is omitted.]\n\n"
+    )
+    marker_len = len(placeholder_marker)
+
+    available = max_size - marker_len
+    head_chars = int(available * TRUNCATE_HEAD_RATIO)
+    tail_chars = available - head_chars
 
     head = content[:head_chars]
-    tail = content[-tail_chars:]
+    tail = content[-tail_chars:] if tail_chars > 0 else ""
 
     marker = (
         f"\n\n[...truncated {filename}: kept {head_chars}+{tail_chars} of "
@@ -314,8 +317,8 @@ def get_context_file_info(start_dir: Optional[Path] = None) -> dict:
     if start_dir is None:
         start_dir = Path.cwd()
 
-    file_path, filename = find_context_file(start_dir)
     git_root = get_git_root(start_dir)
+    file_path, filename = find_context_file(start_dir, git_root=git_root)
 
     return {
         "found": file_path is not None,

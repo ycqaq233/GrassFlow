@@ -20,20 +20,21 @@ import asyncio
 import sys
 import os
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 
 import click
 
 from core.models import Workflow
 from core.context import WorkflowContext
-from core.scheduler import Scheduler, SchedulerError
+from core.scheduler import Scheduler
 from core.condition import ConditionAgent
-from core.llm_agent import LLMAgent, llm_agent_factory
+from core.llm_agent import LLMAgent
 from core.storage import workflow_storage
 from core.db import execution_db
 from core.monitor import monitor
-from tui.dsl_parser import DSLParser, DSLError, parse_file
+from tui.dsl_parser import parse_file
 from tui.display import display, progress_display
+from tui.error_handler import handle_cli_error, ErrorContext
 
 
 def _get_default_model() -> str:
@@ -138,14 +139,8 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
         else:
             display.print_success("Workflow execution completed successfully!")
 
-    except DSLError as e:
-        display.print_error(f"DSL Error: {e}")
-        sys.exit(1)
-    except SchedulerError as e:
-        display.print_error(f"Scheduler Error: {e}")
-        sys.exit(1)
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e, context=ErrorContext(workflow_id=workflow_file))
         sys.exit(1)
 
 
@@ -171,11 +166,8 @@ def save(workflow_file: str, output: Optional[str]):
             filepath = workflow_storage.save(workflow)
             display.print_success(f"Workflow saved to {filepath}")
 
-    except DSLError as e:
-        display.print_error(f"DSL Error: {e}")
-        sys.exit(1)
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e, context=ErrorContext(workflow_id=workflow_file))
         sys.exit(1)
 
 
@@ -196,7 +188,7 @@ def list():
             display.print_info(f"  {workflow}")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -224,16 +216,13 @@ def validate(workflow_file: str):
             display.print_info(f"  Topological order: {' -> '.join(order)}")
 
         except DAGError as e:
-            display.print_error(f"  DAG: {e}")
+            handle_cli_error(e, context=ErrorContext(workflow_id=workflow_file))
             sys.exit(1)
 
         display.print_success("\nWorkflow is valid!")
 
-    except DSLError as e:
-        display.print_error(f"DSL Error: {e}")
-        sys.exit(1)
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e, context=ErrorContext(workflow_id=workflow_file))
         sys.exit(1)
 
 
@@ -289,7 +278,7 @@ def history(workflow: Optional[str], limit: int, verbose: bool):
                 display.print_info(f"  [{exec_record['id']}] {exec_record['workflow_name']} - {status} ({duration})")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -316,7 +305,7 @@ def inspect(execution_id: int):
                 display.print_info(f"  [{severity_color}]{issue.severity}[/{severity_color}] [{issue.category}] {issue.message}")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -341,7 +330,7 @@ def delete(execution_id: int, force: bool):
         display.print_success(f"Execution {execution_id} deleted.")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -384,7 +373,7 @@ def templates():
                 display.print_info(f"  {template['name']} - {template['description']} ({template['agent_count']} agents)")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -418,7 +407,7 @@ def create(template_name: str, output: Optional[str]):
         display.print_success(f"Workflow created from template '{template_name}': {output_path}")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -566,14 +555,8 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
         else:
             display.print_success("Workflow execution completed successfully!")
 
-    except DSLError as e:
-        display.print_error(f"DSL Error: {e}")
-        sys.exit(1)
-    except SchedulerError as e:
-        display.print_error(f"Scheduler Error: {e}")
-        sys.exit(1)
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e, context=ErrorContext(workflow_id=workflow_file))
         sys.exit(1)
 
 
@@ -590,7 +573,7 @@ def edit(workflow_file: Optional[str]):
         display.print_error("textual is not installed. Run: pip install textual")
         sys.exit(1)
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -750,7 +733,7 @@ def config_get(key: str, scope: str):
             display.print_info(f"{key}: {value}")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -777,7 +760,7 @@ def config_set(key: str, value: str, scope: str):
         display.print_success(f"Set {key} = {parsed_value} ({scope})")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -854,7 +837,7 @@ def config_list_cmd(scope: str, as_json: bool):
                     display.print_info(f"  {key}: {value}")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -915,7 +898,7 @@ def config_edit(scope: str):
         display.print_success(f"Configuration file edited: {config_file}")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -973,7 +956,7 @@ def config_validate():
             display.print_success("\nAll configurations are valid!")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -1026,7 +1009,7 @@ def config_providers():
                 display.print_info(f"  {name}: API Key {has_key}")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -1043,7 +1026,7 @@ def config_path():
         display.print_info(f"Plugins directory: {config_manager.global_config_dir / 'plugins'}")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -1063,7 +1046,7 @@ def config_reset(scope: str, force: bool):
         display.print_success(f"Reset {scope} config to defaults.")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -1084,7 +1067,7 @@ def config_api_key(provider: str, key: str, scope: str):
         display.print_success(f"Set {provider} API key ({scope})")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 
@@ -1106,7 +1089,7 @@ def config_show_key(provider: str):
             display.print_info(f"{provider}: (not set)")
 
     except Exception as e:
-        display.print_error(f"Error: {e}")
+        handle_cli_error(e)
         sys.exit(1)
 
 

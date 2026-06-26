@@ -1412,7 +1412,7 @@ class ProtocolLLMClient:
 
     async def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         stream: bool = False,
@@ -1435,7 +1435,24 @@ class ProtocolLLMClient:
         proto_messages = []
         system_messages = []
         for m in messages:
-            msg = Message(role=m["role"], content=m.get("content", ""))
+            msg = Message(
+                role=m["role"],
+                content=m.get("content", ""),
+                name=m.get("name"),
+                tool_call_id=m.get("tool_call_id"),
+            )
+            if "tool_calls" in m and m["tool_calls"]:
+                tcs = []
+                for tc_data in m["tool_calls"]:
+                    if isinstance(tc_data, ToolCall):
+                        tcs.append(tc_data)
+                    elif isinstance(tc_data, dict):
+                        tcs.append(ToolCall(
+                            id=tc_data.get("id", ""),
+                            name=tc_data.get("name", tc_data.get("function", {}).get("name", "")),
+                            arguments=tc_data.get("arguments", tc_data.get("function", {}).get("arguments", "")),
+                        ))
+                msg.tool_calls = tcs
             if m["role"] == "system":
                 system_messages.append(msg)
             else:
@@ -1466,11 +1483,12 @@ class ProtocolLLMClient:
                 "total_tokens": response.usage.total_tokens,
             },
             finish_reason=response.finish_reason,
+            tool_calls=response.tool_calls or None,
         )
 
     async def stream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         **kwargs,
@@ -1484,7 +1502,24 @@ class ProtocolLLMClient:
         proto_messages = []
         system_messages = []
         for m in messages:
-            msg = Message(role=m["role"], content=m.get("content", ""))
+            msg = Message(
+                role=m["role"],
+                content=m.get("content", ""),
+                name=m.get("name"),
+                tool_call_id=m.get("tool_call_id"),
+            )
+            if "tool_calls" in m and m["tool_calls"]:
+                tcs = []
+                for tc_data in m["tool_calls"]:
+                    if isinstance(tc_data, ToolCall):
+                        tcs.append(tc_data)
+                    elif isinstance(tc_data, dict):
+                        tcs.append(ToolCall(
+                            id=tc_data.get("id", ""),
+                            name=tc_data.get("name", tc_data.get("function", {}).get("name", "")),
+                            arguments=tc_data.get("arguments", tc_data.get("function", {}).get("arguments", "")),
+                        ))
+                msg.tool_calls = tcs
             if m["role"] == "system":
                 system_messages.append(msg)
             else:
@@ -1522,6 +1557,7 @@ class _LegacyLLMResponse:
     model: str
     usage: Dict[str, int]
     finish_reason: str
+    tool_calls: Optional[List[ToolCall]] = None
 
 
 # ============================================================================
