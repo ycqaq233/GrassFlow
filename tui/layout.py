@@ -422,7 +422,7 @@ def build_layout(
     header_text_cb: Callable[[], List[Tuple[str, str]]],
     output_text_cb: Callable[[], List[Tuple[str, str]]],
     status_text_cb: Callable[[], List[Tuple[str, str]]],
-) -> Layout:
+) -> Tuple[Layout, Window]:
     """构建 prompt_toolkit 布局
 
     布局结构::
@@ -501,7 +501,7 @@ def build_layout(
         ),
     ])
 
-    return Layout(root_container)
+    return Layout(root_container), output_window
 
 
 def build_layout_from_repl(repl: Any) -> Layout:
@@ -525,12 +525,14 @@ def build_layout_from_repl(repl: Any) -> Layout:
     output_cb = make_output_text_cb(output=repl.output)
     status_cb = make_status_text_from_repl(repl)
 
-    return build_layout(
+    layout, output_window = build_layout(
         input_buffer=repl.input_buffer,
         header_text_cb=header_cb,
         output_text_cb=output_cb,
         status_text_cb=status_cb,
     )
+    repl._output_window = output_window
+    return layout
 
 
 # ==================== KeyBindings 构建 ====================
@@ -559,6 +561,7 @@ class KeybindingCallbacks:
         handle_redo: Callable[[], None],
         handle_list_models: Callable[[], None],
         get_app: Callable[[], Any],
+        get_output_window: Callable[[], Any] = None,
     ):
         self.mode = mode
         self.agent_running = agent_running
@@ -574,6 +577,7 @@ class KeybindingCallbacks:
         self.handle_redo = handle_redo
         self.handle_list_models = handle_list_models
         self.get_app = get_app
+        self.get_output_window = get_output_window
 
 
 def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
@@ -609,6 +613,10 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
         # 正常提交到 input_buffer 的 accept_handler
         buffer = event.app.current_buffer
         buffer.validate_and_handle()
+        # /exit 命令在 accept_handler 中设置 should_exit 标志，
+        # 在 validate_and_handle 返回后再调用 app.exit() 避免冲突
+        if callbacks.should_exit():
+            event.app.exit()
 
     @kb.add("escape", "enter")
     def handle_alt_enter(event: KeyPressEvent) -> None:
@@ -692,6 +700,24 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
             # 让 prompt_toolkit 处理补全
             pass
 
+    @kb.add("c-up")
+    def handle_scroll_up(event: KeyPressEvent) -> None:
+        """Ctrl+Up：向上滚动输出区域"""
+        if callbacks.get_output_window:
+            win = callbacks.get_output_window()
+            if win:
+                win.vertical_scroll = max(0, win.vertical_scroll - 3)
+                event.app.invalidate()
+
+    @kb.add("c-down")
+    def handle_scroll_down(event: KeyPressEvent) -> None:
+        """Ctrl+Down：向下滚动输出区域"""
+        if callbacks.get_output_window:
+            win = callbacks.get_output_window()
+            if win:
+                win.vertical_scroll += 3
+                event.app.invalidate()
+
     return kb
 
 
@@ -719,5 +745,6 @@ def build_keybindings_from_repl(repl: Any) -> KeyBindings:
         handle_redo=repl._handle_redo,
         handle_list_models=repl._handle_list_models,
         get_app=lambda: repl.app,
+        get_output_window=lambda: repl._output_window,
     )
     return build_keybindings(callbacks)

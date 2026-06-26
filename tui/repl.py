@@ -46,7 +46,7 @@ class GrassFlowREPL:
         self.mode = REPLMode.NORMAL
         self._running = False
         self._should_exit = False
-        self._exit_requested = False
+        self._output_window = None
         self._input_queue: queue.Queue = queue.Queue()
         self._completer = SlashCommandCompleter()
         self.app: Optional[Application] = None
@@ -109,6 +109,9 @@ class GrassFlowREPL:
         self.output.append(entry)
         if len(self.output) > MAX_OUTPUT_LINES:
             self.output = self.output[len(self.output) - MAX_OUTPUT_LINES:]
+        # 自动滚动到底部
+        if self._output_window:
+            self._output_window.vertical_scroll = 10**6
 
     def clear_output(self) -> None:
         self.output.clear()
@@ -174,9 +177,10 @@ class GrassFlowREPL:
     def _process_user_input(self, text: str) -> None:
         if text.startswith("/"):
             if self._handle_slash_command(text):
+                # 只设置标志，不调用 app.exit()。
+                # app.exit() 由 handle_enter 在 validate_and_handle 返回后调用，
+                # 避免与 validate_and_handle 的 return value 冲突。
                 self._should_exit = True
-                if self.app:
-                    self.app.exit()
             return
         if text.startswith("!"):
             shell_cmd = text[1:].strip()
@@ -358,7 +362,7 @@ class GrassFlowREPL:
                 self.session = None
 
     def run(self) -> None:
-        self._running, self._should_exit, self._exit_requested = True, False, False
+        self._running, self._should_exit = True, False
         self._init_session()
         if self._agent.init_agent_loop():
             self.add_output("Agent loop initialized.", role="system")
@@ -378,9 +382,6 @@ class GrassFlowREPL:
 
         def _on_invalidate(_sender=None):
             self._process_ui_updates()
-            if self._should_exit and not self._exit_requested:
-                self._exit_requested = True
-                self.app.exit()
 
         self.app.on_invalidate += _on_invalidate
         try:
