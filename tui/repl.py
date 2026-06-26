@@ -1,12 +1,19 @@
 """
-GrassFlow REPL — 基于 prompt_toolkit 的交互式 TUI
-组合 layout / slash_commands / agent_integration / fallback 模块实现。
+GrassFlow REPL — 基于 prompt_toolkit 的交互式 TUI（hermes patch_stdout 模式）
+
+架构变更：
+- 输出不再通过 FormattedTextControl 渲染在 widget 树中
+- 所有输出通过 cprint() 打印到终端 scrollback，由终端模拟器原生处理滚动
+- mouse_support=False — 禁用 prompt_toolkit 的鼠标事件拦截
+- patch_stdout() 包裹 app.run() — stdout 写入重定向到终端 scrollback
+- 流式输出行缓冲机制（参考 hermes _emit_stream_text）
 """
 from __future__ import annotations
 
 import json
 import os
 import queue
+import shutil
 import subprocess
 import threading
 import time
@@ -25,16 +32,15 @@ from tui.layout import (
     BANNER, DEFAULT_MODEL, DEFAULT_PROVIDER, MAX_OUTPUT_LINES,
     OutputEntry, REPLMode, REPLTheme, BUILTIN_THEMES,
     build_pt_style, build_layout_from_repl, build_keybindings_from_repl,
+    format_output_line, cprint, ChatConsole, OutputHistory,
+    set_event_loop,
 )
 from tui.session import SessionInfo, session_manager
 from tui.slash_commands import SlashCommandCompleter, command_registry
 
-# 滚动到底部的哨兵值（render_info 不可用时的回退值）
-SCROLL_TO_BOTTOM = 10**6  # fallback when render_info is unavailable
-
 
 class GrassFlowREPL:
-    """GrassFlow 交互式 REPL（prompt_toolkit + 模块组合）"""
+    """GrassFlow 交互式 REPL（hermes patch_stdout 模式）"""
 
     # 延迟导入的命令处理函数缓存
     _CMD_HANDLERS: Optional[Dict[str, Any]] = None
@@ -51,13 +57,12 @@ class GrassFlowREPL:
         self.mode = REPLMode.NORMAL
         self._running = False
         self._should_exit = False
-        self._output_window = None
         self._input_queue: queue.Queue = queue.Queue()
         self._completer = SlashCommandCompleter()
         self.app: Optional[Application] = None
         self.input_buffer = Buffer(
             multiline=True, completer=self._completer, complete_while_typing=True,
-            accept_handler=None,  # 不使用 accept_handler，用自定义 Enter 绑定（hermes 模式）
+            accept_handler=None,
         )
         self.kb = KeyBindings()
         self._undo_stack: List[OutputEntry] = []
@@ -67,8 +72,13 @@ class GrassFlowREPL:
         self._token_limit = 128000
         self._last_latency_ms = 0
         self._api_call_count = 0
-        self._api_start_time: float = 0.0  # monotonic timestamp when agent call begins
+        self._api_start_time: float = 0.0
         self._retry_last: bool = False
+
+        # 流式输出状态（hermes 模式）
+        self._stream_buf: str = ""
+        self._stream_box_opened: bool = False
+
         self._setup_keybindings()
 
     # ==================== 主题 ====================
@@ -110,27 +120,69 @@ class GrassFlowREPL:
     def _enable_streaming(self) -> bool:
         return self._agent._enable_streaming
 
-    # ==================== 输出管理 ====================
+    # ==================== 输出管理（hermes cprint 模式） ====================
 
-    def add_output(self, text: str, role: str = "system", metadata: Optional[Dict[str, Any]] = None) -> None:
-        entry = OutputEntry(text=text, role=role, metadata=metadata)
+    def _cprint_output(self, text: str, role: str = "system") -> None:
+        """打印格式化输出到终端 scrollback（hermes _cprint 模式）"""
+        entry = OutputEntry(text=text, role=role)
         with self._output_lock:
             self.output.append(entry)
             if len(self.output) > MAX_OUTPUT_LINES:
                 self.output = self.output[len(self.output) - MAX_OUTPUT_LINES:]
-        # New output invalidates redo history (but not for system feedback messages)
         if role != "system":
             self._redo_stack.clear()
-        # Scroll and invalidate can happen outside the lock
-        self._scroll_output_to_bottom()
+        formatted = format_output_line(entry)
+        cprint(formatted)
         if self.app:
             self.app.invalidate()
+
+    def _cprint_raw(self, text: str) -> None:
+        """打印原始 ANSI 文本（用于流式 token）"""
+        cprint(text)
+
+    def add_output(self, text: str, role: str = "system", metadata: Optional[Dict[str, Any]] = None) -> None:
+        """添加输出并打印到终端 scrollback"""
+        self._cprint_output(text, role)
 
     def clear_output(self) -> None:
         with self._output_lock:
             self.output.clear()
             self._undo_stack.clear()
             self._redo_stack.clear()
+
+    # ==================== 流式输出（hermes 行缓冲模式） ====================
+
+    def _emit_stream_text(self, text: str) -> None:
+        """流式文本发射 — 行缓冲模式（参考 hermes _emit_stream_text）"""
+        if not text:
+            return
+        self._stream_buf += text
+
+        # 打开响应框（首次可见文本时）
+        if not self._stream_box_opened:
+            text_stripped = text.lstrip("\n")
+            if not text_stripped:
+                return
+            self._stream_box_opened = True
+            cprint("")  # 空行分隔
+
+        # 行缓冲：发射完整行，保留部分行
+        while "\n" in self._stream_buf:
+            line, self._stream_buf = self._stream_buf.split("\n", 1)
+            cprint(f"    {line}")  # 4-space indent
+
+    def _flush_stream(self) -> None:
+        """刷新流式缓冲区，关闭响应框"""
+        if self._stream_buf:
+            cprint(f"    {self._stream_buf}")
+            self._stream_buf = ""
+        if self._stream_box_opened:
+            self._stream_box_opened = False
+
+    def _reset_stream_state(self) -> None:
+        """重置流式状态"""
+        self._stream_buf = ""
+        self._stream_box_opened = False
 
     # ==================== 布局 / 快捷键（委托给 tui.layout） ====================
 
@@ -183,14 +235,11 @@ class GrassFlowREPL:
     # ==================== 输入处理 ====================
 
     def _process_user_input(self, text: str) -> None:
-        """处理用户输入（由 Enter 键绑定调用，不经过 accept_handler）
+        """处理用户输入（由 Enter 键绑定调用）
 
         参考 hermes 模式：直接处理输入，/exit 时设置标志并延迟调用 app.exit()。
-        使用 create_background_task 延迟退出，避免在 keybinding handler 内
-        同步调用 app.exit() 导致 "Return value already set" 崩溃。
         """
         if text.startswith("/"):
-            # Special-case /exit: need to set _should_exit and schedule app.exit()
             parts = text.split()
             cmd_name = parts[0].lower().lstrip("/")
             cmd_def = command_registry.get(cmd_name)
@@ -231,12 +280,12 @@ class GrassFlowREPL:
         cmd_def = command_registry.get(cmd)
         if cmd_def:
             command_registry.execute(cmd, args, self)
-            return True  # ALL valid commands are handled; never fall through to agent
+            return True
         self.add_output(f"Unknown command: /{cmd}. Type /help for available commands.", role="error")
-        return False  # Unknown commands also don't fall through, but show error
+        return False
 
     def _handle_agent_message(self, text: str) -> None:
-        self._api_start_time = time.monotonic()  # Use monotonic for elapsed time
+        self._api_start_time = time.monotonic()
         self.add_output(text, role="user")
         if not self._agent.is_initialized:
             self.add_output(
@@ -253,60 +302,54 @@ class GrassFlowREPL:
 
     # ==================== Agent Loop 事件处理 ====================
 
-    def _scroll_output_to_bottom(self) -> None:
-        """Scroll output window to bottom, respecting user scroll position.
-
-        Checks render_info to determine if user is near the bottom.
-        If user has scrolled up, do not force-scroll.
-        """
-        if not self._output_window:
-            return
-        ri = self._output_window.render_info
-        if ri is not None and ri.window_height > 0:
-            # If user is scrolled away from bottom, don't auto-scroll
-            if not ri.bottom_visible:
-                return
-            max_scroll = max(0, ri.content_height - ri.window_height)
-            self._output_window.vertical_scroll = max_scroll
-        else:
-            # No render_info yet (first render), safe to scroll
-            self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
-
     def _apply_event_type(self, etype: str, data: dict) -> bool:
-        """Apply a single event to self.output. Returns True if loop should break.
+        """Apply a single event to output. Returns True if loop should break.
 
         Shared logic for both streaming (_apply_event) and queued (_process_ui_updates) paths.
+        Uses hermes-style cprint for all output.
         """
         if etype == "text_delta":
             token = data.get("text", "")
-            if self.output and self.output[-1].role == "assistant":
-                self.output[-1].text += token
+            # 流式模式：通过 _emit_stream_text 行缓冲发射
+            if self._enable_streaming:
+                self._emit_stream_text(token)
             else:
-                self.add_output(token, role="assistant")
-            self._scroll_output_to_bottom()
+                # 非流式：累积到 output 列表
+                if self.output and self.output[-1].role == "assistant":
+                    self.output[-1].text += token
+                else:
+                    self.add_output(token, role="assistant")
         elif etype == "text_end":
-            pass
+            self._flush_stream()
+            self._reset_stream_state()
         elif etype == "thinking_delta":
             token = data.get("text", "")
-            if (self.output and self.output[-1].role == "system"
-                    and self.output[-1].text.startswith("[thinking]")):
-                self.output[-1].text += token
-            else:
-                self.add_output(f"[thinking] {token}", role="system")
-            self._scroll_output_to_bottom()
+            # thinking 块用 dim 斜体打印
+            cprint(f"\033[2;3m{token}\033[0m")
         elif etype == "tool_call_start":
-            self.add_output(f"[tool] Calling {data.get('name', '?')}...", role="tool")
+            self._flush_stream()
+            self._reset_stream_state()
+            name = data.get('name', '?')
+            cprint(f"\n\033[1;36m  [tool] Calling {name}...\033[0m")
             if data.get("args"):
-                self.add_output(f"  args: {json.dumps(data['args'], ensure_ascii=False)[:300]}", role="tool")
+                args_str = json.dumps(data['args'], ensure_ascii=False)[:300]
+                cprint(f"\033[2m    args: {args_str}\033[0m")
         elif etype == "tool_result":
+            self._flush_stream()
+            self._reset_stream_state()
             result = data.get("result", data.get("output", ""))
             is_err = data.get("is_error", False) or data.get("success", True) is False
+            color = "\033[1;31m" if is_err else "\033[2m"
             prefix = "[tool result] [ERROR] " if is_err else "[tool result] "
-            self.add_output(f"{prefix}{str(result)[:500 if is_err else 800]}", role="error" if is_err else "tool")
+            cprint(f"{color}  {prefix}{str(result)[:500 if is_err else 800]}\033[0m")
         elif etype == "error":
-            self.add_output(f"[error] {data.get('message', str(data))}", role="error")
+            self._flush_stream()
+            self._reset_stream_state()
+            cprint(f"\033[1;31m  [error] {data.get('message', str(data))}\033[0m")
         elif etype == "interrupted":
-            self.add_output("Interrupted.", role="system")
+            self._flush_stream()
+            self._reset_stream_state()
+            cprint("\033[33m  Interrupted.\033[0m")
             return True
         elif etype == "usage":
             if isinstance(data, dict):
@@ -319,7 +362,7 @@ class GrassFlowREPL:
         return False
 
     def _apply_event(self, etype: str, edata: dict, inv: Any = None) -> bool:
-        """将 Agent Loop 事件应用到 self.output。返回 True 表示应中断循环。"""
+        """将 Agent Loop 事件应用到输出。返回 True 表示应中断循环。"""
         if inv is None:
             inv = lambda: self.app.invalidate() if self.app else None
         result = self._apply_event_type(etype, edata)
@@ -329,15 +372,20 @@ class GrassFlowREPL:
     async def _run_agent_loop_async(self, text: str) -> None:
         """在 pt 事件循环中运行 Agent Loop（流式输出）"""
         try:
+            self._reset_stream_state()
             async for event in self._agent.process_streaming(
                 text=text, history=self._build_history(), system_prompt=self._get_system_prompt(),
             ):
                 if self._apply_event(event.type, event.data):
                     break
         except Exception as e:
+            self._flush_stream()
+            self._reset_stream_state()
             self.add_output(f"Agent error: {e}\n{traceback.format_exc()}", role="error")
         finally:
-            self._api_start_time = 0.0  # Reset after agent completes
+            self._flush_stream()
+            self._reset_stream_state()
+            self._api_start_time = 0.0
             if self.app:
                 self.app.invalidate()
 
@@ -378,7 +426,7 @@ class GrassFlowREPL:
         self._agent.interrupt()
 
     def _execute_shell(self, command: str) -> None:
-        """在后台线程中执行 shell 命令，避免阻塞 UI 线程（BUG #4）"""
+        """在后台线程中执行 shell 命令，避免阻塞 UI 线程"""
         def _run():
             try:
                 result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd())
@@ -415,36 +463,54 @@ class GrassFlowREPL:
         self._running, self._should_exit = True, False
         self._init_session()
         if self._agent.init_agent_loop():
-            self.add_output("Agent loop initialized.", role="system")
+            self._cprint_output("Agent loop initialized.", role="system")
         else:
-            self.add_output("AgentLoop not available. Falling back to echo mode.", role="system")
+            self._cprint_output("AgentLoop not available. Falling back to echo mode.", role="system")
+
         try:
             self.app = Application(
                 layout=self._build_layout(),
                 key_bindings=self.kb,
                 style=build_pt_style(self._theme),
-                full_screen=False,       # 非全屏模式，输出向上滚动（hermes 模式）
-                mouse_support=True,      # 启用鼠标事件（滚轮滚动输出区域）
-                refresh_interval=0.0,    # 禁用定时重绘，避免与终端 auto-scroll 冲突
-                erase_when_done=True,    # 退出时清除底部 UI chrome，不留在 scrollback 中
+                full_screen=False,
+                mouse_support=False,       # 关键：禁用鼠标支持，让终端处理滚轮
+                refresh_interval=0.0,
+                erase_when_done=True,
             )
         except Exception as e:
-            self.add_output(BANNER.strip(), role="system")
+            self._cprint_output(BANNER.strip(), role="system")
             self._run_fallback(f"prompt_toolkit 不可用 ({e})，使用降级模式。输入 /exit 退出。")
             return
-        self.add_output(BANNER.strip(), role="system")
-        self.add_output("  GrassFlow REPL\n  Type /help for commands, /exit to quit.\n", role="system")
 
+        # 打印 banner
+        self._cprint_output(BANNER.strip(), role="system")
+        self._cprint_output("  GrassFlow REPL\n  Type /help for commands, /exit to quit.\n", role="system")
+
+        # 注册 invalidate 钩子（消费后台线程 UI 更新）
         def _on_invalidate(_sender=None):
             self._process_ui_updates()
-
         self.app.on_invalidate += _on_invalidate
+
+        # 设置模块级事件循环引用（供 cprint 跨线程安全使用）
+        if self.app.loop:
+            set_event_loop(self.app.loop)
+
+        # hermes 模式：patch_stdout 包裹 app.run()
+        from prompt_toolkit.patch_stdout import patch_stdout
         try:
-            self.app.run()
+            with patch_stdout():
+                # 推送光标到终端底部（hermes 技巧）
+                try:
+                    term_lines = shutil.get_terminal_size().lines
+                    if term_lines > 2:
+                        print("\n" * (term_lines - 1), end="", flush=True)
+                except Exception:
+                    pass
+                self.app.run()
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
         except Exception as e:
-            self.add_output(f"REPL error: {e}", role="error")
+            self._cprint_output(f"REPL error: {e}", role="error")
         finally:
             self._running = False
         self._cleanup()
@@ -471,30 +537,37 @@ class AsyncGrassFlowREPL(GrassFlowREPL):
     async def run_async(self) -> None:
         self._running, self._should_exit = True, False
         self._init_session()
-        self.add_output(BANNER.strip(), role="system")
-        self.add_output("  GrassFlow REPL (async)\n  Type /help for commands, /exit to quit.\n", role="system")
+        self._cprint_output(BANNER.strip(), role="system")
+        self._cprint_output("  GrassFlow REPL (async)\n  Type /help for commands, /exit to quit.\n", role="system")
         if self._agent.init_agent_loop():
-            self.add_output("Agent loop initialized.", role="system")
+            self._cprint_output("Agent loop initialized.", role="system")
         self.app = Application(
             layout=self._build_layout(),
             key_bindings=self.kb,
             style=build_pt_style(self._theme),
-            full_screen=False,       # 非全屏模式，输出向上滚动（hermes 模式）
-            mouse_support=True,      # 启用鼠标事件（滚轮滚动输出区域）
-            refresh_interval=0.0,    # 禁用定时重绘，避免与终端 auto-scroll 冲突
-            erase_when_done=True,    # 退出时清除底部 UI chrome，不留在 scrollback 中
+            full_screen=False,
+            mouse_support=False,       # 关键：禁用鼠标支持，让终端处理滚轮
+            refresh_interval=0.0,
+            erase_when_done=True,
         )
-        # Bug 4 修复：注册 on_invalidate 钩子，与 run() 保持一致
+
         def _on_invalidate(_sender=None):
             self._process_ui_updates()
 
         self.app.on_invalidate += _on_invalidate
+
+        # 设置模块级事件循环引用（供 cprint 跨线程安全使用）
+        if self.app.loop:
+            set_event_loop(self.app.loop)
+
+        from prompt_toolkit.patch_stdout import patch_stdout
         try:
-            await self.app.run_async()
+            with patch_stdout():
+                await self.app.run_async()
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
         except Exception as e:
-            self.add_output(f"REPL error: {e}", role="error")
+            self._cprint_output(f"REPL error: {e}", role="error")
         finally:
             self._running = False
         self._cleanup()
@@ -523,7 +596,6 @@ async def run_repl_async(
 
 
 # ==================== 向后兼容层 ====================
-# re-export 保持旧的 import 路径可用：from tui.repl import Message, MessageRole, ...
 
 from tui.compat import (  # noqa: E402, F401
     MessageRole, Message, CommandResult, CommandHandler,

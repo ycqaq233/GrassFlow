@@ -1,23 +1,28 @@
 """
-GrassFlow REPL Layout — prompt_toolkit 布局、样式和快捷键
+GrassFlow REPL Layout — prompt_toolkit 布局、样式和快捷键（hermes patch_stdout 模式）
 
 从 repl.py 中提取的 UI 层逻辑，包括：
 - 常量：BANNER, PROMPT, PROMPT_STYLE
 - 样式：build_pt_style()
-- 布局：build_layout()
+- 布局：build_layout()（只有底部 chrome，输出走 patch_stdout）
 - 快捷键：build_keybindings()
-- 渲染回调：_get_header_text, _get_output_text, _get_status_text, _get_input_prefix
+- 输出函数：cprint(), format_output_line(), ChatConsole, OutputHistory
+- 渲染回调：_get_header_text, _get_status_text, _get_input_prefix
 - 数据模型：OutputEntry, REPLMode, REPLTheme, BUILTIN_THEMES
 
-重写说明（hermes 模式）：
-- Enter 键不再调用 buffer.validate_and_handle()，避免 "Return value already set" 崩溃
-- 改为自定义 Enter 绑定：提取文本 → 重置 buffer → 调用 process_input 回调
-- /exit 由 _process_user_input 直接设置 _should_exit 并调用 app.exit()
-- 滚动：Ctrl+Up/Down + 鼠标滚轮支持
+重写说明（hermes patch_stdout 模式）：
+- 输出不再通过 FormattedTextControl 渲染在 widget 树中
+- 所有输出通过 cprint() 打印到终端 scrollback，终端模拟器原生处理滚动
+- mouse_support=False — 禁用 prompt_toolkit 的鼠标事件拦截
+- Layout 只有底部 chrome：spacer + status_bar + input_area
 """
 
 from __future__ import annotations
 
+import re as _re
+import shutil
+from collections import deque
+from io import StringIO
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -27,18 +32,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.layout import (
-    Float,
-    FloatContainer,
     HSplit,
     Layout,
-    ScrollOffsets,
-    VSplit,
     Window,
-    WindowAlign,
 )
-from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
-from prompt_toolkit.layout.margins import ScrollbarMargin
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.layout.dimension import Dimension
 
 
 # ==================== 常量 ====================
@@ -211,6 +212,181 @@ def build_pt_style(theme: REPLTheme) -> Style:
     })
 
 
+# ==================== 输出函数（hermes cprint 模式） ====================
+
+# ANSI escape pattern for stripping
+_OSC_ESCAPE_RE = _re.compile(r"\x1b\].*?(?:\x07|\x1b\\)")
+
+# Output history for resize replay
+_OUTPUT_HISTORY: deque = deque(maxlen=200)
+_OUTPUT_HISTORY_ENABLED = True
+
+# Global event loop reference for cross-thread cprint (set by repl.py)
+_loop: Optional[Any] = None
+
+
+def set_event_loop(loop: Any) -> None:
+    """Set the module-level event loop reference (called by repl.py)."""
+    global _loop
+    _loop = loop
+
+
+def _record_output_history(text: str) -> None:
+    """Record output to history for resize replay."""
+    if _OUTPUT_HISTORY_ENABLED:
+        _OUTPUT_HISTORY.append(text)
+
+
+class OutputHistory:
+    """Output history manager for resize replay."""
+    history = _OUTPUT_HISTORY
+    enabled = _OUTPUT_HISTORY_ENABLED
+
+    @staticmethod
+    def record(text: str) -> None:
+        _record_output_history(text)
+
+    @staticmethod
+    def replay() -> None:
+        replay_output_history()
+
+
+def replay_output_history() -> None:
+    """Repaint recent output above the prompt after a full screen clear."""
+    if not _OUTPUT_HISTORY_ENABLED or not _OUTPUT_HISTORY:
+        return
+    try:
+        rendered_lines = []
+        for entry in tuple(_OUTPUT_HISTORY):
+            if callable(entry):
+                lines = entry()
+                if isinstance(lines, str):
+                    lines = lines.splitlines()
+            else:
+                lines = [entry]
+            rendered_lines.extend(str(line) for line in lines)
+        if rendered_lines:
+            from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
+            from prompt_toolkit import print_formatted_text as _pt_print
+            _pt_print(_PT_ANSI("\n".join(rendered_lines)))
+    except Exception:
+        pass
+
+
+def format_output_line(entry: OutputEntry) -> str:
+    """Format an OutputEntry as an ANSI-colored string for terminal output."""
+    timestamp = entry.timestamp.strftime("%H:%M:%S")
+    prefix_map = {
+        "user": "  ❯ ",       # >
+        "assistant": "  ● ",  # bullet
+        "system": "  · ",    # middle dot
+        "error": "  ✖ ",     # X
+        "tool": "  ⚒ ",      # hammer
+    }
+    prefix = prefix_map.get(entry.role, "  · ")
+    role_color_map = {
+        "user": "\033[1;94m",       # bold blue
+        "assistant": "\033[32m",    # green
+        "system": "\033[2;37m",     # dim white
+        "error": "\033[1;31m",      # bold red
+        "tool": "\033[35m",         # magenta
+    }
+    color = role_color_map.get(entry.role, "\033[0m")
+    reset = "\033[0m"
+    dim = "\033[2m"
+    return f"{dim}[{timestamp}]{reset}{color}{prefix}{entry.text}{reset}"
+
+
+def cprint(text: str) -> None:
+    """Print ANSI-colored text through prompt_toolkit's native renderer (hermes _cprint).
+
+    Routes text through print_formatted_text(ANSI(...)) so it appears above
+    the prompt input in terminal scrollback.
+    """
+    _record_output_history(text)
+    try:
+        from prompt_toolkit.application import get_app_or_none, run_in_terminal
+        from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
+        from prompt_toolkit import print_formatted_text as _pt_print
+    except Exception:
+        print(text)
+        return
+
+    app = None
+    try:
+        app = get_app_or_none()
+    except Exception:
+        app = None
+
+    # No active app, or we're already on the app's main thread
+    if app is None or not getattr(app, "_is_running", False):
+        try:
+            _pt_print(_PT_ANSI(text))
+        except Exception:
+            try:
+                print(text)
+            except Exception:
+                pass
+        return
+
+    # Cross-thread emission: ask the app's event loop to schedule
+    # a run_in_terminal that wraps _pt_print
+    def _schedule():
+        try:
+            import asyncio as _aio
+            import inspect as _inspect
+            coro = run_in_terminal(lambda: _pt_print(_PT_ANSI(text)))
+            if coro is not None and (_inspect.isawaitable(coro) or _inspect.iscoroutine(coro)):
+                _aio.ensure_future(coro)
+        except Exception:
+            pass
+
+    try:
+        _loop.call_soon_threadsafe(_schedule)
+    except Exception:
+        try:
+            _pt_print(_PT_ANSI(text))
+        except Exception:
+            try:
+                print(text)
+            except Exception:
+                pass
+
+
+class ChatConsole:
+    """Rich Console adapter for prompt_toolkit's patch_stdout context (hermes ChatConsole).
+
+    Captures Rich's rendered ANSI output into a StringIO, then routes each line
+    through cprint() so it works inside prompt_toolkit's patch_stdout context.
+    """
+
+    def __init__(self):
+        self._buffer = StringIO()
+        try:
+            from rich.console import Console
+            self._inner = Console(
+                file=self._buffer, force_terminal=True,
+                color_system="truecolor", highlight=False,
+            )
+        except ImportError:
+            self._inner = None
+
+    def print(self, *args, **kwargs):
+        if self._inner is None:
+            # Fallback: plain print
+            text = " ".join(str(a) for a in args)
+            cprint(text)
+            return
+        self._buffer.seek(0)
+        self._buffer.truncate()
+        self._inner.width = shutil.get_terminal_size((80, 24)).columns
+        self._inner.print(*args, **kwargs)
+        output = self._buffer.getvalue()
+        output = _OSC_ESCAPE_RE.sub("", output)
+        for line in output.rstrip("\n").split("\n"):
+            cprint(line)
+
+
 # ==================== 渲染回调工厂 ====================
 
 
@@ -272,54 +448,6 @@ def make_header_text_cb(
         return result
 
     return _get_header_text
-
-
-def make_output_text_cb(
-    output: List[OutputEntry],
-) -> Callable[[], List[Tuple[str, str]]]:
-    """创建输出区域渲染回调
-
-    Args:
-        output: 输出条目列表（共享引用，每次调用时读取最新状态）
-
-    Returns:
-        返回 formatted text 的回调函数
-    """
-
-    def _get_output_text() -> List[Tuple[str, str]]:
-        result: List[Tuple[str, str]] = []
-
-        if not output:
-            result.append(("class:msg-system", "  Welcome to GrassFlow REPL!\n"))
-            result.append(("class:msg-system", "  Type /help for available commands.\n"))
-            result.append(("class:msg-system", "  Ctrl+X N for new session, Ctrl+X Q to exit.\n"))
-            result.append(("[SetCursorPosition]", ""))
-            return result
-
-        for entry in output:
-            style = get_role_style(entry.role)
-            timestamp = entry.timestamp.strftime("%H:%M:%S")
-            # 前缀
-            prefix = {
-                "user": "  ❯ ",
-                "assistant": "  ● ",
-                "system": "  · ",
-                "error": "  ✖ ",
-                "tool": "  ⚒ ",
-            }.get(entry.role, "  · ")
-
-            # 添加时间戳 + 前缀
-            result.append(("class:msg-system", f"[{timestamp}]"))
-            result.append((f"class:{style}", f"{prefix}{entry.text}\n"))
-
-        # Place cursor at end of text so prompt_toolkit's scroll algorithm
-        # sees cursor_position.y = line_count-1 instead of 0. Without this,
-        # _scroll_when_linewrapping clamps vertical_scroll to 0 every render.
-        result.append(("[SetCursorPosition]", ""))
-
-        return result
-
-    return _get_output_text
 
 
 def make_status_text_cb(
@@ -426,7 +554,7 @@ def make_status_text_from_repl(repl: Any) -> Callable[[], List[Tuple[str, str]]]
     return _get_status_text
 
 
-def get_input_prefix(line_number: int, wrap_count: int) -> List[Tuple[str, str]]:
+def get_input_prefix(line_number: int = 0, wrap_count: int = 0) -> List[Tuple[str, str]]:
     """获取输入区域每行的前缀"""
     if line_number == 0:
         return [("class:prompt", f"{PROMPT}")]
@@ -434,112 +562,83 @@ def get_input_prefix(line_number: int, wrap_count: int) -> List[Tuple[str, str]]
         return [("class:prompt", "  ")]
 
 
-# ==================== Layout 构建 ====================
+# ==================== Layout 构建（hermes 模式 — 只有底部 chrome） ====================
 
 
 def build_layout(
     input_buffer: Buffer,
-    header_text_cb: Callable[[], List[Tuple[str, str]]],
-    output_text_cb: Callable[[], List[Tuple[str, str]]],
     status_text_cb: Callable[[], List[Tuple[str, str]]],
-) -> Tuple[Layout, Window]:
-    """构建 prompt_toolkit 布局
+) -> Layout:
+    """构建 hermes 模式布局 — 只有底部 chrome
 
-    布局结构::
+    输出不存在于 layout 中。所有输出通过 patch_stdout() 打印到终端 scrollback，
+    由终端模拟器原生处理滚动。
 
-        ┌─────────────────────────────────┐
-        │  Header: 模型名 | 会话ID | 模式  │  ← 顶部状态栏
-        ├─────────────────────────────────┤
-        │                                 │
-        │  Output Area (scrollable)       │
-        │                                 │
-        ├─────────────────────────────────┤
-        │  Status: tokens | latency       │  ← 底部状态栏
-        ├─────────────────────────────────┤
-        │  ❯ ▌ 用户输入                    │  ← 固定底部输入栏
-        └─────────────────────────────────┘
+    布局结构（从上到下）::
+
+        1. Window(height=0)  — 不可见顶部锚点
+        2. spacer             — Window(hint text)，动态高度，填充剩余空间
+        3. status_bar         — height=1
+        4. input_rule_top     — Window(char='─', height=1)
+        5. input_area         — TextArea, height=1~8 动态
+        6. input_rule_bot     — Window(char='─', height=1)
+        7. completions_menu   — CompletionsMenu, max_height=12
 
     Args:
         input_buffer: prompt_toolkit Buffer 实例
-        header_text_cb: 顶部状态栏文本回调
-        output_text_cb: 输出区域文本回调
         status_text_cb: 底部状态栏文本回调
 
     Returns:
         prompt_toolkit Layout 实例
     """
-    # 输出区域（可滚动）
-    # Store last known rendered height (win.height is None before first render).
-    _last_height = {"value": 20}
-
-    output_window = Window(
-        content=FormattedTextControl(
-            text=output_text_cb,
-            focusable=False,
-        ),
-        wrap_lines=True,
-        always_hide_cursor=True,
-        allow_scroll_beyond_bottom=True,  # allow manual scroll past content end
-        scroll_offsets=ScrollOffsets(top=2, bottom=2),
-        right_margins=[ScrollbarMargin()],
+    # Spacer：填充 header 和 input 之间的空间
+    spacer = Window(
+        content=FormattedTextControl(lambda: [("", "")]),
+        height=Dimension(weight=1),
     )
 
-    # Monkey-patch _scroll to track rendered height.
-    # prompt_toolkit's _scroll_when_linewrapping clamps vertical_scroll based
-    # on cursor_position.y. With [SetCursorPosition] at end of text, the cursor
-    # is at the last line, so _scroll always clamps to show the end.
-    _original_scroll = output_window._scroll
+    # Status bar
+    status_bar = Window(
+        content=FormattedTextControl(text=status_text_cb),
+        height=1,
+        style="class:status-bar",
+        wrap_lines=False,
+    )
 
-    def _overridden_scroll(ui_content, width, height):
-        _last_height["value"] = height
-        _original_scroll(ui_content, width, height)
+    # 输入区域：hermes 风格，1~8 行动态高度
+    input_area = TextArea(
+        height=Dimension(min=1, max=8, preferred=1),
+        prompt=get_input_prefix,
+        style='class:input-area',
+        multiline=True,
+        wrap_lines=True,
+    )
+    # Replace TextArea's internal buffer with the caller's buffer.
+    # Must update both the attribute AND the BufferControl reference,
+    # otherwise the BufferControl still uses the auto-created buffer.
+    input_area.buffer = input_buffer
+    input_area.control.buffer = input_buffer
 
-    output_window._scroll = _overridden_scroll
-    # Expose _last_height for keybinding handlers (win.height is None pre-render).
-    output_window._gf_last_height = _last_height
+    # 分隔线
+    input_rule_top = Window(height=1, char="─", style="class:frame-border")
+    input_rule_bot = Window(height=1, char="─", style="class:frame-border")
 
-    # 构建整体布局
+    # Completions menu
+    from prompt_toolkit.layout.menus import CompletionsMenu
+
+    completions_menu = CompletionsMenu(max_height=12)
+
     root_container = HSplit([
-        # 顶部状态栏
-        Window(
-            content=FormattedTextControl(text=header_text_cb),
-            height=1,
-            style="class:header",
-        ),
-        # 分隔线
-        Window(
-            height=1,
-            char="─",
-            style="class:header-dim",
-        ),
-        # 输出区域（占据主要空间）
-        output_window,
-        # 分隔线
-        Window(
-            height=1,
-            char="─",
-            style="class:header-dim",
-        ),
-        # 底部状态栏
-        Window(
-            content=FormattedTextControl(text=status_text_cb),
-            height=1,
-            style="class:status-bar",
-        ),
-        # 输入区域
-        Window(
-            content=BufferControl(
-                buffer=input_buffer,
-                input_processors=[],
-            ),
-            height=3,
-            style="class:input-area",
-            wrap_lines=True,
-            get_line_prefix=get_input_prefix,
-        ),
+        Window(height=0),       # 不可见锚点
+        spacer,                 # 填充空间
+        status_bar,             # 状态栏
+        input_rule_top,         # 分隔线
+        input_area,             # 输入区
+        input_rule_bot,         # 分隔线
+        completions_menu,       # 补全菜单
     ])
 
-    return Layout(root_container), output_window
+    return Layout(root_container)
 
 
 def build_layout_from_repl(repl: Any) -> Layout:
@@ -554,26 +653,16 @@ def build_layout_from_repl(repl: Any) -> Layout:
     Returns:
         prompt_toolkit Layout 实例
     """
-    header_cb = make_header_text_cb(
-        session=repl.session,
-        output=repl.output,
-        mode=lambda: repl.mode,
-        default_model=getattr(repl, "_default_model", "deepseek-chat"),
-    )
-    output_cb = make_output_text_cb(output=repl.output)
     status_cb = make_status_text_from_repl(repl)
 
-    layout, output_window = build_layout(
+    layout = build_layout(
         input_buffer=repl.input_buffer,
-        header_text_cb=header_cb,
-        output_text_cb=output_cb,
         status_text_cb=status_cb,
     )
-    repl._output_window = output_window
     return layout
 
 
-# ==================== KeyBindings 构建 ====================
+# ==================== KeyBindings 构建（hermes 模式） ====================
 
 
 class KeybindingCallbacks:
@@ -599,7 +688,6 @@ class KeybindingCallbacks:
         handle_redo: Callable[[], None],
         handle_list_models: Callable[[], None],
         get_app: Callable[[], Any],
-        get_output_window: Callable[[], Any] = None,
         process_input: Optional[Callable[[str], None]] = None,
     ):
         self.mode = mode
@@ -616,23 +704,23 @@ class KeybindingCallbacks:
         self.handle_redo = handle_redo
         self.handle_list_models = handle_list_models
         self.get_app = get_app
-        self.get_output_window = get_output_window
         self.process_input = process_input
 
 
 def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
-    """构建 prompt_toolkit KeyBindings
+    """构建 prompt_toolkit KeyBindings（hermes 模式）
 
-    注册所有 REPL 快捷键（hermes 模式）：
-    - Enter: 提交输入（不使用 validate_and_handle，避免 return value 冲突）
+    注册所有 REPL 快捷键：
+    - Enter: 提交输入
     - Alt+Enter: 多行换行
     - Ctrl+C: 中断 Agent 或退出
     - Ctrl+D: EOF 退出
     - Ctrl+L: 清屏
     - Ctrl+X C/N/L/Q/U/R/M: 压缩/新会话/列出会话/退出/撤销/重做/列出模型
     - Tab: 补全
-    - Ctrl+Up/Down: 滚动
-    - 鼠标滚轮: 滚动输出区域
+
+    注意：不再注册 Ctrl+Up/Down 和 <scroll-up>/<scroll-down>。
+    滚动由终端模拟器原生处理（mouse_support=False 让终端处理鼠标滚轮）。
 
     Args:
         callbacks: 快捷键回调集合
@@ -643,23 +731,12 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     kb = KeyBindings()
 
     # ---- Enter 键：hermes 模式 ----
-    # 不调用 buffer.validate_and_handle()，避免 "Return value already set" 崩溃。
-    # 直接提取文本、重置 buffer、调用 process_input 回调。
     @kb.add("enter")
     def handle_enter(event: KeyPressEvent) -> None:
-        """回车：提交输入（hermes 模式）
-
-        流程：
-        1. 从 buffer 提取文本
-        2. 重置 buffer
-        3. 如果文本非空，调用 process_input 回调
-        4. process_input 内部处理 /exit 时会设置 _should_exit 并调用 app.exit()
-        """
+        """回车：提交输入（hermes 模式）"""
         if callbacks.mode() == REPLMode.APPROVAL:
-            # 审批模式下，回车 = 确认（由审批处理器处理）
             return
         if callbacks.agent_running():
-            # Bug 6 修复：Agent 运行中，给出提示而非静默丢弃
             callbacks.add_output("Agent is running. Press Ctrl+C to interrupt first.", "system")
             app = callbacks.get_app()
             if app:
@@ -690,7 +767,6 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
             callbacks.add_output("Interrupted by user", "system")
             event.app.invalidate()
         else:
-            # 不运行中时 Ctrl+C = 退出（延迟调用，与 /exit 保持一致）
             callbacks.set_should_exit()
             async def _deferred_exit():
                 event.app.exit()
@@ -741,7 +817,6 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     @kb.add("c-x", "u")
     def handle_undo(event: KeyPressEvent) -> None:
         """Ctrl+X U：撤销"""
-        # BUG #9: 不允许在 Agent 运行时 undo
         if callbacks.agent_running():
             callbacks.add_output("Agent is running.", "system")
             event.app.invalidate()
@@ -752,7 +827,6 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     @kb.add("c-x", "r")
     def handle_redo(event: KeyPressEvent) -> None:
         """Ctrl+X R：重做"""
-        # BUG #9: 不允许在 Agent 运行时 redo
         if callbacks.agent_running():
             callbacks.add_output("Agent is running.", "system")
             event.app.invalidate()
@@ -774,50 +848,6 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
             buffer.start_completion()
         else:
             buffer.insert_text("    ")
-
-    # ---- 滚动：Ctrl+Up/Down + 鼠标滚轮 ----
-    @kb.add("c-up")
-    def handle_scroll_up(event: KeyPressEvent) -> None:
-        """Ctrl+Up：向上滚动输出区域"""
-        if callbacks.get_output_window:
-            win = callbacks.get_output_window()
-            if win:
-                win.vertical_scroll = max(0, win.vertical_scroll - 3)
-                event.app.invalidate()
-
-    @kb.add("c-down")
-    def handle_scroll_down(event: KeyPressEvent) -> None:
-        """Ctrl+Down：向下滚动输出区域"""
-        if callbacks.get_output_window:
-            win = callbacks.get_output_window()
-            if win:
-                content_h = win.content.line_count
-                h = getattr(win, "_gf_last_height", {}).get("value", 20)
-                max_scroll = max(0, content_h - h)
-                win.vertical_scroll = min(win.vertical_scroll + 3, max_scroll)
-                event.app.invalidate()
-
-    # 鼠标滚轮：prompt_toolkit 将滚轮事件映射为 <scroll-up>/<scroll-down>
-    @kb.add("<scroll-up>")
-    def handle_mouse_scroll_up(event: KeyPressEvent) -> None:
-        """鼠标滚轮向上：向上滚动输出区域"""
-        if callbacks.get_output_window:
-            win = callbacks.get_output_window()
-            if win:
-                win.vertical_scroll = max(0, win.vertical_scroll - 5)
-                event.app.invalidate()
-
-    @kb.add("<scroll-down>")
-    def handle_mouse_scroll_down(event: KeyPressEvent) -> None:
-        """鼠标滚轮向下：向下滚动输出区域"""
-        if callbacks.get_output_window:
-            win = callbacks.get_output_window()
-            if win:
-                content_h = win.content.line_count
-                h = getattr(win, "_gf_last_height", {}).get("value", 20)
-                max_scroll = max(0, content_h - h)
-                win.vertical_scroll = min(win.vertical_scroll + 5, max_scroll)
-                event.app.invalidate()
 
     return kb
 
@@ -846,7 +876,6 @@ def build_keybindings_from_repl(repl: Any) -> KeyBindings:
         handle_redo=repl._handle_redo,
         handle_list_models=repl._handle_list_models,
         get_app=lambda: repl.app,
-        get_output_window=lambda: repl._output_window,
         process_input=repl._process_user_input,
     )
     return build_keybindings(callbacks)
