@@ -658,9 +658,11 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
             callbacks.add_output("Interrupted by user", "system")
             event.app.invalidate()
         else:
-            # 不运行中时 Ctrl+C = 退出
+            # 不运行中时 Ctrl+C = 退出（延迟调用，与 /exit 保持一致）
             callbacks.set_should_exit()
-            event.app.exit()
+            async def _deferred_exit():
+                event.app.exit()
+            event.app.create_background_task(_deferred_exit())
 
     @kb.add("c-d", eager=True)
     def handle_ctrl_d(event: KeyPressEvent) -> None:

@@ -27,6 +27,9 @@ from tui.layout import (
 from tui.session import SessionInfo, session_manager
 from tui.slash_commands import SlashCommandCompleter, command_registry
 
+# 滚动到底部的哨兵值（prompt_toolkit 会 clamp 到实际最大值）
+SCROLL_TO_BOTTOM = 10**6
+
 
 class GrassFlowREPL:
     """GrassFlow 交互式 REPL（prompt_toolkit + 模块组合）"""
@@ -111,7 +114,7 @@ class GrassFlowREPL:
             self.output = self.output[len(self.output) - MAX_OUTPUT_LINES:]
         # 自动滚动到底部
         if self._output_window:
-            self._output_window.vertical_scroll = 10**6
+            self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
         # Bug 3 修复：触发重绘（refresh_interval=0 时必须显式 invalidate）
         if self.app:
             self.app.invalidate()
@@ -233,7 +236,7 @@ class GrassFlowREPL:
                 self.add_output(token, role="assistant")
             # Bug 1 修复：流式 token 直接修改 output 后触发自动滚动
             if self._output_window:
-                self._output_window.vertical_scroll = 10**6
+                self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
             inv()
         elif etype == "text_end":
             inv()
@@ -246,7 +249,7 @@ class GrassFlowREPL:
                 self.add_output(f"[thinking] {token}", role="system")
             # Bug 1 修复：thinking token 直接修改 output 后触发自动滚动
             if self._output_window:
-                self._output_window.vertical_scroll = 10**6
+                self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
             inv()
         elif etype == "tool_call_start":
             self.add_output(f"[tool] Calling {edata.get('name', '?')}...", role="tool")
@@ -300,7 +303,7 @@ class GrassFlowREPL:
                     self.add_output(token, role="assistant")
                 # Bug 1 修复：流式 token 直接修改 output 后触发自动滚动
                 if self._output_window:
-                    self._output_window.vertical_scroll = 10**6
+                    self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
             elif action == "thinking_delta":
                 token = kwargs.get("text", "")
                 if (self.output and self.output[-1].role == "system"
@@ -310,7 +313,7 @@ class GrassFlowREPL:
                     self.add_output(f"[thinking] {token}", role="system")
                 # Bug 1 修复：thinking token 直接修改 output 后触发自动滚动
                 if self._output_window:
-                    self._output_window.vertical_scroll = 10**6
+                    self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
             elif action == "tool_call_start":
                 self.add_output(f"[tool] Calling {kwargs.get('name', '?')}...", role="tool")
                 if kwargs.get("args"):
