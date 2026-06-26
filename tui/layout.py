@@ -257,6 +257,14 @@ def make_header_text_cb(
         }.get(current_mode, "NORMAL")
         result.append(("class:header-dim", f" |  {mode_text}"))
 
+        # Thinking 模式
+        thinking_config = None
+        if session:
+            thinking_config = session.metadata.get("thinking") if hasattr(session, 'metadata') else None
+        if thinking_config and isinstance(thinking_config, dict) and thinking_config.get("enabled", False):
+            effort = thinking_config.get("effort", "medium")
+            result.append(("class:header-dim", f" | 🧠 {effort}"))
+
         # 消息计数
         msg_count = len(output)
         result.append(("class:header-dim", f" |  {msg_count} msgs"))

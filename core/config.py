@@ -104,6 +104,7 @@ class GrassFlowConfig(BaseModel):
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    mcp_servers: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     workflows_dir: str = "~/.Grass/workflows"
     db_path: str = "~/.Grass/grassflow.db"
     plugins_dir: str = "~/.Grass/plugins"

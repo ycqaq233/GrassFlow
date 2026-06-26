@@ -40,6 +40,18 @@ def __getattr__(name: str):
         "get_active_rich_style": ".themes",
         "set_theme": ".themes",
         "list_themes": ".themes",
+        # 技能系统
+        "Skill": ".skills_system",
+        "SkillsManager": ".skills_system",
+        "get_skills_manager": ".skills_system",
+        "reset_skills_manager": ".skills_system",
+        # 上下文文件加载
+        "find_context_file": ".agents_md_loader",
+        "load_context_file": ".agents_md_loader",
+        "build_context_prompt": ".agents_md_loader",
+        "get_git_root": ".agents_md_loader",
+        "list_context_files": ".agents_md_loader",
+        "get_context_file_info": ".agents_md_loader",
     }
 
     if name in _LAZY_IMPORTS:
@@ -92,4 +104,16 @@ __all__ = [
     "get_active_rich_style",
     "set_theme",
     "list_themes",
+    # 技能系统
+    "Skill",
+    "SkillsManager",
+    "get_skills_manager",
+    "reset_skills_manager",
+    # 上下文文件加载
+    "find_context_file",
+    "load_context_file",
+    "build_context_prompt",
+    "get_git_root",
+    "list_context_files",
+    "get_context_file_info",
 ]
