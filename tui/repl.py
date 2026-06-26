@@ -52,7 +52,7 @@ class GrassFlowREPL:
         self.app: Optional[Application] = None
         self.input_buffer = Buffer(
             multiline=True, completer=self._completer, complete_while_typing=True,
-            accept_handler=self._accept_input,
+            accept_handler=None,  # 不使用 accept_handler，用自定义 Enter 绑定（hermes 模式）
         )
         self.kb = KeyBindings()
         self._undo_stack: List[OutputEntry] = []
@@ -112,6 +112,9 @@ class GrassFlowREPL:
         # 自动滚动到底部
         if self._output_window:
             self._output_window.vertical_scroll = 10**6
+        # Bug 3 修复：触发重绘（refresh_interval=0 时必须显式 invalidate）
+        if self.app:
+            self.app.invalidate()
 
     def clear_output(self) -> None:
         self.output.clear()
@@ -165,22 +168,21 @@ class GrassFlowREPL:
 
     # ==================== 输入处理 ====================
 
-    def _accept_input(self, buffer: Buffer) -> bool:
-        text = buffer.text.strip()
-        if not text:
-            buffer.reset()
-            return True
-        buffer.reset()
-        self._process_user_input(text)
-        return True
-
     def _process_user_input(self, text: str) -> None:
+        """处理用户输入（由 Enter 键绑定调用，不经过 accept_handler）
+
+        参考 hermes 模式：直接处理输入，/exit 时设置标志并延迟调用 app.exit()。
+        使用 create_background_task 延迟退出，避免在 keybinding handler 内
+        同步调用 app.exit() 导致 "Return value already set" 崩溃。
+        """
         if text.startswith("/"):
             if self._handle_slash_command(text):
-                # 只设置标志，不调用 app.exit()。
-                # app.exit() 由 handle_enter 在 validate_and_handle 返回后调用，
-                # 避免与 validate_and_handle 的 return value 冲突。
+                # /exit 命令：延迟退出，避免 keybinding handler 内同步调用 app.exit()
                 self._should_exit = True
+                if self.app and self.app.is_running:
+                    async def _deferred_exit():
+                        self.app.exit()
+                    self.app.create_background_task(_deferred_exit())
             return
         if text.startswith("!"):
             shell_cmd = text[1:].strip()
@@ -198,7 +200,7 @@ class GrassFlowREPL:
         cmd_def = command_registry.get(cmd)
         if cmd_def:
             command_registry.execute(cmd, args, self)
-            return cmd_def.handler_name == "_cmd_exit"
+            return cmd_def.name == "exit"
         self.add_output(f"Unknown command: /{cmd}. Type /help for available commands.", role="error")
         return False
 
@@ -229,6 +231,9 @@ class GrassFlowREPL:
                 self.output[-1].text += token
             else:
                 self.add_output(token, role="assistant")
+            # Bug 1 修复：流式 token 直接修改 output 后触发自动滚动
+            if self._output_window:
+                self._output_window.vertical_scroll = 10**6
             inv()
         elif etype == "text_end":
             inv()
@@ -239,6 +244,9 @@ class GrassFlowREPL:
                 self.output[-1].text += token
             else:
                 self.add_output(f"[thinking] {token}", role="system")
+            # Bug 1 修复：thinking token 直接修改 output 后触发自动滚动
+            if self._output_window:
+                self._output_window.vertical_scroll = 10**6
             inv()
         elif etype == "tool_call_start":
             self.add_output(f"[tool] Calling {edata.get('name', '?')}...", role="tool")
@@ -281,13 +289,18 @@ class GrassFlowREPL:
 
     def _process_ui_updates(self) -> None:
         """消费 Agent Loop 后台线程的 UI 更新"""
+        has_updates = False
         for action, kwargs in self._agent.drain_ui_updates():
+            has_updates = True
             if action == "text_delta":
                 token = kwargs.get("text", "")
                 if self.output and self.output[-1].role == "assistant":
                     self.output[-1].text += token
                 else:
                     self.add_output(token, role="assistant")
+                # Bug 1 修复：流式 token 直接修改 output 后触发自动滚动
+                if self._output_window:
+                    self._output_window.vertical_scroll = 10**6
             elif action == "thinking_delta":
                 token = kwargs.get("text", "")
                 if (self.output and self.output[-1].role == "system"
@@ -295,6 +308,9 @@ class GrassFlowREPL:
                     self.output[-1].text += token
                 else:
                     self.add_output(f"[thinking] {token}", role="system")
+                # Bug 1 修复：thinking token 直接修改 output 后触发自动滚动
+                if self._output_window:
+                    self._output_window.vertical_scroll = 10**6
             elif action == "tool_call_start":
                 self.add_output(f"[tool] Calling {kwargs.get('name', '?')}...", role="tool")
                 if kwargs.get("args"):
@@ -305,8 +321,9 @@ class GrassFlowREPL:
                 self.add_output(f"[error] {kwargs.get('message', 'Unknown error')}", role="error")
             elif action == "interrupted":
                 self.add_output("Interrupted.", role="system")
-            if self.app:
-                self.app.invalidate()
+        # Bug 2 修复：循环结束后只 invalidate 一次，避免重入
+        if has_updates and self.app:
+            self.app.invalidate()
 
     # ==================== 辅助方法 ====================
 
@@ -370,15 +387,20 @@ class GrassFlowREPL:
             self.add_output("AgentLoop not available. Falling back to echo mode.", role="system")
         try:
             self.app = Application(
-                layout=self._build_layout(), key_bindings=self.kb, style=build_pt_style(self._theme),
-                full_screen=True, mouse_support=True, enable_page_navigation_bindings=True,
+                layout=self._build_layout(),
+                key_bindings=self.kb,
+                style=build_pt_style(self._theme),
+                full_screen=False,       # 非全屏模式，输出向上滚动（hermes 模式）
+                mouse_support=True,      # 启用鼠标事件（滚轮滚动输出区域）
+                refresh_interval=0.0,    # 禁用定时重绘，避免与终端 auto-scroll 冲突
+                erase_when_done=True,    # 退出时清除底部 UI chrome，不留在 scrollback 中
             )
         except Exception as e:
             self._output_buffer = [(BANNER.strip(), "system")]
             self._run_fallback(f"prompt_toolkit 不可用 ({e})，使用降级模式。输入 /exit 退出。")
             return
         self.add_output(BANNER.strip(), role="system")
-        self.add_output("  GrassFlow REPL\n  Type /help for commands, Ctrl+X Q to exit.\n", role="system")
+        self.add_output("  GrassFlow REPL\n  Type /help for commands, /exit to quit.\n", role="system")
 
         def _on_invalidate(_sender=None):
             self._process_ui_updates()
@@ -386,6 +408,8 @@ class GrassFlowREPL:
         self.app.on_invalidate += _on_invalidate
         try:
             self.app.run()
+        except (EOFError, KeyboardInterrupt, BrokenPipeError):
+            pass
         except Exception as e:
             self.add_output(f"REPL error: {e}", role="error")
         finally:
@@ -415,15 +439,27 @@ class AsyncGrassFlowREPL(GrassFlowREPL):
         self._running, self._should_exit = True, False
         self._init_session()
         self.add_output(BANNER.strip(), role="system")
-        self.add_output("  GrassFlow REPL (async)\n  Type /help for commands, Ctrl+X Q to exit.\n", role="system")
+        self.add_output("  GrassFlow REPL (async)\n  Type /help for commands, /exit to quit.\n", role="system")
         if self._agent.init_agent_loop():
             self.add_output("Agent loop initialized.", role="system")
         self.app = Application(
-            layout=self._build_layout(), key_bindings=self.kb, style=build_pt_style(self._theme),
-            full_screen=True, mouse_support=True, enable_page_navigation_bindings=True,
+            layout=self._build_layout(),
+            key_bindings=self.kb,
+            style=build_pt_style(self._theme),
+            full_screen=False,       # 非全屏模式，输出向上滚动（hermes 模式）
+            mouse_support=True,      # 启用鼠标事件（滚轮滚动输出区域）
+            refresh_interval=0.0,    # 禁用定时重绘，避免与终端 auto-scroll 冲突
+            erase_when_done=True,    # 退出时清除底部 UI chrome，不留在 scrollback 中
         )
+        # Bug 4 修复：注册 on_invalidate 钩子，与 run() 保持一致
+        def _on_invalidate(_sender=None):
+            self._process_ui_updates()
+
+        self.app.on_invalidate += _on_invalidate
         try:
             await self.app.run_async()
+        except (EOFError, KeyboardInterrupt, BrokenPipeError):
+            pass
         except Exception as e:
             self.add_output(f"REPL error: {e}", role="error")
         finally:

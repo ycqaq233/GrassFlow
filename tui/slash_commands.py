@@ -156,10 +156,14 @@ def _cmd_redo(repl, args: List[str]) -> None:
 
 
 def _cmd_exit(repl, args: List[str]) -> None:
-    """退出"""
+    """退出
+
+    职责划分：
+    - 本函数只负责设置 _should_exit 标志
+    - app.exit() 由 _process_user_input 统一调用
+    - 避免与 hermes 模式的退出流程冲突（双重 app.exit 导致 "Return value already set"）
+    """
     repl._should_exit = True
-    if repl.app:
-        repl.app.exit()
 
 
 def _cmd_theme(repl, args: List[str]) -> None:

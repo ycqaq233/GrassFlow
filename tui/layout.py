@@ -8,6 +8,12 @@ GrassFlow REPL Layout — prompt_toolkit 布局、样式和快捷键
 - 快捷键：build_keybindings()
 - 渲染回调：_get_header_text, _get_output_text, _get_status_text, _get_input_prefix
 - 数据模型：OutputEntry, REPLMode, REPLTheme, BUILTIN_THEMES
+
+重写说明（hermes 模式）：
+- Enter 键不再调用 buffer.validate_and_handle()，避免 "Return value already set" 崩溃
+- 改为自定义 Enter 绑定：提取文本 → 重置 buffer → 调用 process_input 回调
+- /exit 由 _process_user_input 直接设置 _should_exit 并调用 app.exit()
+- 滚动：Ctrl+Up/Down + 鼠标滚轮支持
 """
 
 from __future__ import annotations
@@ -562,6 +568,7 @@ class KeybindingCallbacks:
         handle_list_models: Callable[[], None],
         get_app: Callable[[], Any],
         get_output_window: Callable[[], Any] = None,
+        process_input: Optional[Callable[[str], None]] = None,
     ):
         self.mode = mode
         self.agent_running = agent_running
@@ -578,13 +585,14 @@ class KeybindingCallbacks:
         self.handle_list_models = handle_list_models
         self.get_app = get_app
         self.get_output_window = get_output_window
+        self.process_input = process_input
 
 
 def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     """构建 prompt_toolkit KeyBindings
 
-    注册所有 REPL 快捷键：
-    - Enter: 提交输入
+    注册所有 REPL 快捷键（hermes 模式）：
+    - Enter: 提交输入（不使用 validate_and_handle，避免 return value 冲突）
     - Alt+Enter: 多行换行
     - Ctrl+C: 中断 Agent 或退出
     - Ctrl+D: EOF 退出
@@ -592,6 +600,7 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     - Ctrl+X C/N/L/Q/U/R/M: 压缩/新会话/列出会话/退出/撤销/重做/列出模型
     - Tab: 补全
     - Ctrl+Up/Down: 滚动
+    - 鼠标滚轮: 滚动输出区域
 
     Args:
         callbacks: 快捷键回调集合
@@ -601,22 +610,39 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     """
     kb = KeyBindings()
 
+    # ---- Enter 键：hermes 模式 ----
+    # 不调用 buffer.validate_and_handle()，避免 "Return value already set" 崩溃。
+    # 直接提取文本、重置 buffer、调用 process_input 回调。
     @kb.add("enter")
     def handle_enter(event: KeyPressEvent) -> None:
-        """回车：提交输入"""
+        """回车：提交输入（hermes 模式）
+
+        流程：
+        1. 从 buffer 提取文本
+        2. 重置 buffer
+        3. 如果文本非空，调用 process_input 回调
+        4. process_input 内部处理 /exit 时会设置 _should_exit 并调用 app.exit()
+        """
         if callbacks.mode() == REPLMode.APPROVAL:
-            # 审批模式下，回车 = 确认
+            # 审批模式下，回车 = 确认（由审批处理器处理）
             return
         if callbacks.agent_running():
-            # Agent 运行中，不处理
+            # Bug 6 修复：Agent 运行中，给出提示而非静默丢弃
+            callbacks.add_output("Agent is running. Press Ctrl+C to interrupt first.", "system")
+            app = callbacks.get_app()
+            if app:
+                app.invalidate()
             return
-        # 正常提交到 input_buffer 的 accept_handler
+
         buffer = event.app.current_buffer
-        buffer.validate_and_handle()
-        # /exit 命令在 accept_handler 中设置 should_exit 标志，
-        # 在 validate_and_handle 返回后再调用 app.exit() 避免冲突
-        if callbacks.should_exit():
-            event.app.exit()
+        text = buffer.text.strip()
+        buffer.reset()
+
+        if not text:
+            return
+
+        if callbacks.process_input:
+            callbacks.process_input(text)
 
     @kb.add("escape", "enter")
     def handle_alt_enter(event: KeyPressEvent) -> None:
@@ -694,12 +720,14 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
 
     @kb.add("tab")
     def handle_tab(event: KeyPressEvent) -> None:
-        """Tab：命令/文件补全"""
+        """Tab：命令/文件补全，无补全器时插入 4 空格"""
         buffer = event.app.current_buffer
         if buffer.completer:
-            # 让 prompt_toolkit 处理补全
-            pass
+            buffer.start_completion()
+        else:
+            buffer.insert_text("    ")
 
+    # ---- 滚动：Ctrl+Up/Down ----
     @kb.add("c-up")
     def handle_scroll_up(event: KeyPressEvent) -> None:
         """Ctrl+Up：向上滚动输出区域"""
@@ -746,5 +774,6 @@ def build_keybindings_from_repl(repl: Any) -> KeyBindings:
         handle_list_models=repl._handle_list_models,
         get_app=lambda: repl.app,
         get_output_window=lambda: repl._output_window,
+        process_input=repl._process_user_input,
     )
     return build_keybindings(callbacks)
