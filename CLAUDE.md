@@ -580,3 +580,85 @@ git commit -m "描述本次修改"
 |------|------|------|
 | Electron GUI 视觉设计 | `/frontend-design` | UI 设计指导，避免模板化 |
 | 项目计划拆解为 issue | `/to-issues` | 把制作计划拆成可独立领取的任务 |
+
+---
+
+## 参考项目与开发哲学
+
+### ⚠️ 核心原则：不要重复造轮子！
+
+opencode 和 hermes 是**商业级、完整的 AI Agent 框架**，均采用 MIT 协议。它们已经解决了大量工程问题，GrassFlow 应该：
+
+1. **参考甚至照搬** 它们的项目结构和源码文件（MIT 协议允许）
+2. **先读分析报告** — `docs/` 文件夹下有大量分析报告，重新调查前必须先阅读
+3. **站在巨人肩膀上** — 不要从零实现已有成熟方案的功能
+
+### 参考项目路径
+
+| 项目 | 路径 | 协议 | 特点 |
+|------|------|------|------|
+| **opencode** | `E:\opencode-desktop\opencode-dev\opencode-dev` | MIT | TypeScript, TUI 精美, MCP 完整, 命令面板 |
+| **hermes** | `E:\opencode-desktop\hermes-agent-main\hermes-agent-main` | MIT | Python, 功能极丰富, 80+ CLI 命令, Skills 系统 |
+
+### 已有分析报告（`docs/` 目录）
+
+| 报告 | 内容 |
+|------|------|
+| `hermes-opencode-analysis.md` | 两者对比分析 |
+| `opencode-cli-features.md` | opencode CLI 功能清单 |
+| `opencode-tui-analysis.md` | opencode TUI 架构分析 |
+| `hermes-tui-analysis.md` | hermes TUI/CLI 源码分析 |
+| `grassflow-cli-gap-analysis.md` | GrassFlow 与竞品差距分析 |
+| `grassflow-cli-current.md` | GrassFlow 当前 CLI 状态 |
+| `grassflow-current-analysis.md` | GrassFlow 整体分析 |
+| `official-docs-analysis.md` | 官方文档分析 |
+| `refactoring-plan.md` | 重构计划 |
+| `dsl-v2-specification.md` | DSL v2 规范 |
+
+### 功能实现优先级参考
+
+**从 hermes 搬运（Python 项目，直接可用）：**
+- Thinking 模式：`agent/anthropic_adapter.py` (adaptive + manual budget)
+- 思考块清理：`agent/think_scrubber.py` (StreamingThinkScrubber)
+- 推理力度解析：`hermes_constants.py:parse_reasoning_effort()`
+- MCP 客户端：`tools/mcp_tool.py` (~2500 行，完整实现)
+- MCP 配置：`hermes_cli/mcp_config.py`
+- Skills 系统：`tools/skills_tool.py` + `agent/prompt_builder.py`
+- AGENTS.md 加载：`agent/prompt_builder.py:build_context_files_prompt()`
+- 系统提示词三层架构：`agent/system_prompt.py`
+- 命令注册：`hermes_cli/commands.py:COMMAND_REGISTRY`
+
+**从 opencode 参考（TypeScript，参考设计）：**
+- 命令面板：`packages/tui/src/component/command-palette.tsx`
+- 命令注册模式：`slashName` + `slashAliases` + `category`
+- MCP 配置格式：`opencode.json` 的 `mcp` 字段
+- 模型变体（思考力度）：`/variants` 命令
+
+### 当前 GrassFlow TUI 模块文件清单
+
+```
+tui/
+├── __init__.py
+├── repl.py                 # REPL 主循环
+├── layout.py               # prompt_toolkit 布局/样式/快捷键
+├── slash_commands.py       # 命令注册表 + 补全器 + 21 个命令
+├── agent_loop.py           # Agent 感知-思考-行动-观察循环
+├── agent_integration.py    # Agent 与 REPL 集成
+├── stream_handler.py       # 流式输出处理
+├── session.py              # 会话管理 (SQLite)
+├── context_compressor.py   # 上下文压缩器 (未集成)
+├── config_integration.py   # 配置集成
+├── thinking_renderer.py    # 思考过程渲染
+├── permission_handler.py   # 权限处理器
+├── tool_executor.py        # 工具执行器
+├── display.py              # Rich 终端显示
+├── cli.py                  # CLI 入口
+├── error_handler.py        # 错误处理
+├── dsl_parser.py           # DSL 解析器
+├── runner.py               # 工作流执行器
+├── templates.py            # 工作流模板
+├── models.py               # 数据模型
+├── mcp_client.py           # MCP 客户端 (未集成)
+├── compat.py               # 兼容层
+└── fallback.py             # 降级模式
+```
