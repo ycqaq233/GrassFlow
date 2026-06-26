@@ -211,6 +211,15 @@ class ThinkingParser:
 
         return results
 
+    def flush(self) -> List[Tuple[ThinkingState, str]]:
+        """刷新 _pending 中的残留数据"""
+        results = []
+        if self._pending:
+            state = self.state if self.state != ThinkingState.THINKING_CLOSED else ThinkingState.NORMAL
+            results.append((state, self._pending))
+            self._pending = ""
+        return results
+
     def reset(self) -> None:
         """重置解析器状态"""
         self.state = ThinkingState.NORMAL
@@ -285,7 +294,20 @@ class MarkdownSegmenter:
                 return None
 
     def flush(self) -> Optional[Tuple[str, Optional[str]]]:
-        """刷新缓冲区"""
+        """刷新缓冲区
+
+        注意：返回值可能是 2-tuple ("text", content) 或 3-tuple ("code_end", code, lang)。
+        调用方需根据 result[0] 判断类型。
+        """
+        # 如果在代码块内刷新，输出未闭合的代码块内容
+        if self._in_code_block and self._code_buffer:
+            code = "\n".join(self._code_buffer)
+            lang = self._code_language
+            self._code_buffer.clear()
+            self._code_language = ""
+            self._in_code_block = False
+            return ("code_end", code, lang)
+
         if self._text_buffer:
             result = ("text", "\n".join(self._text_buffer))
             self._text_buffer.clear()
@@ -501,8 +523,14 @@ class StreamHandler:
         """处理工具调用事件"""
         self._flush_output()
 
-        tool_name = event.data.get("tool_name", "unknown")
-        tool_args = event.data.get("arguments", {})
+        # 兼容两种格式: {"tool_call": ToolCall(...)} 或 {"tool_name": ..., "arguments": ...}
+        tc = event.data.get("tool_call")
+        if tc is not None:
+            tool_name = getattr(tc, "name", None) or event.data.get("tool_name", "unknown")
+            tool_args = getattr(tc, "arguments", None) or {}
+        else:
+            tool_name = event.data.get("tool_name", "unknown")
+            tool_args = event.data.get("arguments", {})
 
         if self.on_tool_call:
             self.on_tool_call(tool_name, tool_args)
@@ -657,6 +685,9 @@ class StreamHandler:
         if remaining and HAS_RICH and self.console:
             if remaining[0] == "text":
                 self.console.print(Markdown(remaining[1]))
+            elif remaining[0] == "code_end":
+                code, lang = remaining[1], remaining[2]
+                self._render_code_block(code, lang)
 
         # 刷新行缓冲区
         if self._line_buffer and HAS_RICH and self.console:
@@ -664,7 +695,7 @@ class StreamHandler:
             self._line_buffer = ""
 
         # 刷新 thinking 解析器
-        thinking_results = self._thinking_parser.feed("")
+        thinking_results = self._thinking_parser.flush()
         for state, content in thinking_results:
             if content and HAS_RICH and self.console:
                 self._render_content(content)

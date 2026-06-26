@@ -261,7 +261,11 @@ class MCPManager:
                 if state.stopping:
                     break
 
-                logger.warning("MCP 服务器 %r 进程退出，准备重连", name)
+                attempt += 1
+                if attempt >= MAX_RECONNECT_ATTEMPTS:
+                    logger.error("MCP 服务器 %r 进程反复退出，重连 %d 次后放弃", name, attempt)
+                    break
+                logger.warning("MCP 服务器 %r 进程退出，准备重连 (%d/%d)", name, attempt, MAX_RECONNECT_ATTEMPTS)
 
             except Exception as exc:
                 state.connected = False
@@ -538,11 +542,15 @@ class MCPManager:
             return None
 
         async def _read_line() -> Optional[bytes]:
-            """读取一行（以 \\r\\n 结尾）"""
+            """读取一行（以 \\r\\n 结尾），使用 deadline 累计超时"""
             buf = b""
+            deadline = asyncio.get_event_loop().time() + timeout
             while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
                 ch = await asyncio.wait_for(
-                    process.stdout.read(1), timeout=timeout  # type: ignore[arg-type]
+                    process.stdout.read(1), timeout=remaining  # type: ignore[arg-type]
                 )
                 if not ch:
                     return None  # EOF

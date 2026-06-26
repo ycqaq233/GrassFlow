@@ -594,6 +594,7 @@ class KeybindingCallbacks:
         self.get_app = get_app
         self.get_output_window = get_output_window
         self.process_input = process_input
+        self.set_user_scrolled: Optional[Callable[[], None]] = None
 
 
 def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
@@ -678,7 +679,9 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
         buffer = event.app.current_buffer
         if buffer.text == "":
             callbacks.set_should_exit()
-            event.app.exit()
+            async def _deferred_exit():
+                event.app.exit()
+            event.app.create_background_task(_deferred_exit())
 
     @kb.add("c-l")
     def handle_ctrl_l(event: KeyPressEvent) -> None:
@@ -708,17 +711,29 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     def handle_exit(event: KeyPressEvent) -> None:
         """Ctrl+X Q：退出"""
         callbacks.set_should_exit()
-        event.app.exit()
+        async def _deferred_exit():
+            event.app.exit()
+        event.app.create_background_task(_deferred_exit())
 
     @kb.add("c-x", "u")
     def handle_undo(event: KeyPressEvent) -> None:
         """Ctrl+X U：撤销"""
+        # BUG #9: 不允许在 Agent 运行时 undo
+        if callbacks.agent_running():
+            callbacks.add_output("Agent is running.", "system")
+            event.app.invalidate()
+            return
         callbacks.handle_undo()
         event.app.invalidate()
 
     @kb.add("c-x", "r")
     def handle_redo(event: KeyPressEvent) -> None:
         """Ctrl+X R：重做"""
+        # BUG #9: 不允许在 Agent 运行时 redo
+        if callbacks.agent_running():
+            callbacks.add_output("Agent is running.", "system")
+            event.app.invalidate()
+            return
         callbacks.handle_redo()
         event.app.invalidate()
 
@@ -737,10 +752,12 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
         else:
             buffer.insert_text("    ")
 
-    # ---- 滚动：Ctrl+Up/Down ----
+    # ---- 滚动：Ctrl+Up/Down + 鼠标滚轮 ----
     @kb.add("c-up")
     def handle_scroll_up(event: KeyPressEvent) -> None:
         """Ctrl+Up：向上滚动输出区域"""
+        if callbacks.set_user_scrolled:
+            callbacks.set_user_scrolled()
         if callbacks.get_output_window:
             win = callbacks.get_output_window()
             if win:
@@ -750,10 +767,35 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
     @kb.add("c-down")
     def handle_scroll_down(event: KeyPressEvent) -> None:
         """Ctrl+Down：向下滚动输出区域"""
+        if callbacks.set_user_scrolled:
+            callbacks.set_user_scrolled()
         if callbacks.get_output_window:
             win = callbacks.get_output_window()
             if win:
                 win.vertical_scroll += 3
+                event.app.invalidate()
+
+    # 鼠标滚轮：prompt_toolkit 将滚轮事件映射为 <scroll-up>/<scroll-down>
+    @kb.add("<scroll-up>")
+    def handle_mouse_scroll_up(event: KeyPressEvent) -> None:
+        """鼠标滚轮向上：向上滚动输出区域"""
+        if callbacks.set_user_scrolled:
+            callbacks.set_user_scrolled()
+        if callbacks.get_output_window:
+            win = callbacks.get_output_window()
+            if win:
+                win.vertical_scroll = max(0, win.vertical_scroll - 5)
+                event.app.invalidate()
+
+    @kb.add("<scroll-down>")
+    def handle_mouse_scroll_down(event: KeyPressEvent) -> None:
+        """鼠标滚轮向下：向下滚动输出区域"""
+        if callbacks.set_user_scrolled:
+            callbacks.set_user_scrolled()
+        if callbacks.get_output_window:
+            win = callbacks.get_output_window()
+            if win:
+                win.vertical_scroll += 5
                 event.app.invalidate()
 
     return kb
@@ -786,4 +828,5 @@ def build_keybindings_from_repl(repl: Any) -> KeyBindings:
         get_output_window=lambda: repl._output_window,
         process_input=repl._process_user_input,
     )
+    callbacks.set_user_scrolled = lambda: setattr(repl, "_user_scrolled", True)
     return build_keybindings(callbacks)

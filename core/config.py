@@ -238,7 +238,7 @@ class ConfigManager:
             for key, value in override.items():
                 if key in result and isinstance(result[key], dict) and isinstance(value, dict):
                     result[key] = deep_merge(result[key], value)
-                elif value is not None:  # 只覆盖非 None 值
+                elif key in override:  # 覆盖 override 中存在的字段，包括显式 None
                     result[key] = value
             return result
 
@@ -390,7 +390,7 @@ class ConfigManager:
             "project": {
                 "path": str(self.project_config_file),
                 "exists": self.project_config_file.exists(),
-                "config": self.load_project_config().model_dump() if self.project_config_file.exists() else None
+                "config": (pc.model_dump() if (pc := self.load_project_config()) is not None else None)
             },
             "merged": self.load_config().model_dump()
         }

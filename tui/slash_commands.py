@@ -658,7 +658,16 @@ def _handle_undo(repl) -> None:
         repl.add_output("Nothing to undo.", role="system")
         return
 
-    entry = repl.output.pop()
+    # 从末尾向前查找第一个非 system 条目（跳过 "Undone:"/"Redone:" 等反馈消息）
+    idx = len(repl.output) - 1
+    while idx >= 0 and repl.output[idx].role == "system":
+        idx -= 1
+
+    if idx < 0:
+        repl.add_output("Nothing to undo.", role="system")
+        return
+
+    entry = repl.output.pop(idx)
     repl._undo_stack.append(entry)
     repl.add_output(f"Undone: {entry.text[:80]}...", role="system")
 
@@ -669,9 +678,16 @@ def _handle_redo(repl) -> None:
         repl.add_output("Nothing to redo.", role="system")
         return
 
+    # 跳过 system 消息（与 _handle_undo 一致，避免自我污染）
+    while repl._undo_stack and repl._undo_stack[-1].role == "system":
+        repl._undo_stack.pop()
+
+    if not repl._undo_stack:
+        repl.add_output("Nothing to redo.", role="system")
+        return
+
     entry = repl._undo_stack.pop()
     repl.output.append(entry)
-    repl.add_output(f"Redone: {entry.text[:80]}...", role="system")
 
 
 def _handle_list_models(repl) -> None:
@@ -1091,7 +1107,6 @@ class SlashCommandCompleter(Completer):
     # 命令参数补全映射
     _ARG_COMPLETIONS: Dict[str, List[str]] = {
         "think": ["on", "off", "low", "medium", "high", "xhigh", "show"],
-        "reasoning": ["on", "off", "low", "medium", "high", "xhigh", "show"],
         "theme": ["default", "dark", "light", "cyber", "ocean"],
         "mcp": ["list", "start", "stop", "status", "add", "remove", "test"],
         "skills": ["list", "view", "search", "install"],

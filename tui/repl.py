@@ -8,6 +8,8 @@ import json
 import os
 import queue
 import subprocess
+import threading
+import time
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -60,10 +62,13 @@ class GrassFlowREPL:
         self.kb = KeyBindings()
         self._undo_stack: List[OutputEntry] = []
         self._redo_stack: List[OutputEntry] = []
+        self._retry_last = False
+        self._user_scrolled = False  # BUG #2: track manual scroll by user
         self._token_count = 0
         self._token_limit = 128000
         self._last_latency_ms = 0
         self._api_call_count = 0
+        self._api_start_time: float = 0.0
         self._setup_keybindings()
 
     # ==================== 主题 ====================
@@ -112,8 +117,8 @@ class GrassFlowREPL:
         self.output.append(entry)
         if len(self.output) > MAX_OUTPUT_LINES:
             self.output = self.output[len(self.output) - MAX_OUTPUT_LINES:]
-        # 自动滚动到底部
-        if self._output_window:
+        # BUG #2: 只在用户未手动滚动时自动滚到底部
+        if self._output_window and not self._user_scrolled:
             self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
         # Bug 3 修复：触发重绘（refresh_interval=0 时必须显式 invalidate）
         if self.app:
@@ -121,6 +126,8 @@ class GrassFlowREPL:
 
     def clear_output(self) -> None:
         self.output.clear()
+        self._undo_stack.clear()
+        self._redo_stack.clear()
 
     # ==================== 布局 / 快捷键（委托给 tui.layout） ====================
 
@@ -168,6 +175,7 @@ class GrassFlowREPL:
         self._token_count = 0
         self._last_latency_ms = 0
         self._api_call_count = 0
+        self._api_start_time = 0.0
 
     # ==================== 输入处理 ====================
 
@@ -192,6 +200,19 @@ class GrassFlowREPL:
             self.add_output(f"! {shell_cmd}", role="user")
             self._execute_shell(shell_cmd)
             return
+        # BUG 1 fix: consume _retry_last flag — replay the last user message
+        if self._retry_last:
+            self._retry_last = False
+            # Find the last user message in output and replay it
+            last_user_text = None
+            for entry in reversed(self.output):
+                if entry.role == "user":
+                    last_user_text = entry.text
+                    break
+            if last_user_text:
+                text = last_user_text
+            # If no user message found, fall through with the original input
+
         self._handle_agent_message(text)
 
     def _handle_slash_command(self, text: str) -> bool:
@@ -208,6 +229,8 @@ class GrassFlowREPL:
         return False
 
     def _handle_agent_message(self, text: str) -> None:
+        self._user_scrolled = False  # BUG #2: 新消息开始时重置手动滚动标志
+        self._api_start_time = time.time()  # BUG #6: 记录 API 调用开始时间
         self.add_output(text, role="user")
         if not self._agent.is_initialized:
             self.add_output(
@@ -234,8 +257,8 @@ class GrassFlowREPL:
                 self.output[-1].text += token
             else:
                 self.add_output(token, role="assistant")
-            # Bug 1 修复：流式 token 直接修改 output 后触发自动滚动
-            if self._output_window:
+            # Bug 1 修复：流式 token 直接修改 output 后触发自动滚动（BUG #2: 尊重用户手动滚动）
+            if self._output_window and not self._user_scrolled:
                 self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
             inv()
         elif etype == "text_end":
@@ -247,8 +270,8 @@ class GrassFlowREPL:
                 self.output[-1].text += token
             else:
                 self.add_output(f"[thinking] {token}", role="system")
-            # Bug 1 修复：thinking token 直接修改 output 后触发自动滚动
-            if self._output_window:
+            # Bug 1 修复：thinking token 直接修改 output 后触发自动滚动（BUG #2: 尊重用户手动滚动）
+            if self._output_window and not self._user_scrolled:
                 self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
             inv()
         elif etype == "tool_call_start":
@@ -273,6 +296,10 @@ class GrassFlowREPL:
             if isinstance(edata, dict):
                 self._token_count = edata.get("total_tokens", self._token_count)
                 self._api_call_count += 1
+                if "latency_ms" in edata:
+                    self._last_latency_ms = edata["latency_ms"]
+                elif self._api_start_time > 0:
+                    self._last_latency_ms = int((time.time() - self._api_start_time) * 1000)
             inv()
         return False
 
@@ -301,8 +328,8 @@ class GrassFlowREPL:
                     self.output[-1].text += token
                 else:
                     self.add_output(token, role="assistant")
-                # Bug 1 修复：流式 token 直接修改 output 后触发自动滚动
-                if self._output_window:
+                # Bug 1 修复：流式 token 直接修改 output 后触发自动滚动（BUG #2: 尊重用户手动滚动）
+                if self._output_window and not self._user_scrolled:
                     self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
             elif action == "thinking_delta":
                 token = kwargs.get("text", "")
@@ -311,15 +338,18 @@ class GrassFlowREPL:
                     self.output[-1].text += token
                 else:
                     self.add_output(f"[thinking] {token}", role="system")
-                # Bug 1 修复：thinking token 直接修改 output 后触发自动滚动
-                if self._output_window:
+                # Bug 1 修复：thinking token 直接修改 output 后触发自动滚动（BUG #2: 尊重用户手动滚动）
+                if self._output_window and not self._user_scrolled:
                     self._output_window.vertical_scroll = SCROLL_TO_BOTTOM
             elif action == "tool_call_start":
                 self.add_output(f"[tool] Calling {kwargs.get('name', '?')}...", role="tool")
                 if kwargs.get("args"):
                     self.add_output(f"  args: {json.dumps(kwargs['args'], ensure_ascii=False)[:300]}", role="tool")
             elif action == "tool_result":
-                self.add_output(f"[tool result] {kwargs.get('output', '')}", role="tool")
+                is_err = kwargs.get("is_error", False)
+                result_text = kwargs.get('output', '')
+                prefix = "[tool result] [ERROR] " if is_err else "[tool result] "
+                self.add_output(f"{prefix}{result_text}", role="error" if is_err else "tool")
             elif action == "error":
                 self.add_output(f"[error] {kwargs.get('message', 'Unknown error')}", role="error")
             elif action == "interrupted":
@@ -354,18 +384,21 @@ class GrassFlowREPL:
         self._agent.interrupt()
 
     def _execute_shell(self, command: str) -> None:
-        try:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd())
-            output = result.stdout
-            if result.stderr:
-                output += f"\n[stderr]\n{result.stderr}"
-            if result.returncode != 0:
-                output += f"\n[exit code: {result.returncode}]"
-            self.add_output(output[:2000], role="tool")
-        except subprocess.TimeoutExpired:
-            self.add_output(f"Command timed out: {command}", role="error")
-        except Exception as e:
-            self.add_output(f"Shell error: {e}", role="error")
+        """在后台线程中执行 shell 命令，避免阻塞 UI 线程（BUG #4）"""
+        def _run():
+            try:
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd())
+                output = result.stdout
+                if result.stderr:
+                    output += f"\n[stderr]\n{result.stderr}"
+                if result.returncode != 0:
+                    output += f"\n[exit code: {result.returncode}]"
+                self.add_output(output[:2000], role="tool")
+            except subprocess.TimeoutExpired:
+                self.add_output(f"Command timed out: {command}", role="error")
+            except Exception as e:
+                self.add_output(f"Shell error: {e}", role="error")
+        threading.Thread(target=_run, daemon=True).start()
 
     # ==================== 生命周期 ====================
 
@@ -399,7 +432,7 @@ class GrassFlowREPL:
                 erase_when_done=True,    # 退出时清除底部 UI chrome，不留在 scrollback 中
             )
         except Exception as e:
-            self._output_buffer = [(BANNER.strip(), "system")]
+            self.add_output(BANNER.strip(), role="system")
             self._run_fallback(f"prompt_toolkit 不可用 ({e})，使用降级模式。输入 /exit 退出。")
             return
         self.add_output(BANNER.strip(), role="system")

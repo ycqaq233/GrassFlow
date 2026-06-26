@@ -222,7 +222,7 @@ def _parse_yaml_simple(yaml_str: str) -> Dict[str, Any]:
             elif value.lower() in ("false", "no", "off"):
                 result[key] = False
             # 数字
-            elif value.isdigit():
+            elif re.fullmatch(r"-?\d+", value):
                 result[key] = int(value)
             elif _is_float(value):
                 result[key] = float(value)
@@ -256,7 +256,7 @@ def _parse_yaml_simple(yaml_str: str) -> Dict[str, Any]:
                     result[current_key][nested_key] = True
                 elif nested_value.lower() in ("false", "no", "off"):
                     result[current_key][nested_key] = False
-                elif nested_value.isdigit():
+                elif re.fullmatch(r"-?\d+", nested_value):
                     result[current_key][nested_key] = int(nested_value)
                 elif _is_float(nested_value):
                     result[current_key][nested_key] = float(nested_value)

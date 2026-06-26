@@ -315,11 +315,12 @@ def get_context_file_info(start_dir: Optional[Path] = None) -> dict:
         start_dir = Path.cwd()
 
     file_path, filename = find_context_file(start_dir)
+    git_root = get_git_root(start_dir)
 
     return {
         "found": file_path is not None,
         "filename": filename,
         "path": str(file_path) if file_path else None,
         "search_dir": str(start_dir),
-        "git_root": str(get_git_root(start_dir)) if get_git_root(start_dir) else None,
+        "git_root": str(git_root) if git_root else None,
     }
