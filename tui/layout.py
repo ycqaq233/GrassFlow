@@ -211,7 +211,7 @@ def build_pt_style(theme: REPLTheme) -> Style:
 def make_header_text_cb(
     session: Any,
     output: List[OutputEntry],
-    mode: REPLMode,
+    mode: Any,
     default_model: str = "deepseek-chat",
 ) -> Callable[[], List[Tuple[str, str]]]:
     """创建顶部状态栏渲染回调
@@ -219,7 +219,7 @@ def make_header_text_cb(
     Args:
         session: SessionInfo 实例（或 None）
         output: 输出条目列表（用于消息计数）
-        mode: 当前 REPL 模式
+        mode: 当前 REPL 模式（REPLMode 值或返回 REPLMode 的 callable）
         default_model: 默认模型名称
 
     Returns:
@@ -242,12 +242,13 @@ def make_header_text_cb(
             short_id = session.id[:12]
             result.append(("class:header-dim", f" |  session: {short_id}"))
 
-        # 模式
+        # 模式（动态读取）
+        current_mode = mode() if callable(mode) else mode
         mode_text = {
             REPLMode.NORMAL: "NORMAL",
             REPLMode.BUSY: "BUSY",
             REPLMode.APPROVAL: "APPROVAL",
-        }.get(mode, "NORMAL")
+        }.get(current_mode, "NORMAL")
         result.append(("class:header-dim", f" |  {mode_text}"))
 
         # 消息计数
@@ -518,7 +519,7 @@ def build_layout_from_repl(repl: Any) -> Layout:
     header_cb = make_header_text_cb(
         session=repl.session,
         output=repl.output,
-        mode=repl.mode,
+        mode=lambda: repl.mode,
         default_model=getattr(repl, "_default_model", "deepseek-chat"),
     )
     output_cb = make_output_text_cb(output=repl.output)
@@ -690,17 +691,6 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
         if buffer.completer:
             # 让 prompt_toolkit 处理补全
             pass
-
-    @kb.add("c-up")
-    def handle_scroll_up(event: KeyPressEvent) -> None:
-        """Ctrl+Up：向上滚动输出"""
-        # prompt_toolkit layout 会自动处理 scroll
-        pass
-
-    @kb.add("c-down")
-    def handle_scroll_down(event: KeyPressEvent) -> None:
-        """Ctrl+Down：向下滚动输出"""
-        pass
 
     return kb
 
