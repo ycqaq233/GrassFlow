@@ -358,11 +358,13 @@ def _cmd_think(repl, args: List[str]) -> None:
         thinking = repl.session.metadata.get("thinking", {}) if repl.session else {}
         enabled = thinking.get("enabled", False)
         effort = thinking.get("effort", "medium")
+        display = thinking.get("display", "collapsed")
         status = "ON" if enabled else "OFF"
         repl.add_output(
             f"Thinking mode: {status}\n"
             f"Effort: {effort}\n"
-            f"Usage: /think [on|off|low|medium|high|xhigh|show]",
+            f"Display: {display}\n"
+            f"Usage: /think [on|off|low|medium|high|xhigh|show|display collapsed|full]",
             role="system",
         )
         return
@@ -373,24 +375,44 @@ def _cmd_think(repl, args: List[str]) -> None:
         thinking = repl.session.metadata.get("thinking", {}) if repl.session else {}
         enabled = thinking.get("enabled", False)
         effort = thinking.get("effort", "medium")
+        display = thinking.get("display", "collapsed")
         repl.add_output(
             f"  Thinking configuration:\n"
             f"    enabled: {enabled}\n"
-            f"    effort: {effort}",
+            f"    effort: {effort}\n"
+            f"    display: {display}",
             role="system",
         )
+        return
+
+    if arg == "display":
+        if len(args) < 2:
+            repl.add_output("Usage: /think display [collapsed|full]", role="error")
+            return
+        mode = args[1].lower()
+        if mode not in ("collapsed", "full"):
+            repl.add_output("Invalid display mode. Use: collapsed, full", role="error")
+            return
+        if repl.session:
+            thinking = repl.session.metadata.get("thinking", {})
+            thinking["display"] = mode
+            repl.session.metadata["thinking"] = thinking
+        repl.add_output(f"Thinking display mode: {mode}", role="system")
         return
 
     parsed = parse_reasoning_effort(arg)
     if parsed is None:
         repl.add_output(
             f"Unknown option: '{arg}'\n"
-            f"Usage: /think [on|off|low|medium|high|xhigh|show]",
+            f"Usage: /think [on|off|low|medium|high|xhigh|show|display collapsed|full]",
             role="error",
         )
         return
 
     if repl.session:
+        # Preserve display setting when changing effort
+        existing_display = repl.session.metadata.get("thinking", {}).get("display", "collapsed")
+        parsed["display"] = existing_display
         repl.session.metadata["thinking"] = parsed
 
     enabled = parsed.get("enabled", False)
@@ -615,6 +637,8 @@ def _handle_compact(repl) -> None:
 
 def _handle_new_session(repl) -> None:
     """创建新会话"""
+    from tui.layout import DEFAULT_MODEL, DEFAULT_PROVIDER
+
     if repl._enable_session and repl.session_mgr:
         try:
             old_id = repl.session.id if repl.session else None
@@ -623,6 +647,11 @@ def _handle_new_session(repl) -> None:
             repl.session = repl.session_mgr.create_session(
                 title=f"REPL Session",
                 directory=directory,
+                metadata={
+                    "model": repl.session.metadata.get("model", DEFAULT_MODEL) if repl.session else DEFAULT_MODEL,
+                    "provider": repl.session.metadata.get("provider", DEFAULT_PROVIDER) if repl.session else DEFAULT_PROVIDER,
+                    "thinking": {"enabled": True, "effort": "medium"},
+                },
             )
             repl.clear_output()
             repl._reset_stats()
@@ -893,7 +922,7 @@ COMMAND_REGISTRY: List[CommandDef] = [
         description="切换/设置思考模式",
         category="Configuration",
         aliases=(),
-        args_hint="[on|off|low|medium|high|xhigh|show]",
+        args_hint="[on|off|low|medium|high|xhigh|show|display collapsed|full]",
         handler_name="_cmd_think",
     ),
     CommandDef(
@@ -1117,7 +1146,7 @@ class SlashCommandCompleter(Completer):
 
     # 命令参数补全映射
     _ARG_COMPLETIONS: Dict[str, List[str]] = {
-        "think": ["on", "off", "low", "medium", "high", "xhigh", "show"],
+        "think": ["on", "off", "low", "medium", "high", "xhigh", "show", "display"],
         "theme": ["default", "dark", "light", "cyber", "ocean"],
         "mcp": ["list", "start", "stop", "status", "add", "remove", "test"],
         "skills": ["list", "view", "search", "install"],

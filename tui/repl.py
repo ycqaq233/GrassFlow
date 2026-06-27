@@ -79,6 +79,11 @@ class GrassFlowREPL:
         self._stream_buf: str = ""
         self._stream_box_opened: bool = False
 
+        # Thinking stream state（可折叠思考块）
+        self._thinking_buf: str = ""           # accumulated thinking text
+        self._thinking_token_count: int = 0    # token counter
+        self._thinking_box_opened: bool = False  # whether header was printed
+
         self._setup_keybindings()
 
     # ==================== 主题 ====================
@@ -183,6 +188,29 @@ class GrassFlowREPL:
         """重置流式状态"""
         self._stream_buf = ""
         self._stream_box_opened = False
+        # Reset thinking state
+        self._thinking_buf = ""
+        self._thinking_token_count = 0
+        self._thinking_box_opened = False
+
+    def _close_thinking_block(self) -> None:
+        """关闭思考块：刷新剩余缓冲区，打印摘要行"""
+        if not self._thinking_box_opened and self._thinking_token_count == 0:
+            return
+
+        thinking_cfg = self.session.metadata.get("thinking", {}) if self.session else {}
+        display_mode = thinking_cfg.get("display", "collapsed")
+
+        if display_mode == "full" and self._thinking_box_opened:
+            # Flush remaining buffer
+            if self._thinking_buf.strip():
+                cprint(f"\033[2;3m    {self._thinking_buf}\033[0m")
+                self._thinking_buf = ""
+            cprint(f"\033[2;3m  └ Done thinking ({self._thinking_token_count} tokens)\033[0m")
+            cprint("")
+        elif self._thinking_token_count > 0:
+            # Collapsed: single summary line
+            cprint(f"\033[2m  Thought ({self._thinking_token_count} tokens)\033[0m")
 
     # ==================== 布局 / 快捷键（委托给 tui.layout） ====================
 
@@ -335,6 +363,7 @@ class GrassFlowREPL:
                 else:
                     self.add_output(token, role="assistant")
         elif etype == "text_end":
+            self._close_thinking_block()
             self._flush_stream()
             self._reset_stream_state()
             # Persist assistant response to session DB
@@ -347,8 +376,24 @@ class GrassFlowREPL:
                         pass
         elif etype == "thinking_delta":
             token = data.get("text", "")
-            # thinking 块用 dim 斜体打印
-            cprint(f"\033[2;3m{token}\033[0m")
+            if token:
+                self._thinking_token_count += 1
+
+                # Check display mode
+                thinking_cfg = self.session.metadata.get("thinking", {}) if self.session else {}
+                display_mode = thinking_cfg.get("display", "collapsed")
+
+                if display_mode == "full":
+                    # Full mode: stream live with line buffering
+                    self._thinking_buf += token
+                    if not self._thinking_box_opened:
+                        self._thinking_box_opened = True
+                        cprint("")
+                        cprint("\033[2;3m  ▶ Thinking...\033[0m")
+                    while "\n" in self._thinking_buf:
+                        line, self._thinking_buf = self._thinking_buf.split("\n", 1)
+                        cprint(f"\033[2;3m    {line}\033[0m")
+                # else: collapsed mode -- only count tokens, don't print content
         elif etype == "tool_call_start":
             self._flush_stream()
             self._reset_stream_state()
@@ -366,10 +411,12 @@ class GrassFlowREPL:
             prefix = "[tool result] [ERROR] " if is_err else "[tool result] "
             cprint(f"{color}  {prefix}{str(result)[:500 if is_err else 800]}\033[0m")
         elif etype == "error":
+            self._close_thinking_block()
             self._flush_stream()
             self._reset_stream_state()
             cprint(f"\033[1;31m  [error] {data.get('message', str(data))}\033[0m")
         elif etype == "interrupted":
+            self._close_thinking_block()
             self._flush_stream()
             self._reset_stream_state()
             cprint("\033[33m  Interrupted.\033[0m")
@@ -410,10 +457,12 @@ class GrassFlowREPL:
                 if self._apply_event(event.type, event.data):
                     break
         except Exception as e:
+            self._close_thinking_block()
             self._flush_stream()
             self._reset_stream_state()
             self.add_output(f"Agent error: {e}\n{traceback.format_exc()}", role="error")
         finally:
+            self._close_thinking_block()
             self._flush_stream()
             self._reset_stream_state()
             self._api_start_time = 0.0
@@ -493,7 +542,11 @@ class GrassFlowREPL:
             try:
                 self.session = self.session_mgr.create_session(
                     title="REPL Session", directory=os.getcwd(),
-                    metadata={"model": DEFAULT_MODEL, "provider": DEFAULT_PROVIDER},
+                    metadata={
+                        "model": DEFAULT_MODEL,
+                        "provider": DEFAULT_PROVIDER,
+                        "thinking": {"enabled": True, "effort": "medium"},
+                    },
                 )
                 self.add_output(f"Session: {self.session.id[:12]}", role="system")
             except Exception as e:
