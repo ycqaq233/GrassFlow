@@ -5,6 +5,7 @@ GrassFlow WebFetch 工具
 """
 
 import logging
+import re
 from typing import Any, Dict
 from .tool import Tool, ToolContext, ToolResult
 
@@ -12,6 +13,25 @@ logger = logging.getLogger(__name__)
 
 # 最大返回字符数
 MAX_CONTENT_LENGTH = 10000
+
+
+def _simple_html_to_text(html: str) -> str:
+    """
+    简单的 HTML 转文本降级方案。
+    当 html2text 不可用时使用，剥离 HTML 标签并保留基本结构。
+    """
+    # 移除 script 和 style 标签及其内容
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    # 将块级标签转换为换行
+    text = re.sub(r"<(br|hr|/p|/div|/li|/tr|/h[1-6])[^>]*>", "\n", text, flags=re.IGNORECASE)
+    # 移除所有剩余 HTML 标签
+    text = re.sub(r"<[^>]+>", "", text)
+    # 解码常见 HTML 实体
+    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    text = text.replace("&quot;", '"').replace("&nbsp;", " ").replace("&#39;", "'")
+    # 合并多余空行
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 class WebFetchTool(Tool):
@@ -81,11 +101,8 @@ class WebFetchTool(Tool):
         try:
             import html2text
         except ImportError:
-            return ToolResult(
-                output="Error: html2text is not installed. Run: pip install html2text",
-                title="webfetch",
-                metadata={"error": "missing_dependency"},
-            )
+            html2text = None
+            logger.warning("html2text not installed, using simple HTML-to-text fallback")
 
         # 发起 HTTP 请求
         try:
@@ -129,8 +146,8 @@ class WebFetchTool(Tool):
         # 如果是纯文本，直接返回
         if "text/plain" in content_type:
             markdown_content = raw_text
-        else:
-            # 将 HTML 转换为 Markdown
+        elif html2text is not None:
+            # 使用 html2text 将 HTML 转换为 Markdown
             converter = html2text.HTML2Text()
             converter.ignore_links = False
             converter.ignore_images = True
@@ -139,6 +156,9 @@ class WebFetchTool(Tool):
             converter.ignore_tables = False
             converter.single_line_break = True
             markdown_content = converter.handle(raw_text)
+        else:
+            # 降级：使用简单的 HTML 标签剥离
+            markdown_content = _simple_html_to_text(raw_text)
 
         # 截断过长内容
         truncated = False
