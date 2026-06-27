@@ -1419,6 +1419,7 @@ class ProtocolLLMClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         stream: bool = False,
+        reasoning_effort: Optional[str] = None,
         **kwargs,
     ) -> "LLMResponse":
         """
@@ -1429,6 +1430,7 @@ class ProtocolLLMClient:
             temperature: 温度
             max_tokens: 最大 token 数
             stream: 是否流式（默认 False，兼容现有接口）
+            reasoning_effort: 推理力度 ("low" | "medium" | "high" | "xhigh")
             **kwargs: 其他参数
 
         Returns:
@@ -1464,6 +1466,7 @@ class ProtocolLLMClient:
         options = GenerationOptions(
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
         )
 
         request = self._model.make_request(

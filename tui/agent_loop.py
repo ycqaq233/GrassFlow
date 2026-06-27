@@ -402,6 +402,7 @@ class AgentLoop:
         user_message: str,
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         system_prompt: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> AsyncIterator[LoopEvent]:
         """
         处理用户消息，运行完整的对话循环。
@@ -410,6 +411,7 @@ class AgentLoop:
             user_message: 用户消息文本
             conversation_history: 对话历史 [{"role": "user", "content": "..."}, ...]
             system_prompt: 系统提示词（覆盖默认值）
+            reasoning_effort: 推理力度 ("low" | "medium" | "high" | "xhigh")
 
         Yields:
             LoopEvent 事件流
@@ -454,7 +456,7 @@ class AgentLoop:
 
                 # 2. API 调用
                 self._state.api_call_count += 1
-                response = await self._call_llm_with_retry(messages)
+                response = await self._call_llm_with_retry(messages, reasoning_effort=reasoning_effort)
 
                 if response is None:
                     # 所有重试都失败了
@@ -921,6 +923,7 @@ class AgentLoop:
     async def _call_llm_with_retry(
         self,
         messages: List[Dict[str, Any]],
+        reasoning_effort: Optional[str] = None,
     ) -> Optional[LLMResponse]:
         """LLM 调用（带重试）"""
         last_error = None
@@ -944,6 +947,7 @@ class AgentLoop:
                     messages=chat_messages,
                     temperature=self._generation_options.temperature or 0.7,
                     max_tokens=self._generation_options.max_tokens,
+                    reasoning_effort=reasoning_effort or self._generation_options.reasoning_effort,
                 )
 
                 # 转换回 LLMResponse（ProtocolLLMClient.chat 返回 _LegacyLLMResponse）

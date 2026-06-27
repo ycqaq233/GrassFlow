@@ -274,6 +274,7 @@ class AgentIntegration:
         text: str,
         history: Optional[List[Dict[str, Any]]] = None,
         system_prompt: str = "",
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         """非流式处理消息
 
@@ -283,6 +284,7 @@ class AgentIntegration:
             text: 用户输入文本
             history: 历史消息列表
             system_prompt: 系统提示词
+            reasoning_effort: 推理力度 ("low" | "medium" | "high" | "xhigh")
 
         Returns:
             完整的 assistant 回复文本
@@ -293,6 +295,7 @@ class AgentIntegration:
             text=text,
             history=history,
             system_prompt=system_prompt,
+            reasoning_effort=reasoning_effort,
         ):
             if event.type == "text_delta":
                 full_text += event.data.get("text", "")

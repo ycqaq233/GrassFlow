@@ -336,7 +336,7 @@ class GrassFlowREPL:
                 reasoning_effort = thinking.get("effort", "medium")
 
         if self.app and self.app.loop and self.app.loop.is_running():
-            self.app.loop.create_task(self._run_agent_loop_async(text))
+            self.app.loop.create_task(self._run_agent_loop_async(text, reasoning_effort=reasoning_effort))
         else:
             self._agent.process_in_background(
                 text=text, history=self._build_history(), system_prompt=self._get_system_prompt(),
@@ -439,15 +439,8 @@ class GrassFlowREPL:
         inv()
         return result
 
-    async def _run_agent_loop_async(self, text: str) -> None:
+    async def _run_agent_loop_async(self, text: str, reasoning_effort: Optional[str] = None) -> None:
         """在 pt 事件循环中运行 Agent Loop（流式输出）"""
-        # Extract thinking config from session metadata
-        reasoning_effort = None
-        if self.session:
-            thinking = self.session.metadata.get("thinking", {})
-            if thinking.get("enabled", False):
-                reasoning_effort = thinking.get("effort", "medium")
-
         try:
             self._reset_stream_state()
             async for event in self._agent.process_streaming(

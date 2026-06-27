@@ -437,6 +437,7 @@ class StreamHandler:
         client: ProtocolLLMClient,
         messages: list,
         system: Optional[list] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         """
         流式处理 LLM 响应
@@ -465,7 +466,7 @@ class StreamHandler:
                 full_messages.append({"role": msg.role, "content": msg.content})
 
             # 流式处理
-            async for event in client.stream_chat(full_messages):
+            async for event in client.stream_chat(full_messages, reasoning_effort=reasoning_effort):
                 if self._interrupted:
                     break
 
