@@ -58,3 +58,4 @@ Thumbs.db
 
 # MyPy
 .mypy_cache/
+.claude/worktrees/
