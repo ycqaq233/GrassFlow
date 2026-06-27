@@ -377,7 +377,7 @@ class AgentIntegration:
                     _push_ui("text_delta", text=edata.get("text", ""))
 
                 elif etype == "text_end":
-                    _push_ui("invalidate")
+                    _push_ui("text_end")
 
                 elif etype == "thinking_delta":
                     _push_ui("thinking_delta", text=edata.get("text", ""))

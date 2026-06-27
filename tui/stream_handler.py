@@ -408,7 +408,9 @@ class StreamHandler:
 
         self._interrupted = False
         self._current_text = ""
+        self._response_text = ""  # BUGFIX: clean response text (excludes thinking blocks)
         self._thinking_parser = ThinkingParser()
+        self._thinking_parser_state = ThinkingState.NORMAL  # tracks current parser state for routing
         self._markdown_segmenter = MarkdownSegmenter()
         self._output_buffer = OutputBuffer(flush_interval=batch_interval)
         self._thinking_expanded = False  # thinking 块是否展开
@@ -422,7 +424,9 @@ class StreamHandler:
         """重置所有状态"""
         self._interrupted = False
         self._current_text = ""
+        self._response_text = ""
         self._thinking_parser.reset()
+        self._thinking_parser_state = ThinkingState.NORMAL
         self._markdown_segmenter.reset()
         self._output_buffer.reset()
         self._thinking_expanded = False
@@ -452,6 +456,7 @@ class StreamHandler:
         """
         self.reset()
         self._current_text = ""
+        self._response_text = ""
 
         try:
             if HAS_RICH and self.console:
@@ -477,9 +482,9 @@ class StreamHandler:
 
             # 调用完成回调
             if self.on_complete:
-                self.on_complete(self._current_text)
+                self.on_complete(self._response_text)
 
-            return self._current_text
+            return self._response_text
 
         except LLMProtocolError as e:
             if self.on_error:
@@ -527,6 +532,16 @@ class StreamHandler:
     def _process_token(self, token: str) -> None:
         """处理单个 token"""
         self._current_text += token
+
+        # BUGFIX: classify token via thinking parser, track state, accumulate response text
+        if self.enable_thinking_render:
+            results = self._thinking_parser.feed(token)
+            self._thinking_parser_state = self._thinking_parser.state
+            for state, content in results:
+                if state == ThinkingState.NORMAL:
+                    self._response_text += content
+        else:
+            self._response_text += token
 
         # 调用外部 token 回调
         if self.on_token:
@@ -587,17 +602,18 @@ class StreamHandler:
     # -----------------------------------------------------------------------
 
     def _render_with_thinking(self, text: str) -> None:
-        """渲染包含 thinking 块的文本"""
-        results = self._thinking_parser.feed(text)
+        """渲染包含 thinking 块的文本
 
-        for state, content in results:
-            if state == ThinkingState.NORMAL:
-                self._render_content(content)
-            elif state == ThinkingState.IN_THINKING:
-                self._render_thinking(content)
-            elif state == ThinkingState.THINKING_CLOSED:
-                # thinking 已关闭，可以渲染最终内容
-                pass
+        Tokens are already classified by _process_token via the thinking parser.
+        Route buffered content based on the tracked parser state.
+        """
+        if not text:
+            return
+        # Route based on the current thinking parser state (tracked in _process_token)
+        if self._thinking_parser_state == ThinkingState.IN_THINKING:
+            self._render_thinking(text)
+        else:
+            self._render_content(text)
 
     def _render_content(self, content: str) -> None:
         """渲染正常内容"""
@@ -721,11 +737,18 @@ class StreamHandler:
             else:
                 self._render_raw(flushed)
 
-        # 步骤 2: 刷新 thinking parser 残留 -> _render_content
+        # 步骤 2: 刷新 thinking parser 残留 (use tracked state for routing)
         thinking_results = self._thinking_parser.flush()
         for state, content in thinking_results:
             if content:
-                self._render_content(content)
+                # Accumulate residual response text
+                if state == ThinkingState.NORMAL:
+                    self._response_text += content
+                if state == ThinkingState.IN_THINKING:
+                    # BUGFIX: unclosed thinking content should render as thinking, not response
+                    self._render_thinking(content)
+                else:
+                    self._render_content(content)
 
         # 步骤 3: 刷新 markdown segmenter（_render_content 可能已添加内容）
         remaining = self._markdown_segmenter.flush()
@@ -736,9 +759,9 @@ class StreamHandler:
                 code, lang = remaining[1], remaining[2]
                 self._render_code_block(code, lang)
 
-        # 步骤 4: 刷新行缓冲区
+        # 步骤 4: 刷新行缓冲区（作为纯文本，避免部分 Markdown 语法导致乱码）
         if self._line_buffer and HAS_RICH and self.console:
-            self.console.print(Markdown(self._line_buffer))
+            self.console.print(self._line_buffer, highlight=False)
             self._line_buffer = ""
 
     @staticmethod

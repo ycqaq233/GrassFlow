@@ -87,18 +87,14 @@ class GrassFlowREPL:
         # 流式输出状态（hermes 模式）
         self._stream_buf: str = ""
         self._stream_box_opened: bool = False
-        self._stream_collected_text: str = ""  # accumulates full streamed response for history
+        self._stream_collected_text: str = ""  # accumulates current streaming segment
+        self._stream_full_response: str = ""   # accumulates full response across tool calls
 
         # Thinking stream state（可折叠思考块）
         self._thinking_buf: str = ""           # accumulated thinking text
         self._thinking_token_count: int = 0    # token counter
         self._thinking_box_opened: bool = False  # whether header was printed
         self._thinking_start_time: float = 0.0   # thinking block start time
-
-        # Thinking stream state (collapsible block)
-        self._thinking_buf: str = ""
-        self._thinking_token_count: int = 0
-        self._thinking_box_opened: bool = False
 
         self._setup_keybindings()
 
@@ -205,7 +201,7 @@ class GrassFlowREPL:
             self._stream_box_opened = False
 
     def _reset_stream_state(self) -> None:
-        """重置流式状态"""
+        """重置流式状态（不触碰 _stream_full_response）"""
         self._stream_buf = ""
         self._stream_box_opened = False
         self._stream_collected_text = ""
@@ -494,10 +490,19 @@ class GrassFlowREPL:
             self._flush_stream()
             # In streaming mode, the assistant text was only printed to terminal.
             # Store it in conversation history so _build_history() can see it next turn.
-            if self._enable_streaming and self._stream_collected_text.strip():
-                self._conversation_history.append({"role": "assistant", "content": self._stream_collected_text})
-                # Also add to self.output for display/persistence
-                self.add_output(self._stream_collected_text, role="assistant")
+            if self._enable_streaming:
+                # BUGFIX: accumulate current segment into full response
+                full_response = self._stream_full_response + self._stream_collected_text
+                if full_response.strip():
+                    self._conversation_history.append({"role": "assistant", "content": full_response})
+                    # BUGFIX: store-only path — append to self.output without re-printing via cprint
+                    entry = OutputEntry(text=full_response, role="assistant")
+                    with self._output_lock:
+                        self.output.append(entry)
+                        if len(self.output) > MAX_OUTPUT_LINES:
+                            self.output = self.output[len(self.output) - MAX_OUTPUT_LINES:]
+                    if self.app:
+                        self.app.invalidate()
             elif not self._enable_streaming:
                 # Non-streaming: text was already added to self.output via add_output in text_delta.
                 # Extract it from the last output entry for conversation history.
@@ -536,6 +541,9 @@ class GrassFlowREPL:
                 # else: collapsed mode -- only count tokens, don't print content
         elif etype == "tool_call_start":
             self._flush_stream()
+            # BUGFIX: accumulate current segment into full response before reset
+            if self._stream_collected_text:
+                self._stream_full_response += self._stream_collected_text
             self._reset_stream_state()
             name = data.get('name', '?')
             if self._tool_verbose:
@@ -558,6 +566,9 @@ class GrassFlowREPL:
                 cprint(f"\n\033[1;36m  \U0001f527 {name}{args_preview}\033[0m")
         elif etype == "tool_result":
             self._flush_stream()
+            # BUGFIX: accumulate current segment into full response before reset
+            if self._stream_collected_text:
+                self._stream_full_response += self._stream_collected_text
             self._reset_stream_state()
             result = data.get("result", data.get("output", ""))
             is_err = data.get("is_error", False) or data.get("success", True) is False
@@ -607,6 +618,7 @@ class GrassFlowREPL:
     async def _run_agent_loop_async(self, text: str, reasoning_effort: Optional[str] = None) -> None:
         """在 pt 事件循环中运行 Agent Loop（流式输出）"""
         try:
+            self._stream_full_response = ""  # Reset full response for new turn
             self._reset_stream_state()
             async for event in self._agent.process_streaming(
                 text=text, history=self._build_history(), system_prompt=self._get_system_prompt(),
