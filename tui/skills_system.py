@@ -552,7 +552,8 @@ class SkillsManager:
 
         lines.append("")
         lines.append(
-            "To use a skill, load its content and follow its instructions."
+            "To use a skill, the user will type /skill-name. "
+            "When a skill is loaded, follow its instructions."
         )
 
         return "\n".join(lines)
