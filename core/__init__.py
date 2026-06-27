@@ -138,6 +138,18 @@ from .workflow_generator import (
     generate_workflow_from_description,
     validate_workflow_dsl,
 )
+from .model_discovery import (
+    ModelInfo,
+    DiscoveryResult,
+    discover_models,
+    discover_all_models,
+    discover_models_sync,
+    get_cached_models,
+    get_model_info,
+    list_providers as list_discovery_providers,
+    invalidate_cache,
+    detect_available_providers,
+)
 
 __all__ = [
     "Agent",
@@ -291,4 +303,15 @@ __all__ = [
     "WorkflowComplexity",
     "generate_workflow_from_description",
     "validate_workflow_dsl",
+    # model_discovery
+    "ModelInfo",
+    "DiscoveryResult",
+    "discover_models",
+    "discover_all_models",
+    "discover_models_sync",
+    "get_cached_models",
+    "get_model_info",
+    "list_discovery_providers",
+    "invalidate_cache",
+    "detect_available_providers",
 ]
