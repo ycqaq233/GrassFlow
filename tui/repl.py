@@ -858,7 +858,36 @@ class GrassFlowREPL:
             f"- Creating and managing workflows\n- Writing code and analyzing files\n"
             f"- Running commands and debugging\n\n"
         )
-        # Inject skills prompt
+
+        # 1. Inject Available Tools prompt (builtin tools from ToolRegistry)
+        try:
+            from core.tool_registry import ToolSource
+            agent_loop = self._agent._agent_loop
+            if agent_loop and hasattr(agent_loop, "_tool_registry"):
+                registry = agent_loop._tool_registry
+                builtin_tools = registry.filter_by_source(ToolSource.BUILTIN)
+                if builtin_tools:
+                    tools_sorted = sorted(builtin_tools, key=lambda t: t.id)
+                    lines = [
+                        "## Available Tools",
+                        "",
+                        "The following built-in tools are registered and available for use.",
+                        "",
+                    ]
+                    for tool in tools_sorted:
+                        desc = tool.description
+                        if desc:
+                            if len(desc) > 120:
+                                desc = desc[:117] + "..."
+                            lines.append(f"- **{tool.id}**: {desc}")
+                        else:
+                            lines.append(f"- **{tool.id}**")
+                    lines.append("")
+                    base += "\n".join(lines) + "\n\n"
+        except Exception:
+            pass
+
+        # 2. Inject Available Skills prompt
         try:
             from tui.skills_system import get_skills_manager
             skills_mgr = get_skills_manager()
@@ -884,7 +913,8 @@ class GrassFlowREPL:
                 base += "\n".join(lines) + "\n\n"
         except Exception:
             pass
-        # Inject MCP tools prompt
+
+        # 3. Inject Available MCP Tools prompt
         try:
             mcp_mgr = self._agent._mcp_manager
             if mcp_mgr and mcp_mgr.is_running:
@@ -910,6 +940,36 @@ class GrassFlowREPL:
                     base += "\n".join(lines) + "\n\n"
         except Exception:
             pass
+
+        # 4. Inject Available MCP Servers prompt (connection status)
+        try:
+            mcp_mgr = self._agent._mcp_manager
+            if mcp_mgr and hasattr(mcp_mgr, "server_names") and mcp_mgr.server_names:
+                lines = [
+                    "## Available MCP Servers",
+                    "",
+                    "MCP server connection status:",
+                    "",
+                ]
+                for name in mcp_mgr.server_names:
+                    status = mcp_mgr.get_server_status(name)
+                    if status:
+                        if status.get("connected"):
+                            state_str = "connected"
+                        else:
+                            state_str = "failed"
+                        tools_count = status.get("tools_count", 0)
+                        transport = status.get("transport", "unknown")
+                        lines.append(
+                            f"- **{name}** ({transport}): {state_str}, {tools_count} tools"
+                        )
+                    else:
+                        lines.append(f"- **{name}**: unknown")
+                lines.append("")
+                base += "\n".join(lines) + "\n\n"
+        except Exception:
+            pass
+
         base += "Be concise and helpful. Use tools when needed to complete tasks."
         return base
 
