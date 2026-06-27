@@ -960,15 +960,25 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
             callbacks.toggle_thinking()
         event.app.invalidate()
 
-    @kb.add("tab")
+    @kb.add("tab", eager=True)
     def handle_tab(event: KeyPressEvent) -> None:
-        """Tab：命令/文件补全，无补全器时插入 4 空格"""
-        buffer = event.app.current_buffer
-        if buffer.completer:
-            buffer.start_completion()
-            event.app.invalidate()
+        """Tab: accept completion, auto-suggestion, or start completions."""
+        buf = event.app.current_buffer
+        if buf.complete_state:
+            # Completion menu is open — accept the selection
+            completion = buf.complete_state.current_completion
+            if completion is None:
+                buf.go_to_completion(0)
+                completion = buf.complete_state and buf.complete_state.current_completion
+            if completion is None:
+                return
+            buf.apply_completion(completion)
+        elif buf.suggestion and buf.suggestion.text:
+            # Ghost text auto-suggestion — accept it
+            buf.insert_text(buf.suggestion.text)
         else:
-            buffer.insert_text("    ")
+            # No menu and no suggestion — start completions from scratch
+            buf.start_completion()
 
     return kb
 

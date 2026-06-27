@@ -354,8 +354,7 @@ class GrassFlowREPL:
                 # Check if we're inside the prompt_toolkit event loop
                 in_pt_loop = (
                     self.app is not None
-                    and self.app.loop is not None
-                    and self.app.loop.is_running()
+                    and self.app.is_running
                 )
                 if in_pt_loop:
                     # Use run_in_terminal to temporarily suspend the running
@@ -373,8 +372,11 @@ class GrassFlowREPL:
                         except (EOFError, KeyboardInterrupt):
                             return ""
 
-                    answer = await self.app.run_in_terminal(
-                        _read_approval, render_cli_done=True,
+                    answer = await asyncio.wait_for(
+                        self.app.run_in_terminal(
+                            _read_approval, render_cli_done=True,
+                        ),
+                        timeout=300.0,
                     )
                 else:
                     # Outside prompt_toolkit loop — use original file
@@ -386,7 +388,14 @@ class GrassFlowREPL:
                         answer = sys.__stdin__.readline().strip()
                     except (EOFError, KeyboardInterrupt):
                         answer = ""
-            except (EOFError, KeyboardInterrupt, Exception):
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            except asyncio.TimeoutError:
+                cprint("\033[1;31m  [error] Approval timed out (5 min). Denying.\033[0m")
+                answer = ""
+            except Exception as e:
+                logger.error("Approval input failed: %s", e)
+                cprint(f"\033[1;31m  [error] Approval input failed: {e}. Denying tool.\033[0m")
                 answer = ""
 
             answer = answer.strip().lower()
@@ -622,7 +631,7 @@ class GrassFlowREPL:
                 pass
 
         # Check and compress context before agent processing
-        if self.app and self.app.loop and self.app.loop.is_running():
+        if self.app and self.app.is_running:
             self.app.loop.create_task(self._pre_process_compression(text))
             return  # _pre_process_compression will call _dispatch_agent after compression
 
@@ -655,7 +664,7 @@ class GrassFlowREPL:
                 effort_label = reasoning_effort or "medium"
                 cprint(f"\033[2;3m  \U0001f4ad Thinking: ON ({effort_label})\033[0m")
 
-        if self.app and self.app.loop and self.app.loop.is_running():
+        if self.app and self.app.is_running:
             self.app.loop.create_task(self._run_agent_loop_async(text, reasoning_effort=reasoning_effort))
         else:
             self._agent.process_in_background(
