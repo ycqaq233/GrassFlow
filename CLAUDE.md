@@ -662,3 +662,57 @@ tui/
 ├── compat.py               # 兼容层
 └── fallback.py             # 降级模式
 ```
+
+---
+
+## Ultracode 工作流编排经验
+
+### 必须：worktree 隔离后自动合并
+
+当 Implement 阶段使用 `isolation: "worktree"` 时，每个 agent 在独立分支工作，改动不会自动合并到 master。**必须在工作流脚本中加一个自动合并阶段**，在 Verify 之前把所有 worktree 分支 merge 回来。
+
+**正确模式**：
+```js
+phase('Implement')
+const results = await parallel([
+  () => agent('...', { isolation: 'worktree' }),
+  () => agent('...', { isolation: 'worktree' }),
+])
+
+// 自动合并阶段
+phase('Merge')
+for (const branch of getWorktreeBranches(results)) {
+  await agent(`Merge branch ${branch} into master, resolve conflicts if needed`)
+}
+```
+
+**经验教训**：
+- 不要在工作流完成后手动合并，容易遗漏或出错
+- 如果多个 agent 改同一文件，合并时会有冲突，需要一个 agent 专门解决冲突
+- 如果某个 agent 没有提交改动（worktree 和 master 一样），合并会 fast-forward 或跳过
+
+### 工作流脚本注意事项
+
+1. **模板字符串中不要用 `#`** — JS 解析会出问题
+2. **label 中不要用冒号 `:`** — 用 `-` 代替
+3. **单引号字符串中不要嵌套单引号** — 用转义双引号 `\\"`
+4. **不要在 agent prompt 中用 `JSON.stringify`** — 直接传对象
+5. **agent 上下文 256k 是硬限制** — 每个 agent 的任务必须足够小
+6. **验证必须包含实际运行测试** — 不能只靠代码审查
+7. **先理解架构再改代码** — 不要在错误方向上反复修补
+
+### 有效的编排模式
+
+| 模式 | 适用场景 | 示例 |
+|------|---------|------|
+| **多 agent 并行扫描 + 修复** | Bug 修复、代码审查 | 47 agents 扫描 101 个 bug |
+| **研究 + 设计 + 实现 + 验证** | 新功能开发 | 8 agents TUI 重构 |
+| **Study 并行 + Design + Implement 并行 + Verify** | 系统集成 | 12 agents 系统接入 |
+| **每个 agent 专注 1-2 个文件** | 避免上下文溢出 | agent 拆分策略 |
+
+### 失败的模式
+
+1. **单 agent 做所有事情** — 上下文溢出，修复不完整
+2. **不理解参考架构就改代码** — 方向错误，反复修补
+3. **工作流验证不充分** — agent 报告"验证通过"但实际有遗漏
+4. **worktree 隔离后不合并** — 改动丢失在分支里

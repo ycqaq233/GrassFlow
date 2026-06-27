@@ -205,18 +205,18 @@ class GrassFlowREPL:
             return
 
         thinking_cfg = self.session.metadata.get("thinking", {}) if self.session else {}
-        display_mode = thinking_cfg.get("display", "collapsed")
+        display_mode = thinking_cfg.get("display", "full")
 
         if display_mode == "full" and self._thinking_box_opened:
             # Flush remaining buffer
             if self._thinking_buf.strip():
-                cprint(f"\033[2;3m    {self._thinking_buf}\033[0m")
+                cprint(f"\033[2;3m  │ {self._thinking_buf}\033[0m")
                 self._thinking_buf = ""
             cprint(f"\033[2;3m  └ Done thinking ({self._thinking_token_count} tokens)\033[0m")
             cprint("")
         elif self._thinking_token_count > 0:
             # Collapsed: single summary line
-            cprint(f"\033[2m  Thought ({self._thinking_token_count} tokens)\033[0m")
+            cprint(f"\033[2;3m  Thought ({self._thinking_token_count} tokens)\033[0m")
 
     # ==================== 布局 / 快捷键（委托给 tui.layout） ====================
 
@@ -406,7 +406,7 @@ class GrassFlowREPL:
 
                 # Check display mode
                 thinking_cfg = self.session.metadata.get("thinking", {}) if self.session else {}
-                display_mode = thinking_cfg.get("display", "collapsed")
+                display_mode = thinking_cfg.get("display", "full")
 
                 if display_mode == "full":
                     # Full mode: stream live with line buffering
@@ -414,7 +414,7 @@ class GrassFlowREPL:
                     if not self._thinking_box_opened:
                         self._thinking_box_opened = True
                         cprint("")
-                        cprint("\033[2;3m  ▶ Thinking...\033[0m")
+                        cprint("\033[2;3m  ┌ Thinking...\033[0m")
                     while "\n" in self._thinking_buf:
                         line, self._thinking_buf = self._thinking_buf.split("\n", 1)
                         cprint(f"\033[2;3m    {line}\033[0m")
@@ -563,7 +563,7 @@ class GrassFlowREPL:
                     metadata={
                         "model": DEFAULT_MODEL,
                         "provider": DEFAULT_PROVIDER,
-                        "thinking": {"enabled": True, "effort": "medium"},
+                        "thinking": {"enabled": True, "effort": "medium", "display": "full"},
                     },
                 )
                 self.add_output(f"Session: {self.session.id[:12]}", role="system")

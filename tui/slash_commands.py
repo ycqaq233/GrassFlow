@@ -676,7 +676,7 @@ def _handle_new_session(repl) -> None:
                 metadata={
                     "model": repl.session.metadata.get("model", DEFAULT_MODEL) if repl.session else DEFAULT_MODEL,
                     "provider": repl.session.metadata.get("provider", DEFAULT_PROVIDER) if repl.session else DEFAULT_PROVIDER,
-                    "thinking": {"enabled": True, "effort": "medium"},
+                    "thinking": {"enabled": True, "effort": "medium", "display": "full"},
                 },
             )
             repl.clear_output()
