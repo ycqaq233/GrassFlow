@@ -46,13 +46,11 @@ from prompt_toolkit.layout.dimension import Dimension
 
 PROMPT = "❯ "
 PROMPT_STYLE = "class:prompt"
-BANNER = r"""
-  ____                 _     _____ _
+BANNER = r"""  ____                 _     _____ _
  / ___|_ __ __ _  ___ | |__ |  ___| | _____      __
 | |  _| '__/ _` |/ __|| '_ \| |_  | |/ _ \ \ /\ / /
 | |_| | | | (_| |\__ \| | | |  _| | | (_) \ V  V /
- \____|_|  \__,_||___/|_| |_|_|   |_|\___/ \_/\_/
-"""
+ \____|_|  \__,_||___/|_| |_|_|   |_|\___/ \_/\_/"""
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PROVIDER = "deepseek"

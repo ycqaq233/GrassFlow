@@ -745,7 +745,7 @@ class GrassFlowREPL:
                 erase_when_done=True,
             )
         except Exception as e:
-            self._cprint_output(BANNER.strip(), role="system")
+            cprint(BANNER)
             self._run_fallback(f"prompt_toolkit 不可用 ({e})，使用降级模式。输入 /exit 退出。")
             return
 
@@ -770,8 +770,8 @@ class GrassFlowREPL:
                 except Exception:
                     pass
                 # 打印 banner（在光标推送之后，确保用户可见）
-                self._cprint_output(BANNER.strip(), role="system")
-                self._cprint_output("  GrassFlow REPL\n  Type /help for commands, /exit to quit.\n", role="system")
+                cprint(BANNER)
+                cprint("  GrassFlow REPL\n  Type /help for commands, /exit to quit.")
                 self.app.run()
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
@@ -812,8 +812,8 @@ class AsyncGrassFlowREPL(GrassFlowREPL):
     async def run_async(self) -> None:
         self._running, self._should_exit = True, False
         self._init_session()
-        self._cprint_output(BANNER.strip(), role="system")
-        self._cprint_output("  GrassFlow REPL (async)\n  Type /help for commands, /exit to quit.\n", role="system")
+        cprint(BANNER)
+        cprint("  GrassFlow REPL (async)\n  Type /help for commands, /exit to quit.")
         if self._agent.init_agent_loop():
             self._cprint_output("Agent loop initialized.", role="system")
         self.app = Application(
