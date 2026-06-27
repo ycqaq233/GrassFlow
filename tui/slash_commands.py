@@ -105,6 +105,7 @@ def _cmd_help(repl, args: List[str]) -> None:
         "    Ctrl+X R        Redo",
         "    Ctrl+X Q        Exit",
         "    Ctrl+X M        List models",
+        "    Ctrl+P          Toggle permission mode (ask/approve)",
         "",
     ])
 
@@ -756,6 +757,34 @@ def _cmd_yolo(repl, args: List[str]) -> None:
     repl.add_output(f"YOLO mode: {status}", role="system")
 
 
+def _cmd_perm(repl, args: List[str]) -> None:
+    """查看/切换权限模式"""
+    valid_modes = ("ask", "approve")
+    current = getattr(repl, '_permission_mode', 'ask')
+
+    if not args:
+        repl.add_output(
+            f"Permission mode: {current}\n"
+            f"Usage: /perm [ask|approve]\n"
+            f"  ask     — Ask before executing tools (default)\n"
+            f"  approve — Auto-approve tool execution\n"
+            f"  Ctrl+P  — Toggle between modes",
+            role="system",
+        )
+        return
+
+    arg = args[0].lower()
+    if arg not in valid_modes:
+        repl.add_output(f"Unknown permission mode: '{arg}'. Valid: ask, approve", role="error")
+        return
+
+    repl._permission_mode = arg
+    if arg == "approve":
+        repl.add_output("Permission mode: APPROVE (tools will execute automatically)", role="system")
+    else:
+        repl.add_output("Permission mode: ASK (tools require approval before execution)", role="system")
+
+
 def _cmd_tools(repl, args: List[str]) -> None:
     """切换工具调用显示模式（compact / verbose）"""
     if not args:
@@ -1186,6 +1215,14 @@ COMMAND_REGISTRY: List[CommandDef] = [
         args_hint="[compact|verbose|on|off|toggle]",
         handler_name="_cmd_tools",
     ),
+    CommandDef(
+        name="perm",
+        description="查看/切换权限模式",
+        category="Configuration",
+        aliases=("permission",),
+        args_hint="[ask|approve]",
+        handler_name="_cmd_perm",
+    ),
 
     # Info
     CommandDef(
@@ -1288,6 +1325,7 @@ _HANDLER_MAP: Dict[str, Callable] = {
     "_cmd_connect": _cmd_connect,
     "_cmd_yolo": _cmd_yolo,
     "_cmd_tools": _cmd_tools,
+    "_cmd_perm": _cmd_perm,
 }
 
 
@@ -1386,6 +1424,8 @@ class SlashCommandCompleter(Completer):
         "skills": ["list", "view", "search", "install"],
         "yolo": ["on", "off", "status"],
         "tools": ["compact", "verbose", "on", "off", "toggle"],
+        "perm": ["ask", "approve"],
+        "permission": ["ask", "approve"],
         "connect": ["openai", "anthropic", "deepseek", "ollama"],
     }
 

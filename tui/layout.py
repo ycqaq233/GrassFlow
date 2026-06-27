@@ -204,6 +204,9 @@ def build_pt_style(theme: REPLTheme) -> Style:
         "msg-system": f"fg:{theme.system_color} italic",
         "msg-error": f"fg:{theme.error_color} bold",
         "msg-tool": f"fg:{theme.tool_color}",
+        # 权限模式
+        "perm-ask": f"fg:#ffa500 bg:{theme.status_bg} bold",
+        "perm-approve": f"fg:#00cc66 bg:{theme.status_bg} bold",
         # 其他
         "scrollbar": f"fg:{theme.input_bg} bg:{theme.output_bg}",
         "scrollbar-arrow": f"fg:{theme.accent} bg:{theme.output_bg}",
@@ -613,7 +616,11 @@ def make_status_text_from_repl(repl: Any) -> Callable[[], List[Tuple[str, str]]]
             result.append(("class:status-bar", "| 0 tok "))
 
         # 权限模式
-        result.append(("class:status-bar-bright", "| ask "))
+        perm_mode = getattr(repl, '_permission_mode', 'ask')
+        if perm_mode == "approve":
+            result.append(("class:perm-approve", "| [APPROVE] "))
+        else:
+            result.append(("class:perm-ask", "| [ASK] "))
 
         # 延迟
         if last_latency_ms > 0:
@@ -767,6 +774,7 @@ class KeybindingCallbacks:
         handle_list_models: Callable[[], None],
         get_app: Callable[[], Any],
         process_input: Optional[Callable[[str], None]] = None,
+        toggle_permission: Optional[Callable[[], None]] = None,
     ):
         self.mode = mode
         self.agent_running = agent_running
@@ -783,6 +791,7 @@ class KeybindingCallbacks:
         self.handle_list_models = handle_list_models
         self.get_app = get_app
         self.process_input = process_input
+        self.toggle_permission = toggle_permission
 
 
 def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
@@ -918,6 +927,13 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
         callbacks.handle_list_models()
         event.app.invalidate()
 
+    @kb.add("c-p")
+    def handle_permission_toggle(event: KeyPressEvent) -> None:
+        """Ctrl+P：切换权限模式"""
+        if callbacks.toggle_permission:
+            callbacks.toggle_permission()
+        event.app.invalidate()
+
     @kb.add("tab")
     def handle_tab(event: KeyPressEvent) -> None:
         """Tab：命令/文件补全，无补全器时插入 4 空格"""
@@ -955,5 +971,6 @@ def build_keybindings_from_repl(repl: Any) -> KeyBindings:
         handle_list_models=repl._handle_list_models,
         get_app=lambda: repl.app,
         process_input=repl._process_user_input,
+        toggle_permission=repl._toggle_permission_mode,
     )
     return build_keybindings(callbacks)

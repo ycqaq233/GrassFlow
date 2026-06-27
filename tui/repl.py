@@ -724,6 +724,18 @@ class GrassFlowREPL:
     def _interrupt_agent(self) -> None:
         self._agent.interrupt()
 
+    def _toggle_permission_mode(self) -> None:
+        """切换权限模式 (ask <-> approve) 并显示提示"""
+        if self._permission_mode == "ask":
+            self._permission_mode = "approve"
+            msg = "Permission mode: APPROVE — tools will execute automatically"
+        else:
+            self._permission_mode = "ask"
+            msg = "Permission mode: ASK — tools require approval before execution"
+        cprint(f"\033[1;36m  {msg}\033[0m")
+        if self.app:
+            self.app.invalidate()
+
     def _execute_shell(self, command: str) -> None:
         """在后台线程中执行 shell 命令，避免阻塞 UI 线程"""
         def _run():
