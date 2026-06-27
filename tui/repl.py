@@ -11,6 +11,7 @@ GrassFlow REPL — 基于 prompt_toolkit 的交互式 TUI（hermes patch_stdout 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import shutil
@@ -19,6 +20,8 @@ import threading
 import time
 import traceback
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
@@ -76,6 +79,9 @@ class GrassFlowREPL:
         self._api_call_count = 0
         self._api_start_time: float = 0.0
         self._retry_last: bool = False
+
+        # Context compressor (lazy init)
+        self._compressor = None
 
         # 流式输出状态（hermes 模式）
         self._stream_buf: str = ""
@@ -158,6 +164,8 @@ class GrassFlowREPL:
             self._undo_stack.clear()
             self._redo_stack.clear()
         self._conversation_history.clear()
+        if self._compressor:
+            self._compressor.reset()
 
     # ==================== 流式输出（hermes 行缓冲模式） ====================
 
@@ -265,6 +273,78 @@ class GrassFlowREPL:
         self._last_latency_ms = 0
         self._api_call_count = 0
         self._api_start_time = 0.0
+        if self._compressor:
+            self._compressor.reset()
+
+    # ==================== 上下文压缩 ====================
+
+    def _init_compressor(self) -> None:
+        """懒初始化上下文压缩器"""
+        if self._compressor is not None:
+            return
+        try:
+            from tui.context_compressor import ContextCompressor
+            if not self._agent._agent_loop:
+                return
+            client = self._agent._agent_loop._client
+            # 从 session metadata 读取压缩阈值，默认 80000
+            threshold = 80000
+            if self.session:
+                threshold = self.session.metadata.get("compress_threshold", 80000)
+            self._compressor = ContextCompressor(
+                llm_client=client,
+                context_limit=self._token_limit,
+                compaction_threshold=threshold,
+            )
+            logger.debug("Context compressor initialized (threshold=%d)", threshold)
+        except Exception as e:
+            logger.debug("Failed to initialize context compressor: %s", e)
+            self._compressor = None
+
+    async def _check_and_compress(self) -> None:
+        """检查对话历史是否需要压缩，如果需要则执行压缩。
+
+        在调用 agent 之前调用此方法。
+        压缩后更新 self._conversation_history。
+        """
+        self._init_compressor()
+        if not self._compressor:
+            return
+        if len(self._conversation_history) < 4:
+            return
+
+        from tui.context_compressor import ChatMessage, SUMMARY_PREFIX, SUMMARY_END_MARKER
+        messages = [ChatMessage(role=m["role"], content=m.get("content", "")) for m in self._conversation_history]
+        if not self._compressor.should_compact(messages):
+            return
+
+        original_tokens = self._compressor.estimate_tokens(messages)
+        result = await self._compressor.compact(messages)
+        if result.tokens_saved <= 0:
+            return
+
+        # 重建消息列表
+        rebuilt = []
+        rebuilt.append(ChatMessage(
+            role="system",
+            content=f"{SUMMARY_PREFIX}\n\n{result.summary}\n\n{SUMMARY_END_MARKER}",
+        ))
+        rebuilt.extend(result.tail_messages)
+        rebuilt = self._compressor._sanitize_tool_pairs(rebuilt)
+
+        # 更新 _conversation_history
+        self._conversation_history.clear()
+        for msg in rebuilt:
+            entry = {"role": msg.role, "content": msg.content}
+            if msg.tool_call_id:
+                entry["tool_call_id"] = msg.tool_call_id
+            if msg.name:
+                entry["name"] = msg.name
+            self._conversation_history.append(entry)
+
+        compacted_tokens = result.compacted_tokens
+        cprint(f"\033[36m  Context compressed ({original_tokens} -> {compacted_tokens} tokens, "
+               f"saved {result.tokens_saved} tokens)\033[0m")
 
     # ==================== 输入处理 ====================
 
@@ -335,6 +415,24 @@ class GrassFlowREPL:
                 self.session_mgr.add_user_message(self.session.id, text)
             except Exception:
                 pass
+
+        # Check and compress context before agent processing
+        if self.app and self.app.loop and self.app.loop.is_running():
+            self.app.loop.create_task(self._pre_process_compression(text))
+            return  # _pre_process_compression will call _dispatch_agent after compression
+
+        self._dispatch_agent(text)
+
+    async def _pre_process_compression(self, text: str) -> None:
+        """Compress context if needed, then dispatch to agent."""
+        try:
+            await self._check_and_compress()
+        except Exception as e:
+            logger.debug("Context compression failed: %s", e)
+        self._dispatch_agent(text)
+
+    def _dispatch_agent(self, text: str) -> None:
+        """Dispatch to agent processing (after compression check)."""
         if not self._agent.is_initialized:
             self.add_output(
                 "No agent loop available. Set up an LLM provider to enable AI responses.\n"
@@ -564,6 +662,7 @@ class GrassFlowREPL:
                         "model": DEFAULT_MODEL,
                         "provider": DEFAULT_PROVIDER,
                         "thinking": {"enabled": True, "effort": "medium", "display": "full"},
+                        "compress_threshold": 80000,
                     },
                 )
                 self.add_output(f"Session: {self.session.id[:12]}", role="system")

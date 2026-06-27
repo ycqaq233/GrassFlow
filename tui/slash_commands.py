@@ -236,6 +236,11 @@ def _cmd_compact(repl, args: List[str]) -> None:
     _handle_compact(repl)
 
 
+def _cmd_compress(repl, args: List[str]) -> None:
+    """手动压缩上下文（别名）"""
+    _handle_compact(repl)
+
+
 def _cmd_list_sessions(repl, args: List[str]) -> None:
     """列出历史会话"""
     _handle_list_sessions(repl)
@@ -411,11 +416,23 @@ def _cmd_stats(repl, args: List[str]) -> None:
     lines = [
         "  Context statistics:",
         f"    Output entries: {len(repl.output)}",
+        f"    Conversation messages: {len(repl._conversation_history)}",
         f"    Estimated tokens: {repl._token_count}",
         f"    Token limit: {repl._token_limit}",
         f"    API calls: {repl._api_call_count}",
         f"    Last latency: {repl._last_latency_ms}ms",
     ]
+    # Compressor stats
+    if repl._compressor:
+        from tui.context_compressor import estimate_messages_tokens, ChatMessage
+        msgs = [ChatMessage(role=m["role"], content=m.get("content", "")) for m in repl._conversation_history]
+        est = estimate_messages_tokens(msgs)
+        lines.append(f"    Compressor: active (compactions: {repl._compressor.compaction_count})")
+        lines.append(f"    Context tokens (estimated): {est}")
+        threshold = repl._compressor.compaction_threshold
+        lines.append(f"    Compress threshold: {threshold}")
+    else:
+        lines.append("    Compressor: not initialized")
     if repl.session:
         lines.append(f"    Session: {repl.session.id[:16]}")
         lines.append(f"    Session status: {repl.session.status.value}")
@@ -671,11 +688,18 @@ def _cmd_usage(repl, args: List[str]) -> None:
     lines = [
         "  Token usage:",
         f"    Current session: {len(repl.output)} entries",
+        f"    Conversation messages: {len(repl._conversation_history)}",
         f"    Estimated tokens: {repl._token_count}",
         f"    Token limit: {repl._token_limit}",
         f"    API calls: {repl._api_call_count}",
         f"    Last latency: {repl._last_latency_ms}ms",
     ]
+    if repl._compressor:
+        from tui.context_compressor import estimate_messages_tokens, ChatMessage
+        msgs = [ChatMessage(role=m["role"], content=m.get("content", "")) for m in repl._conversation_history]
+        est = estimate_messages_tokens(msgs)
+        lines.append(f"    Context tokens (estimated): {est}")
+        lines.append(f"    Compressions: {repl._compressor.compaction_count}")
     if repl.session:
         lines.append(f"    Session ID: {repl.session.id[:16]}")
         lines.append(f"    Session status: {repl.session.status.value}")
@@ -732,10 +756,60 @@ def _cmd_yolo(repl, args: List[str]) -> None:
 # ---------------------------------------------------------------------------
 
 def _handle_compact(repl) -> None:
-    """压缩上下文"""
-    repl.add_output("Context compaction triggered.", role="system")
-    # TODO: 集成 ContextCompressor
-    repl._token_count = max(0, repl._token_count // 2)
+    """压缩上下文（手动触发）"""
+    import asyncio
+
+    repl._init_compressor()
+    if not repl._compressor:
+        repl.add_output("Context compressor not available (agent loop not initialized).", role="error")
+        return
+
+    if len(repl._conversation_history) < 2:
+        repl.add_output("Not enough messages to compress.", role="system")
+        return
+
+    from tui.context_compressor import ChatMessage, SUMMARY_PREFIX, SUMMARY_END_MARKER
+
+    messages = [ChatMessage(role=m["role"], content=m.get("content", "")) for m in repl._conversation_history]
+    original_tokens = repl._compressor.estimate_tokens(messages)
+
+    repl.add_output(f"Compressing context ({original_tokens} estimated tokens)...", role="system")
+
+    async def _do_compress():
+        result = await repl._compressor.compact(messages, force=True)
+        if result.tokens_saved <= 0:
+            repl.add_output("Nothing to compress.", role="system")
+            return
+
+        # Rebuild history
+        rebuilt = []
+        rebuilt.append(ChatMessage(
+            role="system",
+            content=f"{SUMMARY_PREFIX}\n\n{result.summary}\n\n{SUMMARY_END_MARKER}",
+        ))
+        rebuilt.extend(result.tail_messages)
+        rebuilt = repl._compressor._sanitize_tool_pairs(rebuilt)
+
+        repl._conversation_history.clear()
+        for msg in rebuilt:
+            entry = {"role": msg.role, "content": msg.content}
+            if msg.tool_call_id:
+                entry["tool_call_id"] = msg.tool_call_id
+            if msg.name:
+                entry["name"] = msg.name
+            repl._conversation_history.append(entry)
+
+        repl.add_output(
+            f"Context compressed: {result.original_tokens} -> {result.compacted_tokens} tokens "
+            f"(saved {result.tokens_saved} tokens, {result.tokens_saved/result.original_tokens*100:.1f}%)",
+            role="system",
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_do_compress())
+    except RuntimeError:
+        asyncio.run(_do_compress())
 
 
 def _handle_new_session(repl) -> None:
@@ -758,6 +832,7 @@ def _handle_new_session(repl) -> None:
             )
             repl.clear_output()
             repl._reset_stats()
+            repl._compressor = None  # Reset compressor for new session
             repl.add_output(
                 f"New session created: {repl.session.id[:12]}",
                 role="system",
@@ -872,7 +947,7 @@ COMMAND_REGISTRY: List[CommandDef] = [
         name="compact",
         description="手动压缩上下文",
         category="Session",
-        aliases=(),
+        aliases=("compress",),
         args_hint="",
         handler_name="_cmd_compact",
     ),
@@ -1133,6 +1208,7 @@ _HANDLER_MAP: Dict[str, Callable] = {
     "_cmd_new_session": _cmd_new_session,
     "_cmd_clear": _cmd_clear,
     "_cmd_compact": _cmd_compact,
+    "_cmd_compress": _cmd_compress,
     "_cmd_init": _cmd_init,
     "_cmd_undo": _cmd_undo,
     "_cmd_redo": _cmd_redo,
