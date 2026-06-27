@@ -95,6 +95,11 @@ class GrassFlowREPL:
         self._thinking_box_opened: bool = False  # whether header was printed
         self._thinking_start_time: float = 0.0   # thinking block start time
 
+        # Thinking stream state (collapsible block)
+        self._thinking_buf: str = ""
+        self._thinking_token_count: int = 0
+        self._thinking_box_opened: bool = False
+
         self._setup_keybindings()
 
     # ==================== 主题 ====================

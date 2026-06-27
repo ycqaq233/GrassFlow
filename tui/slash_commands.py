@@ -488,6 +488,7 @@ def _cmd_think(repl, args: List[str]) -> None:
         repl.add_output(f"Thinking display mode: {arg}", role="system")
         return
 
+
     if arg == "display":
         if len(args) < 2:
             repl.add_output("Usage: /think display [collapsed|full]", role="error")
@@ -847,6 +848,7 @@ def _handle_new_session(repl) -> None:
             old_id = repl.session.id if repl.session else None
 
             directory = os.getcwd()
+            from tui.layout import DEFAULT_MODEL, DEFAULT_PROVIDER
             repl.session = repl.session_mgr.create_session(
                 title=f"REPL Session",
                 directory=directory,
