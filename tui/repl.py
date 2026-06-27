@@ -76,6 +76,7 @@ class GrassFlowREPL:
         self._api_call_count = 0
         self._api_start_time: float = 0.0
         self._retry_last: bool = False
+        self._tool_verbose: bool = False  # False=compact tool display, True=full output
 
         # 流式输出状态（hermes 模式）
         self._stream_buf: str = ""
@@ -434,18 +435,43 @@ class GrassFlowREPL:
             self._flush_stream()
             self._reset_stream_state()
             name = data.get('name', '?')
-            cprint(f"\n\033[1;36m  [tool] Calling {name}...\033[0m")
-            if data.get("args"):
-                args_str = json.dumps(data['args'], ensure_ascii=False)[:300]
-                cprint(f"\033[2m    args: {args_str}\033[0m")
+            if self._tool_verbose:
+                cprint(f"\n\033[1;36m  [tool] Calling {name}...\033[0m")
+                if data.get("args"):
+                    args_str = json.dumps(data['args'], ensure_ascii=False)[:300]
+                    cprint(f"\033[2m    args: {args_str}\033[0m")
+            else:
+                # Compact: show summary line with args preview
+                args_preview = ""
+                if data.get("args"):
+                    args_str = json.dumps(data['args'], ensure_ascii=False)
+                    if len(args_str) > 80:
+                        args_preview = args_str[:77] + "..."
+                    else:
+                        args_preview = args_str
+                    args_preview = f"({args_preview})"
+                else:
+                    args_preview = "()"
+                cprint(f"\n\033[1;36m  \U0001f527 {name}{args_preview}\033[0m")
         elif etype == "tool_result":
             self._flush_stream()
             self._reset_stream_state()
             result = data.get("result", data.get("output", ""))
             is_err = data.get("is_error", False) or data.get("success", True) is False
-            color = "\033[1;31m" if is_err else "\033[2m"
-            prefix = "[tool result] [ERROR] " if is_err else "[tool result] "
-            cprint(f"{color}  {prefix}{str(result)[:500 if is_err else 800]}\033[0m")
+            if self._tool_verbose:
+                color = "\033[1;31m" if is_err else "\033[2m"
+                prefix = "[tool result] [ERROR] " if is_err else "[tool result] "
+                cprint(f"{color}  {prefix}{str(result)[:500 if is_err else 800]}\033[0m")
+            else:
+                # Compact: single summary line truncated to ~200 chars
+                result_str = str(result).replace("\n", " ").strip()
+                max_len = 200
+                if len(result_str) > max_len:
+                    result_str = result_str[:max_len - 3] + "..."
+                if is_err:
+                    cprint(f"\033[1;31m  ❌ {data.get('name', 'tool')} → {result_str}\033[0m")
+                else:
+                    cprint(f"\033[32m  ✅ {data.get('name', 'tool')} → {result_str}\033[0m")
         elif etype == "error":
             self._close_thinking_block()
             self._flush_stream()
