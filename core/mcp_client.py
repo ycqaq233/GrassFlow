@@ -162,6 +162,22 @@ class StdioTransport(MCPTransport):
 
         except Exception as e:
             logger.error(f"Failed to connect stdio transport: {e}")
+            # 清理子进程和 reader task，防止资源泄漏
+            self._connected = False
+            if self._reader_task:
+                self._reader_task.cancel()
+                try:
+                    await self._reader_task
+                except asyncio.CancelledError:
+                    pass
+                self._reader_task = None
+            if self._process:
+                try:
+                    self._process.kill()
+                    await self._process.wait()
+                except ProcessLookupError:
+                    pass
+                self._process = None
             raise
 
     async def _initialize(self) -> None:
@@ -176,37 +192,60 @@ class StdioTransport(MCPTransport):
                 "version": "1.0.0",
             },
         })
-        logger.info(f"MCP initialized: {result}")
+        logger.info(f"MCP initialized: {str(result)[:200]}")
 
         # 发送初始化完成通知
         await self.send_notification("notifications/initialized")
 
     async def _read_responses(self) -> None:
-        """读取子进程响应"""
+        """读取子进程响应（使用 Content-Length 头帧格式）"""
         if not self._process or not self._process.stdout:
             return
 
-        buffer = ""
+        MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10 MB 上限
+
         while self._connected and self._process.stdout:
             try:
-                line = await self._process.stdout.readline()
-                if not line:
-                    break
-
-                buffer += line.decode("utf-8")
-                if "\n" in buffer:
-                    messages = buffer.split("\n")
-                    buffer = messages.pop()
-
-                    for msg_str in messages:
-                        msg_str = msg_str.strip()
-                        if not msg_str:
-                            continue
+                # 读取头部（Content-Length 等），直到空行
+                content_length = -1
+                while True:
+                    line = await self._process.stdout.readline()
+                    if not line:
+                        self._connected = False
+                        return
+                    line_str = line.decode("utf-8").rstrip("\r\n")
+                    if line_str == "":
+                        break  # 空行分隔头和体
+                    if line_str.lower().startswith("content-length:"):
                         try:
-                            message = json.loads(msg_str)
-                            self._handle_message(message)
-                        except json.JSONDecodeError:
-                            logger.warning(f"Invalid JSON: {msg_str}")
+                            content_length = int(line_str.split(":", 1)[1].strip())
+                        except ValueError:
+                            logger.warning(f"Invalid Content-Length header: {line_str}")
+
+                if content_length < 0:
+                    logger.warning("收到无 Content-Length 头的消息，跳过")
+                    continue
+
+                if content_length > MAX_BUFFER_SIZE:
+                    logger.error(f"消息体过大 ({content_length} bytes > {MAX_BUFFER_SIZE})，跳过")
+                    continue
+
+                # 读取消息体
+                body = b""
+                remaining = content_length
+                while remaining > 0:
+                    chunk = await self._process.stdout.read(remaining)
+                    if not chunk:
+                        self._connected = False
+                        return
+                    body += chunk
+                    remaining -= len(chunk)
+
+                try:
+                    message = json.loads(body.decode("utf-8"))
+                    self._handle_message(message)
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON in message body ({content_length} bytes)")
 
             except asyncio.CancelledError:
                 break
@@ -233,7 +272,7 @@ class StdioTransport(MCPTransport):
             logger.debug(f"Received notification: {message['method']}")
 
     async def send_request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """发送 JSON-RPC 请求"""
+        """发送 JSON-RPC 请求（Content-Length 帧格式）"""
         if not self._process or not self._process.stdin:
             raise MCPError("Not connected")
 
@@ -248,12 +287,13 @@ class StdioTransport(MCPTransport):
         if params is not None:
             request["params"] = params
 
-        future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = future
 
         try:
-            request_str = json.dumps(request) + "\n"
-            self._process.stdin.write(request_str.encode("utf-8"))
+            body = json.dumps(request, ensure_ascii=False).encode("utf-8")
+            header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+            self._process.stdin.write(header + body)
             await self._process.stdin.drain()
         except Exception as e:
             self._pending_requests.pop(request_id, None)
@@ -266,7 +306,7 @@ class StdioTransport(MCPTransport):
             raise MCPError(f"Request timeout: {method}")
 
     async def send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
-        """发送 JSON-RPC 通知"""
+        """发送 JSON-RPC 通知（Content-Length 帧格式）"""
         if not self._process or not self._process.stdin:
             raise MCPError("Not connected")
 
@@ -278,8 +318,9 @@ class StdioTransport(MCPTransport):
             notification["params"] = params
 
         try:
-            notification_str = json.dumps(notification) + "\n"
-            self._process.stdin.write(notification_str.encode("utf-8"))
+            body = json.dumps(notification, ensure_ascii=False).encode("utf-8")
+            header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+            self._process.stdin.write(header + body)
             await self._process.stdin.drain()
         except Exception as e:
             raise MCPError(f"Failed to send notification: {e}")
@@ -299,8 +340,11 @@ class StdioTransport(MCPTransport):
             try:
                 self._process.terminate()
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except (asyncio.TimeoutError, ProcessLookupError):
+            except asyncio.TimeoutError:
                 self._process.kill()
+                await self._process.wait()
+            except ProcessLookupError:
+                pass
             self._process = None
 
         # 清理未完成的请求
@@ -343,14 +387,19 @@ class HTTPTransport(MCPTransport):
                 headers=self.headers,
                 timeout=self.timeout,
             )
-            self._connected = True
 
             # 初始化
             await self._initialize()
+            self._connected = True
             logger.info(f"HTTP transport connected: {self.url}")
 
         except Exception as e:
             logger.error(f"Failed to connect HTTP transport: {e}")
+            # 清理 HTTP 客户端，防止连接池泄漏
+            if self._client:
+                await self._client.aclose()
+                self._client = None
+            self._connected = False
             raise
 
     async def _initialize(self) -> None:
@@ -365,7 +414,7 @@ class HTTPTransport(MCPTransport):
                 "version": "1.0.0",
             },
         })
-        logger.info(f"MCP initialized: {result}")
+        logger.info(f"MCP initialized: {str(result)[:200]}")
 
         # 发送初始化完成通知
         await self.send_notification("notifications/initialized")
@@ -401,7 +450,8 @@ class HTTPTransport(MCPTransport):
             return result.get("result", {})
 
         except httpx.HTTPStatusError as e:
-            raise MCPError(f"HTTP error: {e.response.status_code}")
+            body_preview = e.response.text[:200] if e.response.text else ""
+            raise MCPError(f"HTTP error: {e.response.status_code} {body_preview}")
         except Exception as e:
             if isinstance(e, MCPError):
                 raise
@@ -471,17 +521,22 @@ class SSETransport(MCPTransport):
                 headers=self.headers,
                 timeout=self.timeout,
             )
-            self._connected = True
 
             # 连接到 SSE 端点获取消息端点 URL
             await self._connect_sse()
 
             # 初始化
             await self._initialize()
+            self._connected = True
             logger.info(f"SSE transport connected: {self.url}")
 
         except Exception as e:
             logger.error(f"Failed to connect SSE transport: {e}")
+            # 清理 HTTP 客户端，防止连接池泄漏
+            if self._client:
+                await self._client.aclose()
+                self._client = None
+            self._connected = False
             raise
 
     async def _connect_sse(self) -> None:
@@ -519,7 +574,7 @@ class SSETransport(MCPTransport):
                 "version": "1.0.0",
             },
         })
-        logger.info(f"MCP initialized: {result}")
+        logger.info(f"MCP initialized: {str(result)[:200]}")
 
         # 发送初始化完成通知
         await self.send_notification("notifications/initialized")
@@ -557,7 +612,8 @@ class SSETransport(MCPTransport):
             return result.get("result", {})
 
         except httpx.HTTPStatusError as e:
-            raise MCPError(f"HTTP error: {e.response.status_code}")
+            body_preview = e.response.text[:200] if e.response.text else ""
+            raise MCPError(f"HTTP error: {e.response.status_code} {body_preview}")
         except Exception as e:
             if isinstance(e, MCPError):
                 raise
@@ -651,7 +707,13 @@ class MCPServerConfig:
     @classmethod
     def from_dict(cls, name: str, config: dict[str, Any]) -> "MCPServerConfig":
         """从字典创建配置"""
-        transport_type = MCPTransportType(config.get("type", "stdio"))
+        # 兼容 "type" 和 "transport" 两种字段名
+        type_str = config.get("type") or config.get("transport", "stdio")
+        try:
+            transport_type = MCPTransportType(type_str)
+        except ValueError:
+            logger.warning(f"Invalid transport type '{type_str}' for server '{name}', defaulting to stdio")
+            transport_type = MCPTransportType.STDIO
 
         return cls(
             name=name,
@@ -736,6 +798,13 @@ class MCPClient:
 
         except Exception as e:
             self.status = MCPClientStatus.ERROR
+            # 断开已连接的传输，防止资源泄漏
+            if self._transport:
+                try:
+                    await self._transport.disconnect()
+                except Exception:
+                    pass
+                self._transport = None
             logger.error(f"Failed to connect MCP client {self.name}: {e}")
             raise
 
