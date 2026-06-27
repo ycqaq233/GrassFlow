@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 
@@ -65,9 +66,14 @@ class GrassFlowREPL:
         self._input_queue: queue.Queue = queue.Queue()
         self._completer = SlashCommandCompleter()
         self.app: Optional[Application] = None
+        # Persistent command history (up/down arrow navigation)
+        _history_dir = os.path.join(os.path.expanduser("~"), ".Grass")
+        os.makedirs(_history_dir, exist_ok=True)
+        _history_path = os.path.join(_history_dir, "repl_history")
         self.input_buffer = Buffer(
             multiline=True, completer=self._completer, complete_while_typing=True,
             accept_handler=None,
+            history=FileHistory(_history_path),
         )
         self.kb = KeyBindings()
         self._undo_stack: List[OutputEntry] = []
