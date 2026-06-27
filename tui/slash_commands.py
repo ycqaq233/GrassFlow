@@ -418,7 +418,24 @@ def _cmd_think(repl, args: List[str]) -> None:
     enabled = parsed.get("enabled", False)
     if enabled:
         effort = parsed.get("effort", "medium")
-        repl.add_output(f"Thinking mode: ON (effort: {effort})", role="system")
+        # Check if current model supports reasoning
+        current_model = ""
+        try:
+            if repl._agent and repl._agent._agent_loop:
+                current_model = repl._agent._agent_loop._model_name
+        except Exception:
+            pass
+
+        if current_model and "reasoner" not in current_model.lower():
+            repl.add_output(
+                f"Thinking mode: ON (effort: {effort})\n"
+                f"\033[33m  Warning: Current model '{current_model}' does not support reasoning.\n"
+                f"  Switch to 'deepseek-reasoner' with: /model deepseek-reasoner\n"
+                f"  Thinking will have no effect until you switch.\033[0m",
+                role="system",
+            )
+        else:
+            repl.add_output(f"Thinking mode: ON (effort: {effort})", role="system")
     else:
         repl.add_output("Thinking mode: OFF", role="system")
 
