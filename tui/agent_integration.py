@@ -127,40 +127,48 @@ class AgentIntegration:
                     # Register callback: when MCP servers finish connecting,
                     # re-register tools into the shared tool_registry and log.
                     def _on_mcp_ready():
+                        """Log MCP tool availability after servers connect."""
                         try:
-                            cnt = self._mcp_manager.register_tools_to_registry(tool_registry)
-                            if cnt:
+                            tool_count = sum(
+                                len(s.tools)
+                                for s in self._mcp_manager._servers.values()
+                                if s.connected
+                            )
+                            if tool_count:
                                 logger.info(
-                                    "MCP on_ready: %d tools registered into tool registry", cnt
+                                    "MCP on_ready: %d tools available from connected servers",
+                                    tool_count,
                                 )
                         except Exception as cb_err:
-                            logger.warning("MCP on_ready tool registration error: %s", cb_err)
+                            logger.warning("MCP on_ready callback error: %s", cb_err)
 
                     self._mcp_manager.set_on_ready_callback(_on_mcp_ready)
 
-                    import asyncio
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            # Schedule MCP startup as background task.
-                            # start_all() now waits for connected_event per server,
-                            # so tools are registered before the task completes.
-                            # The on_ready callback fires after tools are in the registry.
-                            loop.create_task(self._mcp_manager.start_all())
-                            logger.info("MCP startup scheduled as background task")
-                        else:
-                            loop.run_until_complete(self._mcp_manager.start_all())
-                    except RuntimeError:
-                        logger.debug("No event loop for MCP startup, will start later")
+                    # Start MCP on a dedicated background event loop (hermes pattern)
+                    import threading
+                    def _mcp_background_start():
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            try:
+                                loop.run_until_complete(self._mcp_manager.start_all())
+                            finally:
+                                loop.close()
+                        except Exception as e:
+                            logger.warning("MCP background startup failed: %s", e)
 
-                    # Register any already-discovered MCP tools (covers the
-                    # synchronous path where start_all() already completed).
-                    try:
-                        mcp_count = self._mcp_manager.register_tools_to_registry(tool_registry)
-                        if mcp_count:
-                            logger.info("Registered %d MCP tools into tool registry", mcp_count)
-                    except Exception as reg_err:
-                        logger.warning("MCP tool registration error: %s", reg_err)
+                    mcp_thread = threading.Thread(
+                        target=_mcp_background_start,
+                        name="mcp-startup",
+                        daemon=True,
+                    )
+                    mcp_thread.start()
+                    logger.info("MCP startup launched in background thread")
+
+                    # Note: register_tools_to_registry() is called inside
+                    # start_all() (mcp_integration.py:867) and via the
+                    # on_ready callback. No need to call it here since the
+                    # background thread hasn't completed yet.
             except Exception as e:
                 logger.warning("MCP initialization failed: %s", e)
                 self._mcp_manager = None
