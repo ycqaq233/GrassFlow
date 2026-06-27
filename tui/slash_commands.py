@@ -75,7 +75,7 @@ def _cmd_help(repl, args: List[str]) -> None:
         "",
         "  Available commands:",
     ]
-    for cmd_def in COMMAND_REGISTRY:
+    for cmd_def in command_registry.all_commands():
         if not cmd_def.visible:
             continue
         name = cmd_def.name
@@ -638,6 +638,83 @@ def _cmd_skills(repl, args: List[str]) -> None:
         repl.add_output(summary, role="system")
     except Exception as e:
         repl.add_output(f"Skills system error: {e}", role="error")
+
+
+def _cmd_skill_load(repl, args: List[str]) -> None:
+    """Load a skill by name and inject its content into conversation.
+
+    This is the generic handler invoked by dynamically registered /skill-name commands.
+    The first element of ``args`` is the skill name (injected by the closure that
+    wraps each dynamically registered command).
+    """
+    if not args:
+        repl.add_output("Usage: /<skill-name>", role="error")
+        return
+
+    skill_name = args[0]
+    try:
+        from tui.skills_system import get_skills_manager
+        skills_mgr = get_skills_manager()
+        skill = skills_mgr.get_skill(skill_name)
+
+        if not skill:
+            repl.add_output(f"Skill not found: {skill_name}", role="error")
+            return
+
+        # Inject skill content as a system message into conversation history
+        skill_message = f"[Skill Loaded: {skill.name}]\n\n{skill.content}"
+        repl._conversation_history.append({
+            "role": "system",
+            "content": skill_message,
+        })
+
+        repl.add_output(f"✅ Skill loaded: {skill.name}", role="system")
+
+        # Trigger agent response so it can acknowledge the new skill context
+        if repl._agent.is_initialized:
+            repl._handle_agent_message(
+                f"I've loaded the '{skill.name}' skill. "
+                f"Please read its instructions and confirm you understand what you can now do."
+            )
+    except Exception as e:
+        repl.add_output(f"Failed to load skill: {e}", role="error")
+
+
+def register_skill_commands() -> None:
+    """Dynamically register a /skill-name command for every discovered skill.
+
+    Called once during REPL startup (after SkillsManager has scanned).
+    Each registered command maps to a closure that loads the corresponding
+    skill content into the conversation history.
+    """
+    try:
+        from tui.skills_system import get_skills_manager
+        skills_mgr = get_skills_manager()
+        skills = skills_mgr.scan()
+
+        for skill in skills:
+            # Never overwrite a built-in command (e.g. /skills, /help)
+            if command_registry.get(skill.name) is not None:
+                continue
+
+            desc = skill.description or skill.name
+            cmd_def = CommandDef(
+                name=skill.name,
+                description=f"Load skill: {desc}",
+                category="Skills",
+                aliases=(),
+                args_hint="",
+                handler_name=f"_cmd_skill_load:{skill.name}",
+                visible=True,
+            )
+            command_registry.register(cmd_def)
+            # Register a closure so each skill name maps to the right load call
+            command_registry.register_handler(
+                f"_cmd_skill_load:{skill.name}",
+                lambda repl, _args, _name=skill.name: _cmd_skill_load(repl, [_name]),
+            )
+    except Exception as e:
+        logger.debug("Failed to register skill commands: %s", e)
 
 
 def _cmd_copy(repl, args: List[str]) -> None:
@@ -1505,8 +1582,8 @@ class SlashCommandCompleter(Completer):
                     )
                 return
 
-            # 补全命令名 — 从 COMMAND_REGISTRY 动态获取
-            for cmd_def in COMMAND_REGISTRY:
+            # 补全命令名 — 从 command_registry 动态获取（包含技能命令）
+            for cmd_def in command_registry.all_commands():
                 if not cmd_def.visible:
                     continue
                 # 主命令名匹配
