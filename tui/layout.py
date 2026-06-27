@@ -19,6 +19,7 @@ GrassFlow REPL Layout — prompt_toolkit 布局、样式和快捷键（hermes pa
 
 from __future__ import annotations
 
+import os
 import re as _re
 import shutil
 from collections import deque
@@ -456,6 +457,11 @@ def make_status_text_cb(
     last_latency_ms: int = 0,
     api_call_count: int = 0,
     agent_running: bool = False,
+    model: str = "",
+    project_dir: str = "",
+    context_length: int = 0,
+    thinking_depth: str = "",
+    permission_mode: str = "ask",
 ) -> Callable[[], List[Tuple[str, str]]]:
     """创建底部状态栏渲染回调
 
@@ -468,6 +474,11 @@ def make_status_text_cb(
         last_latency_ms: 最近一次 API 延迟
         api_call_count: API 调用次数
         agent_running: Agent 是否正在运行
+        model: 模型名称
+        project_dir: 项目目录
+        context_length: 上下文消息数
+        thinking_depth: 思考深度
+        permission_mode: 权限模式
 
     Returns:
         返回 formatted text 的回调函数
@@ -476,32 +487,64 @@ def make_status_text_cb(
     def _get_status_text() -> List[Tuple[str, str]]:
         result: List[Tuple[str, str]] = []
 
+        # 模型
+        if model:
+            result.append(("class:status-bar", f" {model} "))
+
+        # 项目目录
+        if project_dir:
+            abbreviated = _abbreviate_path(project_dir)
+            result.append(("class:status-bar", f"| {abbreviated} "))
+
+        # 上下文长度
+        if context_length > 0:
+            result.append(("class:status-bar", f"| {context_length} msgs "))
+
+        # 思考深度
+        if thinking_depth:
+            result.append(("class:status-bar-bright", f"| thinking:{thinking_depth} "))
+
         # Token 使用
         if token_count > 0:
-            result.append(("class:status-bar", f" Tokens: {token_count}/{token_limit}"))
-            pct = token_count / token_limit * 100
+            result.append(("class:status-bar", f"| {token_count}/{token_limit} tok"))
+            pct = token_count / token_limit * 100 if token_limit > 0 else 0
             if pct > 80:
                 result.append(("class:status-bar-bright", f" ({int(pct)}%!) "))
             else:
                 result.append(("class:status-bar", f" ({int(pct)}%) "))
         else:
-            result.append(("class:status-bar", " Tokens: 0 "))
+            result.append(("class:status-bar", "| 0 tok "))
+
+        # 权限模式
+        if permission_mode:
+            result.append(("class:status-bar-bright", f"| {permission_mode} "))
 
         # 延迟
         if last_latency_ms > 0:
-            result.append(("class:status-bar", f"|  {last_latency_ms}ms "))
+            result.append(("class:status-bar", f"| {last_latency_ms}ms "))
 
         # API 调用次数
         if api_call_count > 0:
-            result.append(("class:status-bar", f"|  {api_call_count} API calls "))
+            result.append(("class:status-bar", f"| {api_call_count} calls "))
 
         # 忙碌指示器
         if agent_running:
-            result.append(("class:status-bar-bright", "|  ⏳ running... "))
+            result.append(("class:status-bar-bright", "| ⏳ "))
 
         return result
 
     return _get_status_text
+
+
+def _abbreviate_path(path: str, max_segments: int = 2) -> str:
+    """缩略路径，只保留最后 max_segments 段"""
+    if not path:
+        return ""
+    parts = path.replace("\\", "/").split("/")
+    parts = [p for p in parts if p]
+    if len(parts) <= max_segments:
+        return path
+    return ".../" + "/".join(parts[-max_segments:])
 
 
 def make_status_text_from_repl(repl: Any) -> Callable[[], List[Tuple[str, str]]]:
@@ -509,6 +552,8 @@ def make_status_text_from_repl(repl: Any) -> Callable[[], List[Tuple[str, str]]]
 
     与 make_status_text_cb 不同，此函数在每次调用时从 repl 实例
     读取最新值，适合需要实时更新的场景。
+
+    显示字段：模型名 | 项目目录 | 上下文长度 | 思考深度 | Token使用 | 权限模式 | 延迟 | API调用
 
     Args:
         repl: GrassFlowREPL 实例
@@ -526,28 +571,63 @@ def make_status_text_from_repl(repl: Any) -> Callable[[], List[Tuple[str, str]]]
         api_call_count = repl._api_call_count
         agent_running = repl._agent_running
 
+        # 模型名
+        model = ""
+        provider = ""
+        if repl.session and repl.session.metadata:
+            model = repl.session.metadata.get("model", "")
+            provider = repl.session.metadata.get("provider", "")
+        if not model:
+            model = DEFAULT_MODEL
+        if not provider:
+            provider = DEFAULT_PROVIDER
+        result.append(("class:status-bar", f" {provider}:{model} "))
+
+        # 项目目录
+        cwd = os.getcwd()
+        if cwd:
+            abbreviated = _abbreviate_path(cwd)
+            result.append(("class:status-bar", f"| {abbreviated} "))
+
+        # 上下文长度
+        context_len = len(repl._conversation_history) if hasattr(repl, '_conversation_history') else 0
+        if context_len > 0:
+            result.append(("class:status-bar", f"| {context_len} msgs "))
+
+        # 思考深度
+        thinking_depth = ""
+        if repl.session and repl.session.metadata:
+            thinking_cfg = repl.session.metadata.get("thinking", {})
+            if thinking_cfg and isinstance(thinking_cfg, dict) and thinking_cfg.get("enabled", False):
+                thinking_depth = thinking_cfg.get("effort", "medium")
+        if thinking_depth:
+            result.append(("class:status-bar-bright", f"| thinking:{thinking_depth} "))
+
         # Token 使用
         if token_count > 0:
-            result.append(("class:status-bar", f" Tokens: {token_count}/{token_limit}"))
-            pct = token_count / token_limit * 100
+            result.append(("class:status-bar", f"| {token_count}/{token_limit} tok"))
+            pct = token_count / token_limit * 100 if token_limit > 0 else 0
             if pct > 80:
                 result.append(("class:status-bar-bright", f" ({int(pct)}%!) "))
             else:
                 result.append(("class:status-bar", f" ({int(pct)}%) "))
         else:
-            result.append(("class:status-bar", " Tokens: 0 "))
+            result.append(("class:status-bar", "| 0 tok "))
+
+        # 权限模式
+        result.append(("class:status-bar-bright", "| ask "))
 
         # 延迟
         if last_latency_ms > 0:
-            result.append(("class:status-bar", f"|  {last_latency_ms}ms "))
+            result.append(("class:status-bar", f"| {last_latency_ms}ms "))
 
         # API 调用次数
         if api_call_count > 0:
-            result.append(("class:status-bar", f"|  {api_call_count} API calls "))
+            result.append(("class:status-bar", f"| {api_call_count} calls "))
 
         # 忙碌指示器
         if agent_running:
-            result.append(("class:status-bar-bright", "|  ⏳ running... "))
+            result.append(("class:status-bar-bright", "| ⏳ "))
 
         return result
 

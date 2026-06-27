@@ -46,6 +46,10 @@ class StatusContext:
     workflow_name: str = ""
     agent_count: int = 0
     agents_completed: int = 0
+    project_dir: str = ""
+    context_length: int = 0
+    thinking_depth: str = ""
+    permission_mode: str = "ask"
 
     @property
     def token_percent(self) -> float:
@@ -110,6 +114,10 @@ class StatusBar:
         "mode_plan": "bold yellow",
         "mode_review": "bold magenta",
         "mode_architect": "bold blue",
+        "project_dir": "dim",
+        "context": "green",
+        "thinking": "bold yellow",
+        "permission": "bold magenta",
     }
 
     # 模式颜色映射
@@ -204,7 +212,23 @@ class StatusBar:
             parts.append(Text(f"{ctx.provider}:", style=self.COLORS["provider"]) if ctx.provider else Text(""))
             parts.append(Text(ctx.model, style=self.COLORS["model"]))
 
-        # --- Tokens ---
+        # --- 项目目录 ---
+        if ctx.project_dir and not self.compact:
+            parts.append(sep)
+            abbreviated = self._abbreviate_path(ctx.project_dir)
+            parts.append(Text(abbreviated, style=self.COLORS["project_dir"]))
+
+        # --- 上下文长度 ---
+        if ctx.context_length > 0:
+            parts.append(sep)
+            parts.append(Text(f"{ctx.context_length} msgs", style=self.COLORS["context"]))
+
+        # --- 思考深度 ---
+        if ctx.thinking_depth:
+            parts.append(sep)
+            parts.append(Text(f"thinking:{ctx.thinking_depth}", style=self.COLORS["thinking"]))
+
+        # --- Token 使用 ---
         if ctx.token_used > 0 or ctx.token_limit > 0:
             parts.append(sep)
             token_style = self._token_style(ctx.token_percent)
@@ -216,6 +240,11 @@ class StatusBar:
             bar = self._token_bar(ctx)
             parts.append(Text(" "))
             parts.append(bar)
+
+        # --- 权限模式 ---
+        if ctx.permission_mode:
+            parts.append(sep)
+            parts.append(Text(ctx.permission_mode, style=self.COLORS["permission"]))
 
         # --- 成本 ---
         if ctx.cost_usd > 0:
@@ -259,8 +288,20 @@ class StatusBar:
             provider_part = f"{ctx.provider}:" if ctx.provider else ""
             parts.append(f"{provider_part}{ctx.model}")
 
+        if ctx.project_dir and not self.compact:
+            parts.append(self._abbreviate_path(ctx.project_dir))
+
+        if ctx.context_length > 0:
+            parts.append(f"{ctx.context_length} msgs")
+
+        if ctx.thinking_depth:
+            parts.append(f"thinking:{ctx.thinking_depth}")
+
         if ctx.token_used > 0 or ctx.token_limit > 0:
             parts.append(self._format_tokens(ctx.token_used, ctx.token_limit))
+
+        if ctx.permission_mode:
+            parts.append(ctx.permission_mode)
 
         if ctx.cost_usd > 0:
             parts.append(f"${ctx.cost_usd:.4f}")
@@ -334,6 +375,17 @@ class StatusBar:
             "Architect": "\U0001F3D7", # 🏗
         }
         return icons.get(mode, "◆")  # ◆ default
+
+    @staticmethod
+    def _abbreviate_path(path: str, max_segments: int = 2) -> str:
+        """缩略路径，只保留最后 max_segments 段"""
+        if not path:
+            return ""
+        parts = path.replace("\\", "/").split("/")
+        parts = [p for p in parts if p]
+        if len(parts) <= max_segments:
+            return path
+        return ".../" + "/".join(parts[-max_segments:])
 
 
 class StatusDisplay:
