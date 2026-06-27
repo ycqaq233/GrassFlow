@@ -95,11 +95,6 @@ class GrassFlowREPL:
         self._thinking_box_opened: bool = False  # whether header was printed
         self._thinking_start_time: float = 0.0   # thinking block start time
 
-        # Thinking stream state (collapsible block)
-        self._thinking_buf: str = ""
-        self._thinking_token_count: int = 0
-        self._thinking_box_opened: bool = False
-
         self._setup_keybindings()
 
     # ==================== 主题 ====================
@@ -355,6 +350,8 @@ class GrassFlowREPL:
                 entry["tool_call_id"] = msg.tool_call_id
             if msg.name:
                 entry["name"] = msg.name
+            if msg.tool_calls:
+                entry["tool_calls"] = msg.tool_calls
             self._conversation_history.append(entry)
 
         compacted_tokens = result.compacted_tokens
@@ -537,7 +534,7 @@ class GrassFlowREPL:
         elif etype == "tool_call_start":
             self._flush_stream()
             self._reset_stream_state()
-            name = data.get('name', '?')
+            name = data.get('name', 'tool')
             if self._tool_verbose:
                 cprint(f"\n\033[1;36m  [tool] Calling {name}...\033[0m")
                 if data.get("args"):
