@@ -258,6 +258,7 @@ class ConfigManager:
                             except (json.JSONDecodeError, ValueError):
                                 parsed = value
                             current[candidate] = parsed
+                            remaining = remaining[length:]  # consume all matched segments
                             found = True
                             break
                 if not found:

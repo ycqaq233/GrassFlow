@@ -133,9 +133,9 @@ class TestGrassFlowConfig:
         assert isinstance(config.workflow, WorkflowConfig)
         assert isinstance(config.display, DisplayConfig)
         assert isinstance(config.server, ServerConfig)
-        assert config.workflows_dir == "~/.Grass/workflows"
-        assert config.db_path == "~/.Grass/grassflow.db"
-        assert config.plugins_dir == "~/.Grass/plugins"
+        assert config.workflows_dir == os.path.expanduser("~/.Grass/workflows")
+        assert config.db_path == os.path.expanduser("~/.Grass/grassflow.db")
+        assert config.plugins_dir == os.path.expanduser("~/.Grass/plugins")
 
     def test_custom_values(self):
         """测试自定义值"""
