@@ -89,6 +89,7 @@ class GrassFlowREPL:
         self._retry_last: bool = False
         self._tool_verbose: bool = False  # False=compact tool display, True=full output
         self._permission_mode: str = "ask"  # default permission mode: ask/allow/deny
+        self._session_approvals: set = set()  # session-level tool approvals (tool names)
 
         # Context compressor (lazy init)
         self._compressor = None
@@ -287,8 +288,15 @@ class GrassFlowREPL:
 
         根据 self._permission_mode 决定审批行为：
           - "allow" / "approve": 自动批准所有工具
-          - "ask": 使用 prompt_toolkit 提示用户确认 (y/N)
+          - "ask": 显示内联审批提示（o/s/a/d 选项）
           - "deny": 自动拒绝所有工具
+
+        审批提示格式（参考 hermes）:
+          shell: ls -la /tmp
+
+            [o]nce  |  [s]ession  |  [a]lways  |  [d]eny
+
+            Choice [o/s/a/D]:
         """
         async def _approval_callback(
             tool_name: str, description: str, args_preview: str,
@@ -301,13 +309,25 @@ class GrassFlowREPL:
             if mode == "deny":
                 return "deny"
 
-            # mode == "ask": prompt user for confirmation
-            prompt_msg = (
-                f"\n  Approve tool: {tool_name}({args_preview})? [y/N] "
+            # mode == "ask": check session approvals first
+            if tool_name in self._session_approvals:
+                return "once"
+
+            # Truncate args_preview for display
+            display_args = args_preview
+            if len(display_args) > 120:
+                display_args = display_args[:117] + "..."
+
+            # Build hermes-style approval prompt
+            prompt_lines = (
+                f"\n\033[1;33m  ⚠️  {tool_name}: {display_args}\033[0m\n"
+                f"\n"
+                f"  [o]nce  |  [s]ession  |  [a]lways  |  [d]eny\n"
+                f"\n"
+                f"  Choice [o/s/a/D]: "
             )
 
             try:
-                # Check if we're in the prompt_toolkit event loop (main thread with app)
                 in_pt_loop = (
                     threading.current_thread() is threading.main_thread()
                     and self.app is not None
@@ -317,20 +337,49 @@ class GrassFlowREPL:
                 if in_pt_loop:
                     from prompt_toolkit import prompt as pt_prompt
                     answer = await pt_prompt(
-                        message=prompt_msg, async_=True, patch_stdout=True,
+                        message=prompt_lines, async_=True, patch_stdout=True,
                     )
                 else:
-                    # Background thread fallback: use synchronous input
-                    answer = input(prompt_msg)
+                    answer = input(prompt_lines)
             except (EOFError, KeyboardInterrupt, Exception):
                 answer = ""
 
             answer = answer.strip().lower()
-            if answer in ("y", "yes"):
+
+            if answer == "o":
                 return "once"
-            return "deny"
+            elif answer == "s":
+                self._session_approvals.add(tool_name)
+                get_permission_handler().approve_session(tool_name)
+                return "once"
+            elif answer == "a":
+                get_permission_handler().approve_permanent(tool_name)
+                self._save_permanent_approval(tool_name)
+                return "once"
+            else:
+                # "d" or any other input -> deny (default)
+                return "deny"
 
         get_permission_handler().set_approval_callback(_approval_callback)
+
+    @staticmethod
+    def _save_permanent_approval(tool_name: str) -> None:
+        """将永久批准的工具名写入 ~/.Grass/config.json 的 permissions 字段"""
+        try:
+            from tui.config_integration import load_config, save_config
+            config = load_config()
+            data = config.model_dump()
+            permissions = data.get("permissions") or {}
+            approved_tools = set(permissions.get("approved_tools") or [])
+            approved_tools.add(tool_name)
+            permissions["approved_tools"] = sorted(approved_tools)
+            data["permissions"] = permissions
+            # Reconstruct config and save
+            from core.config import GrassFlowConfig
+            updated = GrassFlowConfig(**data)
+            save_config(updated, scope="global")
+        except Exception as e:
+            logger.debug("Failed to save permanent approval for '%s': %s", tool_name, e)
 
     # ==================== 快捷键回调委托 ====================
 
