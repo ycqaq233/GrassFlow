@@ -1224,7 +1224,7 @@ DEEPSEEK_CHAT_ROUTE = OPENAI_CHAT_ROUTE.with_(
     route_id="deepseek-chat",
     endpoint=Endpoint(path="/chat/completions", base_url="https://api.deepseek.com"),
     auth=Auth.from_config(env_var="DEEPSEEK_API_KEY"),
-    default_model="deepseek-chat",
+    default_model="deepseek-v4-flash",
 )
 
 # Ollama 兼容 OpenAI Chat 协议
@@ -1319,7 +1319,7 @@ def openai_provider(
 
 def deepseek_provider(
     api_key: Optional[str] = None,
-    default_model: str = "deepseek-chat",
+    default_model: str = "deepseek-v4-flash",
     **kwargs,
 ) -> Provider:
     """创建 DeepSeek Provider"""

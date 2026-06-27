@@ -44,7 +44,7 @@ def _get_default_model() -> str:
         config = config_manager.load_config()
         return config.llm.default_model
     except Exception:
-        return "deepseek-chat"
+        return "deepseek-v4-flash"
 
 
 def _get_default_provider() -> str:

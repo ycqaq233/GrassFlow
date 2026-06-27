@@ -60,7 +60,7 @@ class ProviderConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     """LLM 配置"""
-    default_model: str = "deepseek-chat"
+    default_model: str = "deepseek-v4-flash"
     default_provider: str = "deepseek"
     temperature: float = 0.7
     max_tokens: int = 4096

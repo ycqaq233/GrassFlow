@@ -132,7 +132,7 @@ def init_command(
                 "version": "1.0.0",
                 "provider": {},
                 "llm": {
-                    "default_model": "deepseek-chat",
+                    "default_model": "deepseek-v4-flash",
                     "default_provider": "deepseek",
                     "temperature": 0.7,
                     "max_tokens": 4096,

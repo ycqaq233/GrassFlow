@@ -264,7 +264,7 @@ class AgentLoop:
     使用模式::
 
         loop = AgentLoop(
-            client=ProtocolLLMClient.from_provider("deepseek", model="deepseek-chat"),
+            client=ProtocolLLMClient.from_provider("deepseek", model="deepseek-v4-flash"),
             tool_registry=tool_registry,
         )
 
@@ -291,7 +291,7 @@ class AgentLoop:
         max_retries: int = 3,
         system_prompt: str = "",
         provider_name: str = "deepseek",
-        model: str = "deepseek-chat",
+        model: str = "deepseek-v4-flash",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         enable_doom_loop_detection: bool = True,
@@ -1032,7 +1032,7 @@ class AgentLoop:
 
 def create_agent_loop(
     provider: str = "deepseek",
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     tool_registry: Optional[ToolRegistry] = None,
@@ -1125,7 +1125,7 @@ def create_agent_loop_from_config(
 
     except ImportError:
         logger.warning(
-            "Config module not available, using defaults (deepseek/deepseek-chat)"
+            "Config module not available, using defaults (deepseek/deepseek-v4-flash)"
         )
         return create_agent_loop(tool_registry=tool_registry)
     except Exception as e:

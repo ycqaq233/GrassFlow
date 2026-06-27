@@ -54,7 +54,7 @@ BANNER = r"""
  \____|_|  \__,_||___/|_| |_|_|   |_|\___/ \_/\_/
 """
 
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PROVIDER = "deepseek"
 MAX_OUTPUT_LINES = 5000
 
@@ -394,7 +394,7 @@ def make_header_text_cb(
     session: Any,
     output: List[OutputEntry],
     mode: Any,
-    default_model: str = "deepseek-chat",
+    default_model: str = "deepseek-v4-flash",
 ) -> Callable[[], List[Tuple[str, str]]]:
     """创建顶部状态栏渲染回调
 

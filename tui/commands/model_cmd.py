@@ -34,9 +34,9 @@ KNOWN_MODELS: Dict[str, Dict[str, dict]] = {
         "claude-fable-5": {"display": "Claude Fable 5", "context": 200000},
     },
     "deepseek": {
-        "deepseek-chat": {"display": "DeepSeek Chat (V3)", "context": 65536},
-        "deepseek-coder": {"display": "DeepSeek Coder (V3)", "context": 65536},
-        "deepseek-reasoner": {"display": "DeepSeek Reasoner (R1)", "context": 65536},
+        "deepseek-v4-flash": {"display": "DeepSeek V4 Flash (1M ctx, thinking+non-thinking)", "context": 1000000},
+        "deepseek-v4-pro": {"display": "DeepSeek V4 Pro (1M ctx, thinking+non-thinking)", "context": 1000000},
+        "deepseek-chat": {"display": "DeepSeek Chat (deprecated 2026/07/24, alias for v4-flash)", "context": 1000000},
     },
     "ollama": {
         "llama3.3": {"display": "Llama 3.3", "context": 131072},

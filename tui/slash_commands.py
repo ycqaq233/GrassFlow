@@ -435,12 +435,12 @@ def _cmd_think(repl, args: List[str]) -> None:
         except Exception:
             pass
 
-        if current_model and "reasoner" not in current_model.lower():
+        if current_model and "v4" not in current_model.lower() and "reasoner" not in current_model.lower():
             repl.add_output(
                 f"Thinking mode: ON (effort: {effort})\n"
-                f"\033[33m  Warning: Current model '{current_model}' does not support reasoning.\n"
-                f"  Switch to 'deepseek-reasoner' with: /model deepseek-reasoner\n"
-                f"  Thinking will have no effect until you switch.\033[0m",
+                f"\033[33m  Warning: Current model '{current_model}' may not support reasoning.\n"
+                f"  Switch to 'deepseek-v4-flash' or 'deepseek-v4-pro' with: /model deepseek-v4-flash\n"
+                f"  Both V4 models support thinking and non-thinking modes.\033[0m",
                 role="system",
             )
         else:

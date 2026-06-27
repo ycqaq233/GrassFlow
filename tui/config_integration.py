@@ -98,8 +98,8 @@ def cfg_get(cfg: Any, *keys: str, default: Any = None) -> Any:
     Examples:
         >>> cfg_get({"llm": {"default_model": "gpt-4"}}, "llm", "default_model")
         'gpt-4'
-        >>> cfg_get({}, "llm", "default_model", default="deepseek-chat")
-        'deepseek-chat'
+        >>> cfg_get({}, "llm", "default_model", default="deepseek-v4-flash")
+        'deepseek-v4-flash'
         >>> cfg_get(None, "anything", default=42)
         42
     """
@@ -261,7 +261,7 @@ def get_theme_name() -> str:
 def get_model_config() -> Tuple[str, str]:
     """获取 (provider, model) 元组"""
     config = load_config_readonly()
-    return (config.llm.default_provider or "deepseek", config.llm.default_model or "deepseek-chat")
+    return (config.llm.default_provider or "deepseek", config.llm.default_model or "deepseek-v4-flash")
 
 
 def get_api_key(provider: str) -> Optional[str]:

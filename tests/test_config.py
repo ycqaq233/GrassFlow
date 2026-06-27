@@ -68,7 +68,7 @@ class TestLLMConfig:
     def test_default_values(self):
         """测试默认值"""
         config = LLMConfig()
-        assert config.default_model == "deepseek-chat"
+        assert config.default_model == "deepseek-v4-flash"
         assert config.default_provider == "deepseek"
         assert config.temperature == 0.7
         assert config.max_tokens == 4096
