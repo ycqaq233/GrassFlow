@@ -587,7 +587,7 @@ class GrassFlowREPL:
             skills_mgr = get_skills_manager()
             skill = skills_mgr.get_skill(cmd)
             if skill is not None:
-                _cmd_skill_load(self, [cmd])
+                _cmd_skill_load(self, [cmd] + args)
                 return True
         except Exception:
             pass

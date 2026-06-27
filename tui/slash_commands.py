@@ -648,13 +648,15 @@ def _cmd_skill_load(repl, args: List[str]) -> None:
 
     This is the generic handler invoked by dynamically registered /skill-name commands.
     The first element of ``args`` is the skill name (injected by the closure that
-    wraps each dynamically registered command).
+    wraps each dynamically registered command). Any remaining elements are joined
+    as the user's text after the skill name.
     """
     if not args:
-        repl.add_output("Usage: /<skill-name>", role="error")
+        repl.add_output("Usage: /<skill-name> [user text]", role="error")
         return
 
     skill_name = args[0]
+    user_text = " ".join(args[1:]).strip() if len(args) > 1 else ""
     try:
         from tui.skills_system import get_skills_manager
         skills_mgr = get_skills_manager()
@@ -673,12 +675,16 @@ def _cmd_skill_load(repl, args: List[str]) -> None:
 
         repl.add_output(f"✅ Skill loaded: {skill.name}", role="system")
 
-        # Trigger agent response so it can acknowledge the new skill context
-        if repl._agent.is_initialized:
-            repl._handle_agent_message(
-                f"I've loaded the '{skill.name}' skill. "
-                f"Please read its instructions and confirm you understand what you can now do."
-            )
+        if user_text:
+            # User provided text after the skill name — send it as a user message
+            repl._handle_agent_message(user_text)
+        else:
+            # No user text — just confirm the skill load to the agent
+            if repl._agent.is_initialized:
+                repl._handle_agent_message(
+                    f"I've loaded the '{skill.name}' skill. "
+                    f"Please read its instructions and confirm you understand what you can now do."
+                )
     except Exception as e:
         repl.add_output(f"Failed to load skill: {e}", role="error")
 
@@ -711,10 +717,12 @@ def register_skill_commands() -> None:
                 visible=True,
             )
             command_registry.register(cmd_def)
-            # Register a closure so each skill name maps to the right load call
+            # Register a closure so each skill name maps to the right load call.
+            # Pass the skill name as the first element and any user-provided
+            # arguments (text after the skill name) as subsequent elements.
             command_registry.register_handler(
                 f"_cmd_skill_load:{skill.name}",
-                lambda repl, _args, _name=skill.name: _cmd_skill_load(repl, [_name]),
+                lambda repl, _args, _name=skill.name: _cmd_skill_load(repl, [_name] + _args),
             )
     except Exception as e:
         logger.debug("Failed to register skill commands: %s", e)
