@@ -351,6 +351,8 @@ class GrassFlowREPL:
                 entry["tool_call_id"] = msg.tool_call_id
             if msg.name:
                 entry["name"] = msg.name
+            if msg.tool_calls:
+                entry["tool_calls"] = msg.tool_calls
             self._conversation_history.append(entry)
 
         compacted_tokens = result.compacted_tokens
@@ -545,7 +547,7 @@ class GrassFlowREPL:
             if self._stream_collected_text:
                 self._stream_full_response += self._stream_collected_text
             self._reset_stream_state()
-            name = data.get('name', '?')
+            name = data.get('name', 'tool')
             if self._tool_verbose:
                 cprint(f"\n\033[1;36m  [tool] Calling {name}...\033[0m")
                 if data.get("args"):

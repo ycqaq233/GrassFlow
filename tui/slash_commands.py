@@ -349,7 +349,11 @@ def _cmd_history(repl, args: List[str]) -> None:
     """执行历史"""
     try:
         from core.db import execution_db
-        limit = int(args[0]) if args else 10
+        try:
+            limit = int(args[0]) if args else 10
+        except (ValueError, IndexError):
+            repl.add_output("Usage: /history [limit]  (limit must be a number)", role="error")
+            return
         executions = execution_db.list_executions(limit=limit)
         if not executions:
             repl.add_output("No execution history found.", role="system")
@@ -803,34 +807,44 @@ def _handle_compact(repl) -> None:
     repl.add_output(f"Compressing context ({original_tokens} estimated tokens)...", role="system")
 
     async def _do_compress():
-        result = await repl._compressor.compact(messages, force=True)
-        if result.tokens_saved <= 0:
-            repl.add_output("Nothing to compress.", role="system")
-            return
+        try:
+            result = await repl._compressor.compact(messages, force=True)
+            if result.tokens_saved <= 0:
+                repl.add_output("Nothing to compress.", role="system")
+                return
 
-        # Rebuild history
-        rebuilt = []
-        rebuilt.append(ChatMessage(
-            role="system",
-            content=f"{SUMMARY_PREFIX}\n\n{result.summary}\n\n{SUMMARY_END_MARKER}",
-        ))
-        rebuilt.extend(result.tail_messages)
-        rebuilt = repl._compressor._sanitize_tool_pairs(rebuilt)
+            # Rebuild history into a new list (atomic swap avoids race condition)
+            rebuilt = []
+            rebuilt.append(ChatMessage(
+                role="system",
+                content=f"{SUMMARY_PREFIX}\n\n{result.summary}\n\n{SUMMARY_END_MARKER}",
+            ))
+            rebuilt.extend(result.tail_messages)
+            rebuilt = repl._compressor._sanitize_tool_pairs(rebuilt)
 
-        repl._conversation_history.clear()
-        for msg in rebuilt:
-            entry = {"role": msg.role, "content": msg.content}
-            if msg.tool_call_id:
-                entry["tool_call_id"] = msg.tool_call_id
-            if msg.name:
-                entry["name"] = msg.name
-            repl._conversation_history.append(entry)
+            new_history = []
+            for msg in rebuilt:
+                entry = {"role": msg.role, "content": msg.content}
+                if msg.tool_call_id:
+                    entry["tool_call_id"] = msg.tool_call_id
+                if msg.name:
+                    entry["name"] = msg.name
+                if msg.tool_calls:
+                    entry["tool_calls"] = msg.tool_calls
+                new_history.append(entry)
 
-        repl.add_output(
-            f"Context compressed: {result.original_tokens} -> {result.compacted_tokens} tokens "
-            f"(saved {result.tokens_saved} tokens, {result.tokens_saved/result.original_tokens*100:.1f}%)",
-            role="system",
-        )
+            # Atomic swap: replace the list reference instead of clear + append
+            repl._conversation_history.clear()
+            repl._conversation_history.extend(new_history)
+
+            repl.add_output(
+                f"Context compressed: {result.original_tokens} -> {result.compacted_tokens} tokens "
+                f"(saved {result.tokens_saved} tokens, {result.tokens_saved/result.original_tokens*100:.1f}%)",
+                role="system",
+            )
+        except Exception as e:
+            logger.error("Context compression failed: %s", e)
+            repl.add_output(f"Context compression failed: {e}", role="error")
 
     try:
         loop = asyncio.get_running_loop()

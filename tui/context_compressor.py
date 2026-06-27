@@ -16,6 +16,7 @@ GrassFlow 上下文压缩器
 from __future__ import annotations
 
 import logging
+import time as _time_mod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -506,6 +507,7 @@ class ContextCompressor:
         # Anti-thrashing protection (Fix #5)
         self._ineffective_compression_count: int = 0
         self._last_compression_savings_pct: float = 100.0
+        self._last_ineffective_time: float = 0.0
 
         # Summary failure cooldown (Fix #10)
         self._summary_failure_cooldown_until: float = 0.0
@@ -590,11 +592,17 @@ class ContextCompressor:
         if limit > 0 and current_tokens > limit * 0.75:
             # Anti-thrashing: back off if recent compressions were ineffective
             if self._ineffective_compression_count >= 2:
-                logger.warning(
-                    "Compression skipped — last %d compressions saved <10%% each.",
-                    self._ineffective_compression_count,
-                )
-                return False
+                # Allow recovery after 5 minutes of backoff
+                if self._last_ineffective_time > 0 and (_time_mod.monotonic() - self._last_ineffective_time) > 300:
+                    logger.info("Anti-thrashing cooldown expired, resetting ineffective compression count.")
+                    self._ineffective_compression_count = 0
+                    self._last_ineffective_time = 0.0
+                else:
+                    logger.warning(
+                        "Compression skipped — last %d compressions saved <10%% each.",
+                        self._ineffective_compression_count,
+                    )
+                    return False
             return True
 
         return False
@@ -609,9 +617,7 @@ class ContextCompressor:
         Returns:
             生成的摘要文本，失败时返回静态 fallback 摘要
         """
-        import time
-
-        now = time.monotonic()
+        now = _time_mod.monotonic()
         if now < self._summary_failure_cooldown_until:
             logger.debug("Skipping summary during cooldown")
             return None
@@ -642,12 +648,12 @@ class ContextCompressor:
             # Transient errors: short cooldown, return fallback
             is_transient = any(k in err_str for k in ["timeout", "rate limit", "429", "502", "504"])
             cooldown = 30 if is_transient else _SUMMARY_FAILURE_COOLDOWN_SECONDS
-            self._summary_failure_cooldown_until = time.monotonic() + cooldown
+            self._summary_failure_cooldown_until = _time_mod.monotonic() + cooldown
             self._last_summary_error = str(e)
             logger.warning("Summary generation failed: %s. Cooldown %ds.", e, cooldown)
             return self._build_static_fallback_summary(messages, reason=str(e))
         except Exception as e:
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+            self._summary_failure_cooldown_until = _time_mod.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             self._last_summary_error = str(e)
             logger.warning("Summary generation failed: %s", e)
             return self._build_static_fallback_summary(messages, reason=str(e))
@@ -766,8 +772,10 @@ class ContextCompressor:
         self._last_compression_savings_pct = savings_pct
         if savings_pct < 10:
             self._ineffective_compression_count += 1
+            self._last_ineffective_time = _time_mod.monotonic()
         else:
             self._ineffective_compression_count = 0
+            self._last_ineffective_time = 0.0
 
         logger.info(
             f"压缩完成: {original_tokens} -> {compacted_tokens} tokens "
@@ -880,6 +888,7 @@ class ContextCompressor:
         self._compaction_count = 0
         self._ineffective_compression_count = 0
         self._last_compression_savings_pct = 100.0
+        self._last_ineffective_time = 0.0
         self._summary_failure_cooldown_until = 0.0
         self._last_summary_error = None
 
