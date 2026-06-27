@@ -308,6 +308,12 @@ class GrassFlowREPL:
             [o]nce  |  [s]ession  |  [a]lways  |  [d]eny
 
             Choice [o/s/a/D]:
+
+        实现说明：
+          使用 app.run_in_terminal() 临时挂起 prompt_toolkit Application，
+          然后用 input() 读取用户输入。这比 pt_prompt() 安全得多——
+          pt_prompt() 会创建自己的 Application，与正在运行的 Application 冲突，
+          导致审批提示无法正常工作（stdin 竞争、渲染冲突等）。
         """
         async def _approval_callback(
             tool_name: str, description: str, args_preview: str,
@@ -329,26 +335,39 @@ class GrassFlowREPL:
             if len(display_args) > 120:
                 display_args = display_args[:117] + "..."
 
-            # Build hermes-style approval prompt
+            # Build hermes-style approval prompt (plain text — terminal is in
+            # cooked mode inside run_in_terminal, so ANSI is fine but we keep
+            # it simple to avoid encoding issues on Windows consoles).
             prompt_lines = (
-                f"\n\033[1;33m  ⚠️  {tool_name}: {display_args}\033[0m\n"
+                f"\n  WARNING  {tool_name}: {display_args}\n"
                 f"\n"
                 f"  [o]nce  |  [s]ession  |  [a]lways  |  [d]eny\n"
                 f"\n"
                 f"  Choice [o/s/a/D]: "
             )
 
+            answer = ""
             try:
+                # Check if we're inside the prompt_toolkit event loop
                 in_pt_loop = (
-                    threading.current_thread() is threading.main_thread()
-                    and self.app is not None
+                    self.app is not None
                     and self.app.loop is not None
                     and self.app.loop.is_running()
                 )
                 if in_pt_loop:
-                    from prompt_toolkit import prompt as pt_prompt
-                    answer = await pt_prompt(
-                        message=prompt_lines, async_=True, patch_stdout=True,
+                    # Use run_in_terminal to temporarily suspend the running
+                    # Application. This properly restores the terminal so input()
+                    # works.  pt_prompt() CANNOT be used here: it creates its own
+                    # Application instance which conflicts with the already-running
+                    # one, causing stdin contention and broken rendering.
+                    def _read_approval() -> str:
+                        try:
+                            return input(prompt_lines)
+                        except (EOFError, KeyboardInterrupt):
+                            return ""
+
+                    answer = await self.app.run_in_terminal(
+                        _read_approval, render_cli_done=True,
                     )
                 else:
                     answer = input(prompt_lines)

@@ -61,8 +61,9 @@ class LegacyToolAdapter(BaseTool):
 
     @property
     def permission(self) -> ToolPermission:
-        # Shell tool gets ASK permission, others get ALLOW
-        if self._tool.id == "shell":
+        # Dangerous tools get ASK permission so the approval prompt fires.
+        # Others get ALLOW (auto-execute without prompting).
+        if self._tool.id in ("shell", "write"):
             return ToolPermission.ASK
         return ToolPermission.ALLOW
 
