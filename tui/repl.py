@@ -859,9 +859,52 @@ class GrassFlowREPL:
         try:
             from tui.skills_system import get_skills_manager
             skills_mgr = get_skills_manager()
-            skills_prompt = skills_mgr.build_skills_prompt()
-            if skills_prompt:
-                base += skills_prompt + "\n\n"
+            skills = skills_mgr.list_skills()
+            if skills:
+                skills_sorted = sorted(skills, key=lambda s: s.name)
+                lines = [
+                    "## Available Skills",
+                    "",
+                    "The following skills are available. Use a skill when it is relevant to the task.",
+                    "",
+                ]
+                for skill in skills_sorted:
+                    if skill.description:
+                        lines.append(f"- **{skill.name}**: {skill.description}")
+                    else:
+                        lines.append(f"- **{skill.name}**")
+                lines.append("")
+                lines.append(
+                    "To use a skill, the user will type /skill-name. "
+                    "When a skill is loaded, follow its instructions."
+                )
+                base += "\n".join(lines) + "\n\n"
+        except Exception:
+            pass
+        # Inject MCP tools prompt
+        try:
+            mcp_mgr = self._agent._mcp_manager
+            if mcp_mgr and mcp_mgr.is_running:
+                mcp_tools = mcp_mgr.get_all_tools()
+                if mcp_tools:
+                    tools_sorted = sorted(mcp_tools, key=lambda t: t.name)
+                    lines = [
+                        "## Available MCP Tools",
+                        "",
+                        "The following MCP tools are connected and available. "
+                        "You can call these tools directly.",
+                        "",
+                    ]
+                    for tool in tools_sorted:
+                        desc = tool.description
+                        if desc:
+                            # Truncate long descriptions for system prompt
+                            if len(desc) > 120:
+                                desc = desc[:117] + "..."
+                            lines.append(f"- **{tool.name}** (server: {tool.server_name}): {desc}")
+                        else:
+                            lines.append(f"- **{tool.name}** (server: {tool.server_name})")
+                    base += "\n".join(lines) + "\n\n"
         except Exception:
             pass
         base += "Be concise and helpful. Use tools when needed to complete tasks."
