@@ -8,9 +8,12 @@ GrassFlow 斜杠命令系统 — 声明式命令注册与分发
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
@@ -124,20 +127,94 @@ def _cmd_model(repl, args: List[str]) -> None:
 
 
 def _cmd_list_models(repl, args: List[str]) -> None:
-    """列出可用模型"""
+    """列出可用模型（从 Provider API 动态发现，失败时 fallback 到配置）"""
     from tui.config_integration import load_config_readonly
+
+    use_api = "--api" in args or "-a" in args
+    force_config = "--config" in args or "-c" in args
 
     try:
         config = load_config_readonly()
         lines = ["", "  Available models:"]
-        for provider_name, provider_config in config.provider.items():
-            lines.append(f"\n  [{provider_name}]")
-            if provider_config.models:
-                for model_name, model_info in provider_config.models.items():
-                    name = model_info.name or model_name
-                    lines.append(f"    - {name}")
-            else:
-                lines.append("    (no models configured)")
+
+        discovered_any = False
+
+        # 尝试从 Provider API 发现模型
+        if not force_config:
+            try:
+                import asyncio as _aio
+                from core.model_discovery import discover_all_models
+
+                # 如果在事件循环中，用同步包装
+                try:
+                    loop = _aio.get_running_loop()
+                    # 已在事件循环中，用 run_in_executor 或创建新 loop
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(
+                            _aio.run,
+                            discover_all_models(config, timeout=10.0),
+                        )
+                        discovered = future.result(timeout=15.0)
+                except RuntimeError:
+                    # 没有运行中的事件循环
+                    discovered = _aio.run(discover_all_models(config, timeout=10.0))
+
+                if discovered and any(models for models in discovered.values()):
+                    discovered_any = True
+                    for provider_name, models in discovered.items():
+                        lines.append(f"\n  [{provider_name}] (API discovery)")
+                        if not models:
+                            lines.append("    (no models discovered)")
+                            continue
+                        for m in models:
+                            cap_parts = []
+                            if m.context_window:
+                                ctx_k = m.context_window // 1024
+                                cap_parts.append(f"ctx:{ctx_k}k")
+                            if m.max_output:
+                                out_k = m.max_output // 1024
+                                cap_parts.append(f"out:{out_k}k")
+                            if m.vision:
+                                cap_parts.append("vision")
+                            if m.reasoning:
+                                cap_parts.append("reasoning")
+                            cap_str = f"  [{', '.join(cap_parts)}]" if cap_parts else ""
+                            lines.append(f"    - {m.name}{cap_str}")
+            except Exception as e:
+                logger.debug(f"Model discovery failed, falling back to config: {e}")
+
+        # Fallback: 从配置文件读取
+        if not discovered_any:
+            for provider_name, provider_config in config.provider.items():
+                lines.append(f"\n  [{provider_name}] (config)")
+                if provider_config.models:
+                    for model_name, model_info in provider_config.models.items():
+                        name = model_info.name or model_name
+                        # 尝试从已知能力表补充信息
+                        cap_parts = []
+                        try:
+                            from core.model_discovery import KNOWN_MODEL_CAPABILITIES
+                            caps = KNOWN_MODEL_CAPABILITIES.get(name, {})
+                            if caps.get("context_window"):
+                                ctx_k = caps["context_window"] // 1024
+                                cap_parts.append(f"ctx:{ctx_k}k")
+                            if caps.get("max_output"):
+                                out_k = caps["max_output"] // 1024
+                                cap_parts.append(f"out:{out_k}k")
+                            if caps.get("vision"):
+                                cap_parts.append("vision")
+                            if caps.get("reasoning"):
+                                cap_parts.append("reasoning")
+                        except ImportError:
+                            pass
+                        cap_str = f"  [{', '.join(cap_parts)}]" if cap_parts else ""
+                        lines.append(f"    - {name}{cap_str}")
+                else:
+                    lines.append("    (no models configured)")
+
+        lines.append("")
+        lines.append("  Flags: --api  Force API discovery | --config  Config only")
         repl.add_output("\n".join(lines), role="system")
     except Exception as e:
         repl.add_output(f"Failed to list models: {e}", role="error")
@@ -843,10 +920,10 @@ COMMAND_REGISTRY: List[CommandDef] = [
     ),
     CommandDef(
         name="models",
-        description="列出可用模型",
+        description="列出可用模型（支持 API 发现）",
         category="Configuration",
         aliases=(),
-        args_hint="",
+        args_hint="[--api|--config]",
         handler_name="_cmd_list_models",
     ),
     CommandDef(
@@ -1175,6 +1252,7 @@ class SlashCommandCompleter(Completer):
         "think": ["on", "off", "low", "medium", "high", "xhigh", "show", "full", "collapsed", "display"],
         "theme": ["default", "dark", "light", "cyber", "ocean"],
         "mcp": ["list", "start", "stop", "status", "add", "remove", "test"],
+        "models": ["--api", "--config"],
         "skills": ["list", "view", "search", "install"],
         "yolo": ["on", "off", "status"],
         "connect": ["openai", "anthropic", "deepseek", "ollama"],
