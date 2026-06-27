@@ -304,18 +304,21 @@ class GrassFlowREPL:
           - "deny": 自动拒绝所有工具
 
         审批提示格式（参考 hermes）:
-          shell: ls -la /tmp
+          ⚠️  shell: ls -la /tmp
 
             [o]nce  |  [s]ession  |  [a]lways  |  [d]eny
 
-            Choice [o/s/a/D]:
+            Choice:
 
-        实现说明：
-          使用 app.run_in_terminal() 临时挂起 prompt_toolkit Application，
-          然后通过 sys.__stdout__ / sys.__stdin__ 读写终端——
-          这绕过了 patch_stdout() 对 sys.stdout / sys.stdin 的替换。
-          直接使用 input() 会失败，因为 patch_stdout 把 sys.stdin 替换成了
-          prompt_toolkit 管道，导致 input() 读不到真实键盘输入。
+        实现说明（基于 hermes 模式）：
+          patch_stdout() 会把 sys.stdout / sys.stdin 替换成
+          prompt_toolkit 管道，导致 input() 读到 EOF 并自动拒绝。
+          修复：使用 sys.__stdout__ / sys.__stdin__（原始文件描述符）。
+          - sys.__stdout__.write(prompt_text) 写入提示
+          - sys.__stdout__.flush() 刷新输出
+          - sys.__stdin__.readline().strip() 读取用户输入
+          在 prompt_toolkit 事件循环内，通过 app.run_in_terminal()
+          临时挂起 Application 以恢复终端为 cooked 模式。
         """
         async def _approval_callback(
             tool_name: str, description: str, args_preview: str,
@@ -337,13 +340,13 @@ class GrassFlowREPL:
             if len(display_args) > 120:
                 display_args = display_args[:117] + "..."
 
-            # Build hermes-style approval prompt
+            # Build hermes-style approval prompt (hermes pattern)
             prompt_text = (
-                f"\n  WARNING  {tool_name}: {display_args}\n"
+                f"\n  ⚠️  {tool_name}: {display_args}\n"
                 f"\n"
                 f"  [o]nce  |  [s]ession  |  [a]lways  |  [d]eny\n"
                 f"\n"
-                f"  Choice [o/s/a/D]: "
+                f"  Choice: "
             )
 
             answer = ""
@@ -360,11 +363,13 @@ class GrassFlowREPL:
                     # mode.  We write the prompt and read the answer through
                     # sys.__stdout__ / sys.__stdin__ to bypass patch_stdout()
                     # which replaces sys.stdout / sys.stdin with pipes.
+                    # Direct input() fails under patch_stdout because stdin is
+                    # redirected to a prompt_toolkit pipe (gets EOF).
                     def _read_approval() -> str:
                         try:
                             sys.__stdout__.write(prompt_text)
                             sys.__stdout__.flush()
-                            return sys.__stdin__.readline()
+                            return sys.__stdin__.readline().strip()
                         except (EOFError, KeyboardInterrupt):
                             return ""
 
@@ -372,8 +377,15 @@ class GrassFlowREPL:
                         _read_approval, render_cli_done=True,
                     )
                 else:
-                    # Outside prompt_toolkit loop — normal input() works
-                    answer = input(prompt_text)
+                    # Outside prompt_toolkit loop — use original file
+                    # descriptors for consistency (bypass any residual
+                    # patch_stdout state).
+                    try:
+                        sys.__stdout__.write(prompt_text)
+                        sys.__stdout__.flush()
+                        answer = sys.__stdin__.readline().strip()
+                    except (EOFError, KeyboardInterrupt):
+                        answer = ""
             except (EOFError, KeyboardInterrupt, Exception):
                 answer = ""
 
