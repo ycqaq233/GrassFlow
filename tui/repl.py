@@ -594,10 +594,6 @@ class GrassFlowREPL:
             self._run_fallback(f"prompt_toolkit 不可用 ({e})，使用降级模式。输入 /exit 退出。")
             return
 
-        # 打印 banner
-        self._cprint_output(BANNER.strip(), role="system")
-        self._cprint_output("  GrassFlow REPL\n  Type /help for commands, /exit to quit.\n", role="system")
-
         # 注册 invalidate 钩子（消费后台线程 UI 更新）
         def _on_invalidate(_sender=None):
             self._process_ui_updates()
@@ -618,6 +614,9 @@ class GrassFlowREPL:
                         print("\n" * (term_lines - 1), end="", flush=True)
                 except Exception:
                     pass
+                # 打印 banner（在光标推送之后，确保用户可见）
+                self._cprint_output(BANNER.strip(), role="system")
+                self._cprint_output("  GrassFlow REPL\n  Type /help for commands, /exit to quit.\n", role="system")
                 self.app.run()
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
