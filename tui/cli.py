@@ -106,27 +106,24 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
 
     使用配置中的默认模型，支持 --model 和 --provider 选项覆盖。
     """
-    # 检查文件是否存在，提供有用的错误提示
-    if not Path(workflow_file).exists():
-        if not workflow_file.endswith(".af"):
-            display.print_error(f"'{workflow_file}' is not a workflow file.")
-            display.print_info("Hint: Use 'grassflow ask \"...\"' for single-prompt execution with tools.")
-            display.print_info("      Use 'grassflow run <file.af>' to execute a workflow file.")
+    # Validate the workflow file argument
+    workflow_path = Path(workflow_file)
+    if not workflow_path.exists():
+        if not workflow_path.suffix or workflow_path.suffix not in (".af", ".json"):
+            display.print_error(
+                f"'{workflow_file}' is not a workflow file.\n"
+                f"\n"
+                f"  To run a workflow:  grassflow run workflow.af\n"
+                f"  To ask a question:  grassflow ask \"your question here\"\n"
+                f"\n"
+                f"Use 'grassflow ask --help' for more information."
+            )
+            sys.exit(1)
         else:
             display.print_error(f"Workflow file not found: {workflow_file}")
-        sys.exit(1)
+            sys.exit(1)
 
     try:
-        # 检查文件是否存在，并提供有用的错误提示
-        if not os.path.exists(workflow_file):
-            if not workflow_file.endswith((".af", ".json", ".yaml", ".yml")):
-                display.print_error(
-                    f"'{workflow_file}' is not a workflow file.\n"
-                    f"  If you want to run a single prompt, use: grassflow ask \"{workflow_file}\""
-                )
-            else:
-                display.print_error(f"Workflow file not found: {workflow_file}")
-            sys.exit(1)
         # 从配置获取默认值
         default_model = _get_default_model()
         effective_model = model or default_model

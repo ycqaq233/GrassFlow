@@ -27,7 +27,7 @@ def _resolve_model(model: str) -> str:
 
     - 'default' 或空字符串 -> 使用配置中的默认模型
     - 已有 provider 前缀 (如 'deepseek/xxx') -> 原样返回
-    - 模型名不匹配当前 provider 时 -> 回退到配置默认模型
+    - 模型名不在当前 provider 的模型列表中 -> 回退到配置默认模型
 
     这解决了 DSL 工作流硬编码 'gpt-4' 但系统使用 DeepSeek 的问题。
     """
@@ -38,33 +38,41 @@ def _resolve_model(model: str) -> str:
     if "/" in model:
         return model
 
-    # 检查配置的 provider，判断模型是否匹配
+    # 检查配置的 provider，判断模型是否在可用列表中
     try:
         from core.config import config_manager
         config = config_manager.load_config()
         provider = config.llm.default_provider
         default_model = config.llm.default_model
 
-        # 已知的 provider 模型前缀映射
-        provider_model_prefixes = {
-            "openai": ["gpt-", "o1-", "o3-", "o4-"],
-            "deepseek": ["deepseek-"],
-            "anthropic": ["claude-"],
-            "ollama": [],  # ollama 模型名格式不固定
-        }
-
-        prefixes = provider_model_prefixes.get(provider, [])
-
-        # 如果有前缀列表，检查模型是否匹配当前 provider
-        if prefixes:
-            matches_provider = any(model.startswith(p) for p in prefixes)
-            if not matches_provider:
-                # 模型不匹配当前 provider，回退到默认模型
+        # 优先检查 provider 的模型列表
+        provider_config = config.provider.get(provider)
+        if provider_config and provider_config.models:
+            available_models = set(provider_config.models.keys())
+            if model not in available_models:
                 logger.info(
-                    "Model '%s' does not match provider '%s', using default: %s",
+                    "Model '%s' not found in provider '%s' models, "
+                    "falling back to configured default '%s'",
                     model, provider, default_model,
                 )
                 return default_model
+        else:
+            # 已知的 provider 模型前缀映射（后备方案）
+            provider_model_prefixes = {
+                "openai": ["gpt-", "o1-", "o3-", "o4-"],
+                "deepseek": ["deepseek-"],
+                "anthropic": ["claude-"],
+                "ollama": [],
+            }
+            prefixes = provider_model_prefixes.get(provider, [])
+            if prefixes:
+                matches_provider = any(model.startswith(p) for p in prefixes)
+                if not matches_provider:
+                    logger.info(
+                        "Model '%s' does not match provider '%s', using default: %s",
+                        model, provider, default_model,
+                    )
+                    return default_model
 
         # deepseek 模型需要前缀才能被 LiteLLM 正确路由
         if provider == "deepseek" and "deepseek" in model.lower() and "/" not in model:
@@ -72,7 +80,6 @@ def _resolve_model(model: str) -> str:
 
     except Exception:
         pass
-
     return model
 
 
@@ -257,7 +264,7 @@ class LLMAgentFactory:
     def create(
         self,
         name: str,
-        model: str = "default",
+        model: Optional[str] = None,
         prompt: str = "",
         **kwargs,
     ) -> LLMAgent:
@@ -273,9 +280,11 @@ class LLMAgentFactory:
         Returns:
             LLMAgent 实例
         """
+        # Resolve model: use provided, or fall back to configured default
+        resolved = model if model is not None else _resolve_model("gpt-4")
         return LLMAgent(
             name=name,
-            model=model,
+            model=resolved,
             prompt=prompt,
             llm_manager=self._manager,
             **kwargs,
