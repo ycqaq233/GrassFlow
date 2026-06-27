@@ -1093,6 +1093,36 @@ def config_show_key(provider: str):
         sys.exit(1)
 
 
+# ==================== ask 命令 ====================
+
+@main.command()
+@click.argument("prompt")
+@click.option("--model", "-m", default=None, help="使用的模型（覆盖配置默认值）")
+@click.option("--provider", "-p", default=None, help="LLM 提供商（覆盖配置默认值）")
+@click.option("--no-tools", is_flag=True, default=False, help="禁用工具调用")
+def ask(prompt: str, model: Optional[str], provider: Optional[str], no_tools: bool):
+    """执行单次 prompt 并输出结果
+
+    创建临时会话，发送 prompt 到 Agent，流式输出响应到 stdout。
+    支持工具调用、MCP 和 Skills。
+
+    \b
+    示例：
+      grassflow ask "What is the capital of France?"
+      grassflow ask "List files in current dir" --no-tools
+      grassflow ask "Analyze this code" --model gpt-4
+    """
+    from tui.run_session import run_prompt_sync
+
+    exit_code = run_prompt_sync(
+        prompt=prompt,
+        model=model,
+        provider=provider,
+        no_tools=no_tools,
+    )
+    sys.exit(exit_code)
+
+
 # ==================== repl 命令 ====================
 
 @main.command()
