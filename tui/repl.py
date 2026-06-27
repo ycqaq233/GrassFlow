@@ -145,8 +145,25 @@ class GrassFlowREPL:
 
     # ==================== 输出管理（hermes cprint 模式） ====================
 
+    @staticmethod
+    def _render_md(text: str) -> str:
+        """Render markdown to ANSI string using Rich's Markdown renderer.
+
+        Returns raw text if Rich is not available or rendering fails.
+        """
+        try:
+            from tui.md_renderer import render_markdown_to_ansi
+            return render_markdown_to_ansi(text)
+        except Exception:
+            return text
+
     def _cprint_output(self, text: str, role: str = "system") -> None:
-        """打印格式化输出到终端 scrollback（hermes _cprint 模式）"""
+        """打印格式化输出到终端 scrollback（hermes _cprint 模式）
+
+        For assistant messages, renders markdown to colored terminal output.
+        Raw text is stored in self.output (for conversation history);
+        rendered ANSI is displayed in terminal.
+        """
         entry = OutputEntry(text=text, role=role)
         with self._output_lock:
             self.output.append(entry)
@@ -154,8 +171,13 @@ class GrassFlowREPL:
                 self.output = self.output[len(self.output) - MAX_OUTPUT_LINES:]
         if role != "system":
             self._redo_stack.clear()
-        formatted = format_output_line(entry)
-        cprint(formatted)
+        # For assistant messages, render markdown; otherwise use plain format
+        if role == "assistant":
+            rendered = self._render_md(text)
+            cprint(rendered)
+        else:
+            formatted = format_output_line(entry)
+            cprint(formatted)
         if self.app:
             self.app.invalidate()
 
@@ -179,32 +201,37 @@ class GrassFlowREPL:
     # ==================== 流式输出（hermes 行缓冲模式） ====================
 
     def _emit_stream_text(self, text: str) -> None:
-        """流式文本发射 — 行缓冲模式（参考 hermes _emit_stream_text）"""
+        """流式文本发射 — 累积模式（markdown 渲染在 _flush_stream 中完成）
+
+        During streaming, text is accumulated in _stream_collected_text.
+        Markdown rendering happens when _flush_stream() is called at the end
+        of each response segment (text_end or tool_call_start).
+        """
         if not text:
             return
         self._stream_collected_text += text
-        self._stream_buf += text
 
-        # 打开响应框（首次可见文本时）
+        # Track that we have visible text (for box opened state)
         if not self._stream_box_opened:
             text_stripped = text.lstrip("\n")
-            if not text_stripped:
-                return
-            self._stream_box_opened = True
-            cprint("")  # 空行分隔
-
-        # 行缓冲：发射完整行，保留部分行
-        while "\n" in self._stream_buf:
-            line, self._stream_buf = self._stream_buf.split("\n", 1)
-            cprint(f"    {line}")  # 4-space indent
+            if text_stripped:
+                self._stream_box_opened = True
 
     def _flush_stream(self) -> None:
-        """刷新流式缓冲区，关闭响应框"""
-        if self._stream_buf:
-            cprint(f"    {self._stream_buf}")
-            self._stream_buf = ""
-        if self._stream_box_opened:
-            self._stream_box_opened = False
+        """刷新流式缓冲区，渲染 markdown 并输出"""
+        collected = self._stream_collected_text
+        if not collected:
+            if self._stream_box_opened:
+                self._stream_box_opened = False
+            return
+
+        # Render markdown for the collected text segment
+        rendered = self._render_md(collected)
+        cprint("")  # blank line separator
+        cprint(rendered)
+
+        self._stream_buf = ""
+        self._stream_box_opened = False
 
     def _reset_stream_state(self) -> None:
         """重置流式状态（不触碰 _stream_full_response）"""
