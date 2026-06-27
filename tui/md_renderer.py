@@ -27,6 +27,15 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def render_md(
+    text: str,
+    width: Optional[int] = None,
+    indent: int = 0,
+) -> str:
+    """Alias for render_markdown_to_ansi — short convenience name."""
+    return render_markdown_to_ansi(text, width=width, indent=indent)
+
+
 def render_markdown_to_ansi(
     text: str,
     width: Optional[int] = None,

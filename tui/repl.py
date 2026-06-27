@@ -86,6 +86,7 @@ class GrassFlowREPL:
         self._api_start_time: float = 0.0
         self._retry_last: bool = False
         self._tool_verbose: bool = False  # False=compact tool display, True=full output
+        self._permission_mode: str = "ask"  # default permission mode: ask/allow/deny
 
         # Context compressor (lazy init)
         self._compressor = None

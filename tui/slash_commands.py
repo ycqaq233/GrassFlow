@@ -1359,6 +1359,9 @@ class CommandRegistry:
 
 command_registry = CommandRegistry()
 
+# Alias for convenience / backward compatibility
+SlashCommandRegistry = CommandRegistry
+
 # 从 COMMAND_REGISTRY 自动注册所有命令
 for _cmd_def in COMMAND_REGISTRY:
     command_registry.register(_cmd_def)
