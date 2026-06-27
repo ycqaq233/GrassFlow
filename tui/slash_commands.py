@@ -725,7 +725,7 @@ def register_skill_commands() -> None:
                 lambda repl, _args, _name=skill.name: _cmd_skill_load(repl, [_name] + _args),
             )
     except Exception as e:
-        logger.debug("Failed to register skill commands: %s", e)
+        logger.warning("Failed to register skill commands: %s", e)
 
 
 def _cmd_copy(repl, args: List[str]) -> None:
@@ -1337,6 +1337,7 @@ COMMAND_REGISTRY: List[CommandDef] = [
         aliases=(),
         args_hint="",
         handler_name="_cmd_init",
+        visible=False,
     ),
     CommandDef(
         name="skills",
@@ -1508,7 +1509,7 @@ class SlashCommandCompleter(Completer):
     _ARG_COMPLETIONS: Dict[str, List[str]] = {
         "think": ["on", "off", "low", "medium", "high", "xhigh", "show", "full", "collapsed", "display"],
         "theme": ["default", "dark", "light", "cyber", "ocean"],
-        "mcp": ["list", "start", "stop", "status", "add", "remove", "test"],
+        "mcp": [],
         "models": ["--api", "--config"],
         "skills": ["list", "view", "search", "install"],
         "yolo": ["on", "off", "status"],

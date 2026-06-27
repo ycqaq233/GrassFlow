@@ -613,8 +613,8 @@ class GrassFlowREPL:
             if skill is not None:
                 _cmd_skill_load(self, [cmd] + args)
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Skill lookup failed for /%s: %s", cmd, e)
         self.add_output(f"Unknown command: /{cmd}. Type /help for available commands.", role="error")
         return False
 
@@ -921,27 +921,37 @@ class GrassFlowREPL:
         # 3. Inject Available MCP Tools prompt
         try:
             mcp_mgr = self._agent._mcp_manager
-            if mcp_mgr and mcp_mgr.is_running:
-                mcp_tools = mcp_mgr.get_all_tools()
-                if mcp_tools:
-                    tools_sorted = sorted(mcp_tools, key=lambda t: t.name)
-                    lines = [
-                        "## Available MCP Tools",
-                        "",
-                        "The following MCP tools are connected and available. "
-                        "You can call these tools directly.",
-                        "",
-                    ]
-                    for tool in tools_sorted:
-                        desc = tool.description
-                        if desc:
-                            # Truncate long descriptions for system prompt
-                            if len(desc) > 120:
-                                desc = desc[:117] + "..."
-                            lines.append(f"- **{tool.name}** (server: {tool.server_name}): {desc}")
-                        else:
-                            lines.append(f"- **{tool.name}** (server: {tool.server_name})")
-                    base += "\n".join(lines) + "\n\n"
+            if mcp_mgr:
+                if mcp_mgr.is_running:
+                    mcp_tools = mcp_mgr.get_all_tools()
+                    if mcp_tools:
+                        tools_sorted = sorted(mcp_tools, key=lambda t: t.name)
+                        lines = [
+                            "## Available MCP Tools",
+                            "",
+                            "The following MCP tools are connected and available. "
+                            "You can call these tools directly.",
+                            "",
+                        ]
+                        for tool in tools_sorted:
+                            desc = tool.description
+                            if desc:
+                                if len(desc) > 120:
+                                    desc = desc[:117] + "..."
+                                lines.append(f"- **{tool.name}** (server: {tool.server_name}): {desc}")
+                            else:
+                                lines.append(f"- **{tool.name}** (server: {tool.server_name})")
+                        base += "\n".join(lines) + "\n\n"
+                else:
+                    server_names = mcp_mgr.server_names
+                    if server_names:
+                        base += (
+                            "## MCP Tools (connecting)\n"
+                            f"MCP servers are currently connecting: "
+                            f"{', '.join(server_names)}. "
+                            "Tools will be available in subsequent messages "
+                            "once connections complete.\n\n"
+                        )
         except Exception:
             pass
 
