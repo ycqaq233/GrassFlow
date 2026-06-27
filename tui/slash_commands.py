@@ -614,19 +614,22 @@ def _cmd_mcp(repl, args: List[str]) -> None:
             return
         except Exception:
             pass
-    # Fallback to config display
+    # Fallback to config display with "not started" status
     try:
         from tui.config_integration import get_mcp_servers
         mcp_servers = get_mcp_servers()
         if mcp_servers:
-            lines = ["  MCP servers (from config, not started):"]
+            lines = ["  MCP servers:"]
             for name, srv in mcp_servers.items():
-                lines.append(f"    - {name}")
+                transport = "stdio" if "command" in srv else ("http" if "url" in srv else "auto")
+                lines.append(f"    ⏳ {name} ({transport}) - not started")
+            lines.append("")
+            lines.append(f"  {len(mcp_servers)} servers configured (agent not initialized)")
             repl.add_output("\n".join(lines), role="system")
         else:
-            repl.add_output("No MCP servers configured.", role="system")
+            repl.add_output("  No MCP servers configured.", role="system")
     except Exception:
-        repl.add_output("MCP status not available (config module error).", role="system")
+        repl.add_output("  MCP status not available (config module error).", role="system")
 
 
 def _cmd_skills(repl, args: List[str]) -> None:
