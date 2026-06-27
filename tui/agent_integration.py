@@ -79,19 +79,72 @@ class AgentIntegration:
         self._token_count: int = 0
         self._api_call_count: int = 0
 
+        # MCP 管理器（延迟初始化）
+        self._mcp_manager: Any = None
+
+        # Skills 管理器（延迟初始化）
+        self._skills_manager: Any = None
+
     # ==================== 初始化 ====================
 
     def init_agent_loop(self) -> bool:
         """初始化 Agent Loop（使用 create_agent_loop_from_config）
+
+        初始化顺序：
+        1. 获取全局 ToolRegistry
+        2. 注册内置工具（ShellTool, ReadTool, WriteTool, GlobTool, GrepTool）
+        3. 启动 MCP 服务器并注册 MCP 工具
+        4. 初始化 SkillsManager
+        5. 创建 AgentLoop
 
         Returns:
             True 表示初始化成功，False 表示失败（将回退到 echo 模式）
         """
         try:
             from tui.agent_loop import AgentLoop, create_agent_loop_from_config
-            from core.tool_registry import get_default_registry
+            from core.tool_registry import get_default_registry, register_builtin_tools
 
             tool_registry = get_default_registry()
+
+            # 1. Register built-in tools (ShellTool, ReadTool, etc.)
+            try:
+                count = register_builtin_tools(tool_registry)
+                if count:
+                    logger.info("Registered %d builtin tools", count)
+            except Exception as e:
+                logger.warning("Failed to register builtin tools: %s", e)
+
+            # 2. Start MCP servers and register MCP tools
+            try:
+                from tui.mcp_integration import MCPManager
+                from tui.config_integration import config_manager as _cfg
+                mcp_config = getattr(_cfg, 'mcp_servers', None)
+                if mcp_config:
+                    self._mcp_manager = MCPManager()
+                    self._mcp_manager.load_config({"mcp_servers": mcp_config})
+                    import asyncio
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.create_task(self._mcp_manager.start_all())
+                        else:
+                            loop.run_until_complete(self._mcp_manager.start_all())
+                    except RuntimeError:
+                        logger.debug("No event loop for MCP startup, will start later")
+            except Exception as e:
+                logger.warning("MCP initialization failed: %s", e)
+                self._mcp_manager = None
+
+            # 3. Initialize SkillsManager
+            try:
+                from tui.skills_system import get_skills_manager
+                self._skills_manager = get_skills_manager()
+                logger.info("SkillsManager initialized.")
+            except Exception as e:
+                logger.warning("SkillsManager init failed: %s", e)
+                self._skills_manager = None
+
+            # 4. Create agent loop
             self._agent_loop = create_agent_loop_from_config(tool_registry=tool_registry)
             logger.info("Agent loop initialized successfully.")
             return True
@@ -482,6 +535,14 @@ class AgentIntegration:
             except Exception:
                 pass
         self._agent_running = False
+
+    async def shutdown(self) -> None:
+        """Shutdown MCP servers and clean up resources."""
+        if self._mcp_manager:
+            try:
+                await self._mcp_manager.stop_all()
+            except Exception:
+                pass
 
     # ==================== 统计重置 ====================
 

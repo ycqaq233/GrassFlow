@@ -9,7 +9,8 @@ GrassFlow 内置工具系统
 - grep: 内容搜索
 """
 
-from .tool import Tool, ToolContext, ToolResult, ToolRegistry, register_builtin_tools
+from .tool import Tool, ToolContext, ToolResult, ToolRegistry
+from .bridge import LegacyToolAdapter
 from .shell import ShellTool
 from .read import ReadTool
 from .write import WriteTool
@@ -21,7 +22,7 @@ __all__ = [
     "ToolContext",
     "ToolResult",
     "ToolRegistry",
-    "register_builtin_tools",
+    "LegacyToolAdapter",
     "ShellTool",
     "ReadTool",
     "WriteTool",

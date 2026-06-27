@@ -287,6 +287,12 @@ class GrassFlowREPL:
     def _handle_agent_message(self, text: str) -> None:
         self._api_start_time = time.monotonic()
         self.add_output(text, role="user")
+        # Persist user message to session DB
+        if self.session and self.session_mgr:
+            try:
+                self.session_mgr.add_user_message(self.session.id, text)
+            except Exception:
+                pass
         if not self._agent.is_initialized:
             self.add_output(
                 "No agent loop available. Set up an LLM provider to enable AI responses.\n"
@@ -331,6 +337,14 @@ class GrassFlowREPL:
         elif etype == "text_end":
             self._flush_stream()
             self._reset_stream_state()
+            # Persist assistant response to session DB
+            if self.session and self.session_mgr and self.output:
+                last = self.output[-1]
+                if last.role == "assistant" and last.text.strip():
+                    try:
+                        self.session_mgr.add_assistant_message(self.session.id, last.text)
+                    except Exception:
+                        pass
         elif etype == "thinking_delta":
             token = data.get("text", "")
             # thinking 块用 dim 斜体打印
@@ -430,14 +444,24 @@ class GrassFlowREPL:
 
     def _get_system_prompt(self) -> str:
         cwd = os.getcwd()
-        return (
+        base = (
             f"You are GrassFlow AI assistant, running inside the GrassFlow REPL.\n\n"
             f"Current directory: {cwd}\n"
             f"You can help users with:\n"
             f"- Creating and managing workflows\n- Writing code and analyzing files\n"
             f"- Running commands and debugging\n\n"
-            f"Be concise and helpful. Use tools when needed to complete tasks."
         )
+        # Inject skills prompt
+        try:
+            from tui.skills_system import get_skills_manager
+            skills_mgr = get_skills_manager()
+            skills_prompt = skills_mgr.build_skills_prompt()
+            if skills_prompt:
+                base += skills_prompt + "\n\n"
+        except Exception:
+            pass
+        base += "Be concise and helpful. Use tools when needed to complete tasks."
+        return base
 
     def _interrupt_agent(self) -> None:
         self._agent.interrupt()
@@ -540,6 +564,15 @@ class GrassFlowREPL:
         )
 
     def _cleanup(self) -> None:
+        # Shutdown MCP servers
+        if hasattr(self._agent, '_mcp_manager') and self._agent._mcp_manager:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(self._agent._mcp_manager.stop_all())
+                loop.close()
+            except Exception:
+                pass
         print("\n  Goodbye!\n")
 
     def stop(self) -> None:
