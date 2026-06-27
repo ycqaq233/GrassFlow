@@ -106,6 +106,7 @@ def _cmd_help(repl, args: List[str]) -> None:
         "    Ctrl+X Q        Exit",
         "    Ctrl+X M        List models",
         "    Ctrl+P          Toggle permission mode (ask/approve)",
+        "    Ctrl+T          Toggle thinking display (collapsed/expanded)",
         "",
     ])
 

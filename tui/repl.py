@@ -106,6 +106,12 @@ class GrassFlowREPL:
         self._thinking_box_opened: bool = False  # whether header was printed
         self._thinking_start_time: float = 0.0   # thinking block start time
 
+        # Thinking toggle state (Ctrl+T)
+        self._thinking_expanded: bool = False  # current thinking block display state
+        self._last_thinking_content: str = ""  # full thinking text from last block
+        self._last_thinking_duration: float = 0.0  # elapsed seconds
+        self._last_thinking_tokens: int = 0    # token count from last block
+
         self._setup_keybindings()
         self._setup_approval_callback()
 
@@ -250,7 +256,7 @@ class GrassFlowREPL:
         self._thinking_start_time = 0.0
 
     def _close_thinking_block(self) -> None:
-        """关闭思考块：刷新剩余缓冲区，打印摘要行"""
+        """关闭思考块：刷新剩余缓冲区，打印摘要行，保存状态供 Ctrl+T 切换"""
         if not self._thinking_box_opened and self._thinking_token_count == 0:
             return
 
@@ -261,6 +267,11 @@ class GrassFlowREPL:
         elapsed_s = 0.0
         if self._thinking_start_time > 0:
             elapsed_s = time.monotonic() - self._thinking_start_time
+
+        # Save state for Ctrl+T toggle
+        self._last_thinking_duration = elapsed_s
+        self._last_thinking_tokens = self._thinking_token_count
+        self._thinking_expanded = (display_mode == "full")
 
         if display_mode == "full" and self._thinking_box_opened:
             # Flush remaining buffer
@@ -663,7 +674,10 @@ class GrassFlowREPL:
             if token:
                 if self._thinking_token_count == 0:
                     self._thinking_start_time = time.monotonic()
+                    self._last_thinking_content = ""  # reset for new block
                 self._thinking_token_count += 1
+                # Accumulate full content for Ctrl+T toggle
+                self._last_thinking_content += token
 
                 # Check display mode
                 thinking_cfg = self.session.metadata.get("thinking", {}) if self.session else {}
@@ -837,6 +851,34 @@ class GrassFlowREPL:
         cprint(f"\033[1;36m  {msg}\033[0m")
         if self.app:
             self.app.invalidate()
+
+    def _handle_think_toggle(self) -> None:
+        """Ctrl+T: 切换当前思考块的显示（折叠 <-> 展开）"""
+        if not self._last_thinking_content:
+            cprint("\033[2;3m  No thinking content to toggle.\033[0m")
+            return
+
+        self._thinking_expanded = not self._thinking_expanded
+        self._toggle_thinking_display()
+
+    def _toggle_thinking_display(self) -> None:
+        """重新打印思考块：根据 _thinking_expanded 状态显示折叠摘要或完整内容"""
+        duration = self._last_thinking_duration
+        tokens = self._last_thinking_tokens
+
+        if self._thinking_expanded:
+            # Show full thinking content
+            cprint("")
+            cprint("\033[2;3m  ┌ Thinking (expanded by Ctrl+T)\033[0m")
+            for line in self._last_thinking_content.split("\n"):
+                cprint(f"\033[2;3m    {line}\033[0m")
+            duration_str = f" in {duration:.1f}s" if duration > 0 else ""
+            cprint(f"\033[2;3m  └ Done thinking{duration_str} ({tokens} tokens)\033[0m")
+            cprint("")
+        else:
+            # Show collapsed summary
+            duration_str = f"{duration:.1f}s" if duration > 0 else "..."
+            cprint(f"\033[2;3m  \U0001f4ad Thought for {duration_str} ({tokens} tokens)\033[0m")
 
     def _execute_shell(self, command: str) -> None:
         """在后台线程中执行 shell 命令，避免阻塞 UI 线程"""

@@ -775,6 +775,7 @@ class KeybindingCallbacks:
         get_app: Callable[[], Any],
         process_input: Optional[Callable[[str], None]] = None,
         toggle_permission: Optional[Callable[[], None]] = None,
+        toggle_thinking: Optional[Callable[[], None]] = None,
     ):
         self.mode = mode
         self.agent_running = agent_running
@@ -792,6 +793,7 @@ class KeybindingCallbacks:
         self.get_app = get_app
         self.process_input = process_input
         self.toggle_permission = toggle_permission
+        self.toggle_thinking = toggle_thinking
 
 
 def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
@@ -934,6 +936,13 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
             callbacks.toggle_permission()
         event.app.invalidate()
 
+    @kb.add("c-t")
+    def handle_thinking_toggle(event: KeyPressEvent) -> None:
+        """Ctrl+T：切换思考块显示（折叠 <-> 展开）"""
+        if callbacks.toggle_thinking:
+            callbacks.toggle_thinking()
+        event.app.invalidate()
+
     @kb.add("tab")
     def handle_tab(event: KeyPressEvent) -> None:
         """Tab：命令/文件补全，无补全器时插入 4 空格"""
@@ -972,5 +981,6 @@ def build_keybindings_from_repl(repl: Any) -> KeyBindings:
         get_app=lambda: repl.app,
         process_input=repl._process_user_input,
         toggle_permission=repl._toggle_permission_mode,
+        toggle_thinking=repl._handle_think_toggle,
     )
     return build_keybindings(callbacks)
