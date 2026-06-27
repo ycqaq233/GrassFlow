@@ -4,9 +4,48 @@ GrassFlow LLM Agent
 使用 LLM API 的 Agent 实现
 """
 
+import logging
 from typing import Dict, Any, Optional, List
 from core.agent import Agent, AgentConfig
 from core.llm import LLMClient, LLMManager, llm_manager
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_model(model: str) -> str:
+    """Resolve a model name to a valid model for the configured provider.
+
+    If the specified model is a well-known alias (e.g. "gpt-4") that does not
+    exist in the current provider's model list, fall back to the configured
+    default model. This prevents mismatches when DSL files hardcode a model
+    from a different provider.
+
+    Args:
+        model: Requested model name
+
+    Returns:
+        Resolved model name (may be the same if already valid or unknown)
+    """
+    try:
+        from core.config import config_manager
+        config = config_manager.load_config()
+
+        # Get the list of models for the configured default provider
+        provider_name = config.llm.default_provider
+        provider_config = config.provider.get(provider_name)
+        if provider_config and provider_config.models:
+            available_models = set(provider_config.models.keys())
+            if model not in available_models:
+                default_model = config.llm.default_model
+                logger.info(
+                    "Model '%s' not found in provider '%s' models, "
+                    "falling back to configured default '%s'",
+                    model, provider_name, default_model,
+                )
+                return default_model
+    except Exception:
+        pass
+    return model
 
 
 class LLMAgent(Agent):
@@ -53,9 +92,12 @@ class LLMAgent(Agent):
             llm_client: LLM 客户端实例（优先使用）
             llm_manager: LLM 管理器（用于获取客户端）
         """
+        # Resolve model to a valid one for the configured provider
+        resolved_model = _resolve_model(model)
+
         config = AgentConfig(
             name=name,
-            model=model,
+            model=resolved_model,
             prompt=prompt,
             input_schema=input_schema or {},
             output_schema=output_schema or {},
@@ -73,9 +115,9 @@ class LLMAgent(Agent):
             manager = llm_manager or globals()["llm_manager"]
             # 如果客户端不存在，创建一个
             try:
-                self._client = manager.get(model)
+                self._client = manager.get(resolved_model)
             except Exception:
-                self._client = manager.create(model, model=model)
+                self._client = manager.create(resolved_model, model=resolved_model)
 
     def _format_prompt(self, input_data: Dict[str, Any]) -> str:
         """
@@ -185,7 +227,7 @@ class LLMAgentFactory:
     def create(
         self,
         name: str,
-        model: str = "gpt-4",
+        model: Optional[str] = None,
         prompt: str = "",
         **kwargs,
     ) -> LLMAgent:
@@ -201,9 +243,11 @@ class LLMAgentFactory:
         Returns:
             LLMAgent 实例
         """
+        # Resolve model: use provided, or fall back to configured default
+        resolved = model if model is not None else _resolve_model("gpt-4")
         return LLMAgent(
             name=name,
-            model=model,
+            model=resolved,
             prompt=prompt,
             llm_manager=self._manager,
             **kwargs,

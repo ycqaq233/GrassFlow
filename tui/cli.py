@@ -70,7 +70,7 @@ def main():
 # ==================== run 命令 ====================
 
 @main.command()
-@click.argument("workflow_file", type=click.Path(exists=True))
+@click.argument("workflow_file")
 @click.option("--model", "-m", default=None, help="使用的模型（格式: provider/model，默认使用配置中的默认模型）")
 @click.option("--provider", "-p", default=None, help="LLM 提供商（默认使用配置中的默认值）")
 @click.option("--api-key", "-k", help="API key for LLM")
@@ -82,6 +82,22 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
 
     使用配置中的默认模型，支持 --model 和 --provider 选项覆盖。
     """
+    # Validate the workflow file argument
+    workflow_path = Path(workflow_file)
+    if not workflow_path.exists():
+        if not workflow_path.suffix or workflow_path.suffix not in (".af", ".json"):
+            display.print_error(
+                f"'{workflow_file}' is not a workflow file.\n"
+                f"\n"
+                f"  To run a workflow:  grassflow run workflow.af\n"
+                f"  To ask a question:  grassflow ask \"your question here\"\n"
+                f"\n"
+                f"Use 'grassflow ask --help' for more information."
+            )
+            sys.exit(1)
+        else:
+            display.print_error(f"Workflow file not found: {workflow_file}")
+            sys.exit(1)
     try:
         # 从配置获取默认值
         default_model = _get_default_model()
