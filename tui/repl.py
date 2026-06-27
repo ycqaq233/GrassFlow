@@ -42,7 +42,7 @@ from tui.layout import (
     set_event_loop,
 )
 from tui.session import SessionInfo, session_manager
-from tui.slash_commands import SlashCommandCompleter, command_registry
+from tui.slash_commands import SlashCommandCompleter, command_registry, register_skill_commands
 
 
 class GrassFlowREPL:
@@ -550,6 +550,17 @@ class GrassFlowREPL:
         if cmd_def:
             command_registry.execute(cmd, args, self)
             return True
+        # Fallback: check if the command matches a skill name (handles late-discovered skills)
+        try:
+            from tui.skills_system import get_skills_manager
+            from tui.slash_commands import _cmd_skill_load
+            skills_mgr = get_skills_manager()
+            skill = skills_mgr.get_skill(cmd)
+            if skill is not None:
+                _cmd_skill_load(self, [cmd])
+                return True
+        except Exception:
+            pass
         self.add_output(f"Unknown command: /{cmd}. Type /help for available commands.", role="error")
         return False
 
@@ -880,6 +891,8 @@ class GrassFlowREPL:
     def run(self) -> None:
         self._running, self._should_exit = True, False
         self._init_session()
+        # Register /skill-name commands after session init
+        register_skill_commands()
         if self._agent.init_agent_loop():
             self._cprint_output("Agent loop initialized.", role="system")
         else:
@@ -963,6 +976,8 @@ class AsyncGrassFlowREPL(GrassFlowREPL):
     async def run_async(self) -> None:
         self._running, self._should_exit = True, False
         self._init_session()
+        # Register /skill-name commands after session init
+        register_skill_commands()
         cprint(BANNER)
         cprint("  GrassFlow REPL (async)\n  Type /help for commands, /exit to quit.")
         if self._agent.init_agent_loop():
