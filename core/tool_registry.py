@@ -989,9 +989,10 @@ def register_builtin_tools(registry: Optional[ToolRegistry] = None) -> int:
     from tools.write import WriteTool
     from tools.glob import GlobTool
     from tools.grep import GrepTool
+    from tools.webfetch import WebFetchTool
 
     count = 0
-    for tool_cls in [ShellTool, ReadTool, WriteTool, GlobTool, GrepTool]:
+    for tool_cls in [ShellTool, ReadTool, WriteTool, GlobTool, GrepTool, WebFetchTool]:
         try:
             instance = tool_cls()
             # Skip if already registered (e.g., from a previous call)
