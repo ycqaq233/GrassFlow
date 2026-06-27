@@ -54,6 +54,8 @@ class GrassFlowREPL:
             config_manager=config_manager, session_manager=self.session_mgr, enable_streaming=enable_streaming,
         )
         self.output: List[OutputEntry] = []
+        # Single source of truth for LLM conversation history (separate from display-only self.output)
+        self._conversation_history: List[Dict[str, Any]] = []
         self.mode = REPLMode.NORMAL
         self._running = False
         self._should_exit = False
@@ -78,6 +80,7 @@ class GrassFlowREPL:
         # 流式输出状态（hermes 模式）
         self._stream_buf: str = ""
         self._stream_box_opened: bool = False
+        self._stream_collected_text: str = ""  # accumulates full streamed response for history
 
         # Thinking stream state（可折叠思考块）
         self._thinking_buf: str = ""           # accumulated thinking text
@@ -154,6 +157,7 @@ class GrassFlowREPL:
             self.output.clear()
             self._undo_stack.clear()
             self._redo_stack.clear()
+        self._conversation_history.clear()
 
     # ==================== 流式输出（hermes 行缓冲模式） ====================
 
@@ -161,6 +165,7 @@ class GrassFlowREPL:
         """流式文本发射 — 行缓冲模式（参考 hermes _emit_stream_text）"""
         if not text:
             return
+        self._stream_collected_text += text
         self._stream_buf += text
 
         # 打开响应框（首次可见文本时）
@@ -188,6 +193,7 @@ class GrassFlowREPL:
         """重置流式状态"""
         self._stream_buf = ""
         self._stream_box_opened = False
+        self._stream_collected_text = ""
         # Reset thinking state
         self._thinking_buf = ""
         self._thinking_token_count = 0
@@ -297,6 +303,12 @@ class GrassFlowREPL:
                     break
             if last_user_text:
                 text = last_user_text
+                # Remove last assistant + user pair from conversation history to avoid duplication
+                if len(self._conversation_history) >= 2:
+                    if self._conversation_history[-1].get("role") == "assistant":
+                        self._conversation_history.pop()
+                    if self._conversation_history[-1].get("role") == "user":
+                        self._conversation_history.pop()
         self._handle_agent_message(text)
 
     def _handle_slash_command(self, text: str) -> bool:
@@ -315,6 +327,8 @@ class GrassFlowREPL:
     def _handle_agent_message(self, text: str) -> None:
         self._api_start_time = time.monotonic()
         self.add_output(text, role="user")
+        # Append user message to conversation history (source of truth for LLM context)
+        self._conversation_history.append({"role": "user", "content": text})
         # Persist user message to session DB
         if self.session and self.session_mgr:
             try:
@@ -365,6 +379,17 @@ class GrassFlowREPL:
         elif etype == "text_end":
             self._close_thinking_block()
             self._flush_stream()
+            # In streaming mode, the assistant text was only printed to terminal.
+            # Store it in conversation history so _build_history() can see it next turn.
+            if self._enable_streaming and self._stream_collected_text.strip():
+                self._conversation_history.append({"role": "assistant", "content": self._stream_collected_text})
+                # Also add to self.output for display/persistence
+                self.add_output(self._stream_collected_text, role="assistant")
+            elif not self._enable_streaming:
+                # Non-streaming: text was already added to self.output via add_output in text_delta.
+                # Extract it from the last output entry for conversation history.
+                if self.output and self.output[-1].role == "assistant":
+                    self._conversation_history.append({"role": "assistant", "content": self.output[-1].text})
             self._reset_stream_state()
             # Persist assistant response to session DB
             if self.session and self.session_mgr and self.output:
@@ -476,13 +501,13 @@ class GrassFlowREPL:
     # ==================== 辅助方法 ====================
 
     def _build_history(self) -> List[Dict[str, Any]]:
-        messages = []
-        for e in self.output:
-            if e.role == "user":
-                messages.append({"role": "user", "content": e.text})
-            elif e.role == "assistant":
-                messages.append({"role": "assistant", "content": e.text})
-        return messages
+        """Return conversation history for LLM context.
+
+        Uses self._conversation_history as the single source of truth,
+        which is populated in _handle_agent_message (user) and _apply_event_type text_end (assistant).
+        self.output is display-only and must NOT be used for history building.
+        """
+        return list(self._conversation_history)
 
     def _get_system_prompt(self) -> str:
         cwd = os.getcwd()
