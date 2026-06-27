@@ -86,6 +86,7 @@ class GrassFlowREPL:
         self._thinking_buf: str = ""           # accumulated thinking text
         self._thinking_token_count: int = 0    # token counter
         self._thinking_box_opened: bool = False  # whether header was printed
+        self._thinking_start_time: float = 0.0   # thinking block start time
 
         self._setup_keybindings()
 
@@ -198,6 +199,7 @@ class GrassFlowREPL:
         self._thinking_buf = ""
         self._thinking_token_count = 0
         self._thinking_box_opened = False
+        self._thinking_start_time = 0.0
 
     def _close_thinking_block(self) -> None:
         """关闭思考块：刷新剩余缓冲区，打印摘要行"""
@@ -205,18 +207,25 @@ class GrassFlowREPL:
             return
 
         thinking_cfg = self.session.metadata.get("thinking", {}) if self.session else {}
-        display_mode = thinking_cfg.get("display", "full")
+        display_mode = thinking_cfg.get("display", "collapsed")
+
+        # Calculate elapsed time
+        elapsed_s = 0.0
+        if self._thinking_start_time > 0:
+            elapsed_s = time.monotonic() - self._thinking_start_time
 
         if display_mode == "full" and self._thinking_box_opened:
             # Flush remaining buffer
             if self._thinking_buf.strip():
                 cprint(f"\033[2;3m  │ {self._thinking_buf}\033[0m")
                 self._thinking_buf = ""
-            cprint(f"\033[2;3m  └ Done thinking ({self._thinking_token_count} tokens)\033[0m")
+            duration_str = f" in {elapsed_s:.1f}s" if elapsed_s > 0 else ""
+            cprint(f"\033[2;3m  └ Done thinking{duration_str} ({self._thinking_token_count} tokens)\033[0m")
             cprint("")
         elif self._thinking_token_count > 0:
-            # Collapsed: single summary line
-            cprint(f"\033[2;3m  Thought ({self._thinking_token_count} tokens)\033[0m")
+            # Collapsed: single summary line with duration
+            duration_str = f"{elapsed_s:.1f}s" if elapsed_s > 0 else "..."
+            cprint(f"\033[2;3m  \U0001f4ad Thought for {duration_str} ({self._thinking_token_count} tokens)\033[0m")
 
     # ==================== 布局 / 快捷键（委托给 tui.layout） ====================
 
@@ -402,11 +411,13 @@ class GrassFlowREPL:
         elif etype == "thinking_delta":
             token = data.get("text", "")
             if token:
+                if self._thinking_token_count == 0:
+                    self._thinking_start_time = time.monotonic()
                 self._thinking_token_count += 1
 
                 # Check display mode
                 thinking_cfg = self.session.metadata.get("thinking", {}) if self.session else {}
-                display_mode = thinking_cfg.get("display", "full")
+                display_mode = thinking_cfg.get("display", "collapsed")
 
                 if display_mode == "full":
                     # Full mode: stream live with line buffering
@@ -563,7 +574,7 @@ class GrassFlowREPL:
                     metadata={
                         "model": DEFAULT_MODEL,
                         "provider": DEFAULT_PROVIDER,
-                        "thinking": {"enabled": True, "effort": "medium", "display": "full"},
+                        "thinking": {"enabled": True, "effort": "medium", "display": "collapsed"},
                     },
                 )
                 self.add_output(f"Session: {self.session.id[:12]}", role="system")
