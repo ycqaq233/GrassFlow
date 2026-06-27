@@ -78,6 +78,7 @@ class GrassFlowREPL:
         # 流式输出状态（hermes 模式）
         self._stream_buf: str = ""
         self._stream_box_opened: bool = False
+        self._stream_collected_text: str = ""
 
         # Thinking stream state（可折叠思考块）
         self._thinking_buf: str = ""           # accumulated thinking text
@@ -161,6 +162,7 @@ class GrassFlowREPL:
         """流式文本发射 — 行缓冲模式（参考 hermes _emit_stream_text）"""
         if not text:
             return
+        self._stream_collected_text += text
         self._stream_buf += text
 
         # 打开响应框（首次可见文本时）
@@ -188,6 +190,7 @@ class GrassFlowREPL:
         """重置流式状态"""
         self._stream_buf = ""
         self._stream_box_opened = False
+        self._stream_collected_text = ""
         # Reset thinking state
         self._thinking_buf = ""
         self._thinking_token_count = 0
@@ -365,6 +368,10 @@ class GrassFlowREPL:
         elif etype == "text_end":
             self._close_thinking_block()
             self._flush_stream()
+            # In streaming mode, the assistant text was only printed to terminal.
+            # Add it to self.output so _build_history() can see it next turn.
+            if self._enable_streaming and self._stream_collected_text.strip():
+                self.add_output(self._stream_collected_text, role="assistant")
             self._reset_stream_state()
             # Persist assistant response to session DB
             if self.session and self.session_mgr and self.output:

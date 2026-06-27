@@ -961,7 +961,11 @@ class OpenAIChatBody(ProtocolBody[Dict[str, Any]]):
         if opts.seed is not None:
             body["seed"] = opts.seed
         if opts.reasoning_effort is not None:
-            body["reasoning_effort"] = opts.reasoning_effort
+            model_name = body.get("model", "")
+            # DeepSeek-reasoner auto-enables reasoning; don't send effort param
+            # OpenAI o1/o3-mini support reasoning_effort as top-level param
+            if not model_name.startswith("deepseek"):
+                body["reasoning_effort"] = opts.reasoning_effort
 
         # 额外参数
         body.update(request.extra.get("provider_options", {}))
@@ -1137,13 +1141,26 @@ class OpenAIChatStream(ProtocolStream[Dict[str, Any], Dict[str, Any], OpenAIChat
             )
 
             # 流结束
+            finish_data: Dict[str, Any] = {
+                "model": state.model,
+                "finish_reason": finish_reason,
+            }
+            if state.usage:
+                finish_data["usage"] = {
+                    "prompt_tokens": state.usage.prompt_tokens,
+                    "completion_tokens": state.usage.completion_tokens,
+                    "total_tokens": state.usage.total_tokens,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": state.usage.reasoning_tokens,
+                    },
+                    "prompt_tokens_details": {
+                        "cached_tokens": state.usage.cached_tokens,
+                    },
+                }
             events.append(
                 LLMEvent(
                     type=LLMEventType.FINISH,
-                    data={
-                        "model": state.model,
-                        "finish_reason": finish_reason,
-                    },
+                    data=finish_data,
                 )
             )
 

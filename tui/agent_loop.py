@@ -127,6 +127,7 @@ class LoopState:
     current_provider: str = ""
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    total_reasoning_tokens: int = 0
     error_message: str = ""
 
 
@@ -731,6 +732,10 @@ class AgentLoop:
                                 if isinstance(usage_data, dict):
                                     self._state.total_input_tokens += usage_data.get("prompt_tokens", 0)
                                     self._state.total_output_tokens += usage_data.get("completion_tokens", 0)
+                                    # Extract reasoning tokens (DeepSeek-reasoner returns these)
+                                    completion_details = usage_data.get("completion_tokens_details", {})
+                                    if isinstance(completion_details, dict):
+                                        self._state.total_reasoning_tokens += completion_details.get("reasoning_tokens", 0)
 
                 except Exception as e:
                     logger.error(f"Streaming LLM call failed: {e}")
@@ -854,6 +859,7 @@ class AgentLoop:
             "current_provider": self._state.current_provider,
             "total_input_tokens": self._state.total_input_tokens,
             "total_output_tokens": self._state.total_output_tokens,
+            "total_reasoning_tokens": self._state.total_reasoning_tokens,
             "error_message": self._state.error_message,
         }
 
