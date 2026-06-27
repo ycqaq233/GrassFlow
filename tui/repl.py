@@ -10,6 +10,7 @@ GrassFlow REPL — 基于 prompt_toolkit 的交互式 TUI（hermes patch_stdout 
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from prompt_toolkit.layout import Layout
 from tui.config_integration import config_manager, get_theme_name
 from tui.agent_integration import AgentIntegration
 from tui.fallback import run_fallback_mode
+from tui.permission_handler import get_permission_handler
 from tui.layout import (
     BANNER, DEFAULT_MODEL, DEFAULT_PROVIDER, MAX_OUTPUT_LINES,
     OutputEntry, REPLMode, REPLTheme, BUILTIN_THEMES,
@@ -104,6 +106,7 @@ class GrassFlowREPL:
         self._thinking_start_time: float = 0.0   # thinking block start time
 
         self._setup_keybindings()
+        self._setup_approval_callback()
 
     # ==================== 主题 ====================
 
@@ -278,6 +281,56 @@ class GrassFlowREPL:
 
     def _setup_keybindings(self) -> None:
         self.kb = build_keybindings_from_repl(self)
+
+    def _setup_approval_callback(self) -> None:
+        """设置工具审批回调到全局 PermissionHandler。
+
+        根据 self._permission_mode 决定审批行为：
+          - "allow" / "approve": 自动批准所有工具
+          - "ask": 使用 prompt_toolkit 提示用户确认 (y/N)
+          - "deny": 自动拒绝所有工具
+        """
+        async def _approval_callback(
+            tool_name: str, description: str, args_preview: str,
+        ) -> str:
+            mode = self._permission_mode
+
+            if mode in ("allow", "approve"):
+                return "once"
+
+            if mode == "deny":
+                return "deny"
+
+            # mode == "ask": prompt user for confirmation
+            prompt_msg = (
+                f"\n  Approve tool: {tool_name}({args_preview})? [y/N] "
+            )
+
+            try:
+                # Check if we're in the prompt_toolkit event loop (main thread with app)
+                in_pt_loop = (
+                    threading.current_thread() is threading.main_thread()
+                    and self.app is not None
+                    and self.app.loop is not None
+                    and self.app.loop.is_running()
+                )
+                if in_pt_loop:
+                    from prompt_toolkit import prompt as pt_prompt
+                    answer = await pt_prompt(
+                        message=prompt_msg, async_=True, patch_stdout=True,
+                    )
+                else:
+                    # Background thread fallback: use synchronous input
+                    answer = input(prompt_msg)
+            except (EOFError, KeyboardInterrupt, Exception):
+                answer = ""
+
+            answer = answer.strip().lower()
+            if answer in ("y", "yes"):
+                return "once"
+            return "deny"
+
+        get_permission_handler().set_approval_callback(_approval_callback)
 
     # ==================== 快捷键回调委托 ====================
 
@@ -743,6 +796,61 @@ class GrassFlowREPL:
             except Exception as e:
                 self.add_output(f"Shell error: {e}", role="error")
         threading.Thread(target=_run, daemon=True).start()
+
+    async def _approval_callback(self, tool_name: str, description: str, args_preview: str) -> str:
+        """审批回调：根据 _permission_mode 决定工具调用是否批准。
+
+        Returns:
+            "once"    — 批准本次调用
+            "session" — 本会话内批准该工具
+            "always"  — 永久批准
+            "deny"    — 拒绝
+        """
+        # allow 模式：自动批准一切
+        if self._permission_mode == "allow":
+            return "once"
+
+        # deny 模式：自动拒绝
+        if self._permission_mode == "deny":
+            return "deny"
+
+        # ask 模式：提示用户确认
+        # Use prompt_toolkit prompt_async which handles raw-mode terminal correctly.
+        try:
+            from prompt_toolkit import prompt as pt_prompt
+            from prompt_toolkit.patch_stdout import patch_stdout as _pt_patch
+
+            prompt_text = (
+                f"\n  Approve tool: {tool_name}({args_preview})?\n"
+                f"  {description}\n"
+                f"  [y]es / [n]o / [s]ession / [a]lways : "
+            )
+
+            loop = asyncio.get_running_loop()
+            # Run prompt in a thread to avoid blocking the agent loop.
+            # prompt_toolkit's prompt() creates its own Application which
+            # properly manages terminal mode (exits raw mode for input).
+            def _ask_user() -> str:
+                try:
+                    answer = pt_prompt(prompt_text)
+                    return answer.strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    return "n"
+
+            answer = await loop.run_in_executor(None, _ask_user)
+
+            if answer in ("y", "yes"):
+                return "once"
+            elif answer in ("s", "session"):
+                return "session"
+            elif answer in ("a", "always"):
+                return "always"
+            else:
+                return "deny"
+
+        except Exception as e:
+            logger.warning("Approval prompt failed: %s — defaulting to deny", e)
+            return "deny"
 
     # ==================== 生命周期 ====================
 
