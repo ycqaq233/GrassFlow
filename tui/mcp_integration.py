@@ -664,6 +664,8 @@ class _ServerState:
     request_id: int = 0
     connected: bool = False
     stopping: bool = False
+    started: bool = False
+    error_message: Optional[str] = None
     rpc_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def next_request_id(self) -> int:
@@ -840,6 +842,7 @@ class MCPManager:
 
         config = state.config
         attempt = 0
+        state.started = True
 
         while attempt < MAX_RECONNECT_ATTEMPTS and not state.stopping:
             try:
@@ -856,6 +859,7 @@ class MCPManager:
                 # 连接成功，重置重连计数
                 attempt = 0
                 state.connected = True
+                state.error_message = None
 
                 # Re-register tools after reconnect
                 self.register_tools_to_registry()
@@ -876,6 +880,7 @@ class MCPManager:
 
                 attempt += 1
                 if attempt >= MAX_RECONNECT_ATTEMPTS:
+                    state.error_message = "连接反复断开，重连失败"
                     logger.error("MCP 服务器 %r 连接反复断开，重连 %d 次后放弃", name, attempt)
                     break
                 delay = RECONNECT_BASE_DELAY * (2 ** (attempt - 1))
@@ -886,6 +891,7 @@ class MCPManager:
                 state.connected = False
                 attempt += 1
                 if attempt >= MAX_RECONNECT_ATTEMPTS:
+                    state.error_message = str(exc)
                     logger.error("MCP 服务器 %r 重连 %d 次后放弃: %s", name, attempt, exc)
                     break
                 delay = RECONNECT_BASE_DELAY * (2 ** (attempt - 1))
@@ -1253,27 +1259,38 @@ class MCPManager:
     def get_tools_summary(self) -> str:
         """生成用于 /mcp 命令的工具摘要文本"""
         if not self._servers:
-            return "未配置 MCP 服务器。"
+            return "  No MCP servers configured."
 
         lines: List[str] = []
-        lines.append("MCP 服务器状态:")
-        lines.append("-" * 50)
+        lines.append("  MCP servers:")
+        lines.append("")
 
         for name, state in self._servers.items():
-            status = "已连接" if state.connected else "未连接"
             transport = state.config.effective_transport
-            lines.append(f"  {name} ({transport}) — {status}")
+            if state.connected:
+                status_icon = "✅"
+                status_text = "connected"
+            elif state.started and state.error_message:
+                status_icon = "❌"
+                status_text = f"failed: {state.error_message}"
+            elif state.started:
+                status_icon = "❌"
+                status_text = "failed"
+            else:
+                status_icon = "⏳"
+                status_text = "not started"
+
+            lines.append(f"    {status_icon} {name} ({transport}) - {status_text}")
 
             if state.tools:
                 for tool in state.tools.values():
                     desc = tool.description[:60] + "..." if len(tool.description) > 60 else tool.description
-                    lines.append(f"    - {tool.name}: {desc}")
-            else:
-                lines.append("    (无工具)")
+                    lines.append(f"       - {tool.name}: {desc}")
 
         total_tools = sum(len(s.tools) for s in self._servers.values())
-        lines.append("-" * 50)
-        lines.append(f"共 {len(self._servers)} 个服务器，{total_tools} 个工具")
+        connected = sum(1 for s in self._servers.values() if s.connected)
+        lines.append("")
+        lines.append(f"  {len(self._servers)} servers total, {connected} connected, {total_tools} tools")
 
         return "\n".join(lines)
 
