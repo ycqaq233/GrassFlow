@@ -17,6 +17,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -311,9 +312,10 @@ class GrassFlowREPL:
 
         实现说明：
           使用 app.run_in_terminal() 临时挂起 prompt_toolkit Application，
-          然后用 input() 读取用户输入。这比 pt_prompt() 安全得多——
-          pt_prompt() 会创建自己的 Application，与正在运行的 Application 冲突，
-          导致审批提示无法正常工作（stdin 竞争、渲染冲突等）。
+          然后通过 sys.__stdout__ / sys.__stdin__ 读写终端——
+          这绕过了 patch_stdout() 对 sys.stdout / sys.stdin 的替换。
+          直接使用 input() 会失败，因为 patch_stdout 把 sys.stdin 替换成了
+          prompt_toolkit 管道，导致 input() 读不到真实键盘输入。
         """
         async def _approval_callback(
             tool_name: str, description: str, args_preview: str,
@@ -335,10 +337,8 @@ class GrassFlowREPL:
             if len(display_args) > 120:
                 display_args = display_args[:117] + "..."
 
-            # Build hermes-style approval prompt (plain text — terminal is in
-            # cooked mode inside run_in_terminal, so ANSI is fine but we keep
-            # it simple to avoid encoding issues on Windows consoles).
-            prompt_lines = (
+            # Build hermes-style approval prompt
+            prompt_text = (
                 f"\n  WARNING  {tool_name}: {display_args}\n"
                 f"\n"
                 f"  [o]nce  |  [s]ession  |  [a]lways  |  [d]eny\n"
@@ -356,13 +356,15 @@ class GrassFlowREPL:
                 )
                 if in_pt_loop:
                     # Use run_in_terminal to temporarily suspend the running
-                    # Application. This properly restores the terminal so input()
-                    # works.  pt_prompt() CANNOT be used here: it creates its own
-                    # Application instance which conflicts with the already-running
-                    # one, causing stdin contention and broken rendering.
+                    # Application. This properly restores the terminal to cooked
+                    # mode.  We write the prompt and read the answer through
+                    # sys.__stdout__ / sys.__stdin__ to bypass patch_stdout()
+                    # which replaces sys.stdout / sys.stdin with pipes.
                     def _read_approval() -> str:
                         try:
-                            return input(prompt_lines)
+                            sys.__stdout__.write(prompt_text)
+                            sys.__stdout__.flush()
+                            return sys.__stdin__.readline()
                         except (EOFError, KeyboardInterrupt):
                             return ""
 
@@ -370,7 +372,8 @@ class GrassFlowREPL:
                         _read_approval, render_cli_done=True,
                     )
                 else:
-                    answer = input(prompt_lines)
+                    # Outside prompt_toolkit loop — normal input() works
+                    answer = input(prompt_text)
             except (EOFError, KeyboardInterrupt, Exception):
                 answer = ""
 
