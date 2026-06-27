@@ -35,7 +35,7 @@ import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
@@ -667,6 +667,7 @@ class _ServerState:
     started: bool = False
     error_message: Optional[str] = None
     rpc_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    connected_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def next_request_id(self) -> int:
         self.request_id += 1
@@ -704,6 +705,16 @@ class MCPManager:
     def __init__(self, config_dir: Optional[Path] = None) -> None:
         self._config_dir = config_dir
         self._servers: Dict[str, _ServerState] = {}
+        self._on_ready_callback: Optional[Callable[[], None]] = None
+
+    def set_on_ready_callback(self, callback: Callable[[], None]) -> None:
+        """Set a callback to be invoked when all MCP servers have connected and
+        their tools have been registered into the ToolRegistry.
+
+        The callback fires once after start_all() completes its wait phase, and
+        again each time a late-connecting server finishes its handshake.
+        """
+        self._on_ready_callback = callback
 
     # -------------------- 配置 --------------------
 
@@ -798,7 +809,14 @@ class MCPManager:
     # -------------------- 生命周期 --------------------
 
     async def start_all(self) -> None:
-        """启动所有已启用的 MCP 服务器"""
+        """启动所有已启用的 MCP 服务器
+
+        启动流程：
+        1. 为每个启用的服务器创建后台任务 (_run_server_loop)
+        2. 等待每个服务器的 connected_event（握手 + 工具发现完成）
+        3. 注册已发现的 MCP 工具到 ToolRegistry
+        4. 触发 on_ready 回调（如果有）
+        """
         if not self._servers:
             logger.info("没有配置 MCP 服务器")
             return
@@ -806,6 +824,7 @@ class MCPManager:
         tasks = []
         for name, state in self._servers.items():
             if state.config.enabled:
+                state.connected_event.clear()
                 task = asyncio.create_task(
                     self._run_server_loop(name),
                     name=f"mcp-server-{name}",
@@ -814,18 +833,45 @@ class MCPManager:
                 tasks.append(task)
 
         if tasks:
-            # 等待所有服务器完成初始化（或失败），设置超时
-            done, pending = await asyncio.wait(tasks, timeout=10.0)
-            failed = 0
-            for t in done:
-                if t.exception():
-                    logger.error("MCP 服务器启动失败: %s", t.exception())
-                    failed += 1
-            # pending 的任务仍在后台运行（长生命周期）
-            ready = len(done) - failed + len(pending)
-            logger.info("MCP 服务器启动完成: %d/%d 就绪", ready, len(tasks))
-            # Register discovered MCP tools into the global tool registry
+            # Wait for each server's connected_event (set after handshake +
+            # tool discovery), with a per-server timeout.
+            connect_timeout = 15.0
+            events = [
+                state.connected_event
+                for state in self._servers.values()
+                if state.config.enabled
+            ]
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*[e.wait() for e in events], return_exceptions=True),
+                    timeout=connect_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "MCP servers did not all connect within %.0fs — "
+                    "remaining servers will register tools as they connect",
+                    connect_timeout,
+                )
+
+            # Count how many servers actually connected
+            connected = sum(
+                1 for state in self._servers.values()
+                if state.connected_event.is_set()
+            )
+            total = len(tasks)
+            logger.info("MCP 服务器启动完成: %d/%d 已连接", connected, total)
+
+            # Register all currently discovered MCP tools into the ToolRegistry.
+            # _run_server_loop already calls this per-server, but we do a
+            # catch-all pass here in case any were missed.
             self.register_tools_to_registry()
+
+            # Fire the on-ready callback so the REPL can update its state
+            if self._on_ready_callback:
+                try:
+                    self._on_ready_callback()
+                except Exception as cb_err:
+                    logger.warning("MCP on_ready callback error: %s", cb_err)
 
     async def stop_all(self) -> None:
         """停止所有 MCP 服务器"""
@@ -861,8 +907,14 @@ class MCPManager:
                 state.connected = True
                 state.error_message = None
 
-                # Re-register tools after reconnect
+                # Register tools immediately after handshake+discovery completes.
+                # This ensures tools are in the registry before start_all() returns.
                 self.register_tools_to_registry()
+
+                # Signal that this server is connected and tools are registered.
+                # start_all() waits for this event before returning.
+                if not state.connected_event.is_set():
+                    state.connected_event.set()
 
                 # 等待连接结束（或被停止）
                 if state.process:

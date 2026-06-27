@@ -123,14 +123,29 @@ class AgentIntegration:
                 if mcp_config:
                     self._mcp_manager = MCPManager()
                     self._mcp_manager.load_config({"mcp_servers": mcp_config})
+
+                    # Register callback: when MCP servers finish connecting,
+                    # re-register tools into the shared tool_registry and log.
+                    def _on_mcp_ready():
+                        try:
+                            cnt = self._mcp_manager.register_tools_to_registry(tool_registry)
+                            if cnt:
+                                logger.info(
+                                    "MCP on_ready: %d tools registered into tool registry", cnt
+                                )
+                        except Exception as cb_err:
+                            logger.warning("MCP on_ready tool registration error: %s", cb_err)
+
+                    self._mcp_manager.set_on_ready_callback(_on_mcp_ready)
+
                     import asyncio
                     try:
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
                             # Schedule MCP startup as background task.
-                            # Tools will be registered into the shared tool_registry
-                            # once servers connect (via register_tools_to_registry
-                            # called inside start_all and _run_server_loop).
+                            # start_all() now waits for connected_event per server,
+                            # so tools are registered before the task completes.
+                            # The on_ready callback fires after tools are in the registry.
                             loop.create_task(self._mcp_manager.start_all())
                             logger.info("MCP startup scheduled as background task")
                         else:
@@ -138,11 +153,8 @@ class AgentIntegration:
                     except RuntimeError:
                         logger.debug("No event loop for MCP startup, will start later")
 
-                    # Explicitly register any already-discovered MCP tools into the
-                    # tool_registry.  When start_all() ran synchronously above the
-                    # tools are already registered; when it was scheduled as a
-                    # background task this is a no-op (tools register themselves
-                    # once each server connects).
+                    # Register any already-discovered MCP tools (covers the
+                    # synchronous path where start_all() already completed).
                     try:
                         mcp_count = self._mcp_manager.register_tools_to_registry(tool_registry)
                         if mcp_count:
