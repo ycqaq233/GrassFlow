@@ -27,6 +27,7 @@ GrassFlow MCP (Model Context Protocol) 客户端集成
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import logging
 import os
@@ -52,6 +53,16 @@ logger = logging.getLogger(__name__)
 
 _mcp_stderr_log_fh = None
 
+def _close_mcp_stderr_log():
+    """Close the global MCP stderr log file handle (called via atexit)."""
+    global _mcp_stderr_log_fh
+    if _mcp_stderr_log_fh is not None:
+        try:
+            _mcp_stderr_log_fh.close()
+        except Exception:
+            pass
+        _mcp_stderr_log_fh = None
+
 def _get_mcp_stderr_log():
     """Return a file handle for MCP subprocess stderr.
     Falls back to os.devnull if log dir creation fails.
@@ -65,6 +76,7 @@ def _get_mcp_stderr_log():
         log_path = log_dir / 'mcp-stderr.log'
         _mcp_stderr_log_fh = open(log_path, 'a', encoding='utf-8', errors='replace', buffering=1)
         _mcp_stderr_log_fh.fileno()  # sanity check
+        atexit.register(_close_mcp_stderr_log)
     except Exception:
         try:
             _mcp_stderr_log_fh = open(os.devnull, 'w', encoding='utf-8')
@@ -189,55 +201,53 @@ class _StdioTransport(_Transport):
             return line.rstrip(b"\r\n")
 
         try:
-            # 读取 Content-Length 头
-            content_length = -1
             while True:
-                line = await _read_line()
-                if line is None:
+                # 读取 Content-Length 头
+                content_length = -1
+                while True:
+                    line = await _read_line()
+                    if line is None:
+                        return None
+                    if line == b"":
+                        break
+                    header_str = line.decode("utf-8").strip()
+                    if header_str.lower().startswith("content-length:"):
+                        content_length = int(header_str.split(":", 1)[1].strip())
+
+                if content_length < 0:
+                    logger.warning("收到无 Content-Length 的消息")
                     return None
-                if line == b"":
-                    break
-                header_str = line.decode("utf-8").strip()
-                if header_str.lower().startswith("content-length:"):
-                    content_length = int(header_str.split(":", 1)[1].strip())
 
-            if content_length < 0:
-                logger.warning("收到无 Content-Length 的消息")
-                return None
+                # 读取消息体
+                body = b""
+                remaining = content_length
+                while remaining > 0:
+                    time_left = msg_deadline - loop.time()
+                    if time_left <= 0:
+                        raise asyncio.TimeoutError()
+                    chunk = await asyncio.wait_for(
+                        self._process.stdout.read(remaining), timeout=time_left
+                    )
+                    if not chunk:
+                        return None
+                    body += chunk
+                    remaining -= len(chunk)
 
-            # 读取消息体
-            body = b""
-            remaining = content_length
-            while remaining > 0:
-                time_left = msg_deadline - loop.time()
-                if time_left <= 0:
-                    raise asyncio.TimeoutError()
-                chunk = await asyncio.wait_for(
-                    self._process.stdout.read(remaining), timeout=time_left
-                )
-                if not chunk:
-                    return None
-                body += chunk
-                remaining -= len(chunk)
+                msg = json.loads(body.decode("utf-8"))
 
-            msg = json.loads(body.decode("utf-8"))
+                # 跳过通知消息（无 id 字段），继续读取下一条
+                if "id" not in msg:
+                    logger.debug("跳过 MCP 通知: %s", msg.get("method", "unknown"))
+                    continue
 
-            # 跳过通知消息（无 id 字段），读取下一条
-            if "id" not in msg:
-                logger.debug("跳过 MCP 通知: %s", msg.get("method", "unknown"))
-                return await self._read_response(
-                    timeout=max(0, msg_deadline - loop.time()),
-                    expected_id=expected_id,
-                )
+                # 校验响应 id
+                if expected_id is not None and msg.get("id") != expected_id:
+                    logger.warning(
+                        "MCP 响应 id 不匹配: 期望 %d, 收到 %s",
+                        expected_id, msg.get("id"),
+                    )
 
-            # 校验响应 id
-            if expected_id is not None and msg.get("id") != expected_id:
-                logger.warning(
-                    "MCP 响应 id 不匹配: 期望 %d, 收到 %s",
-                    expected_id, msg.get("id"),
-                )
-
-            return msg
+                return msg
 
         except asyncio.TimeoutError:
             logger.warning("读取 MCP 消息超时 (%.1fs)", timeout)
@@ -309,7 +319,9 @@ class _HTTPTransport(_Transport):
                 logger.debug("HTTP 通知发送超时: %s", message.get("method"))
                 return None
             logger.warning("HTTP 请求超时 (%.1fs): %s", timeout, message.get("method"))
-            return None
+            raise MCPConnectionError(
+                f"HTTP 请求超时 ({timeout:.1f}s): {message.get('method')}"
+            )
         except httpx.HTTPStatusError as exc:
             raise MCPConnectionError(
                 f"HTTP 错误 {exc.response.status_code}: {exc.response.text[:200]}"
@@ -366,12 +378,13 @@ class _MCPSSETransport(_Transport):
             raise
 
     async def _connect_sse(self) -> None:
-        """连接到 SSE 端点，获取 endpoint URL"""
+        """连接到 SSE 端点，获取 endpoint URL，然后启动监听任务"""
         if not self._client:
             raise MCPConnectionError("SSE HTTP 客户端未创建")
 
         logger.debug("连接 SSE 端点: %s", self._url)
         try:
+            # 读取 endpoint URL（不关闭连接，后续由 listener 复用或重连）
             async with self._client.stream("GET", self._url) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
@@ -392,7 +405,7 @@ class _MCPSSETransport(_Transport):
             if not self._endpoint_url:
                 raise MCPConnectionError("SSE 端点未返回 endpoint URL")
 
-            # 启动后台监听任务
+            # 启动后台监听任务（会建立自己的 SSE 连接）
             self._listener_task = asyncio.create_task(
                 self._listen_for_messages(), name="mcp-sse-listener"
             )
@@ -407,23 +420,47 @@ class _MCPSSETransport(_Transport):
             raise MCPConnectionError(f"SSE 连接失败: {exc}")
 
     async def _listen_for_messages(self) -> None:
-        """后台任务：监听 SSE 流中的消息"""
+        """后台任务：监听 SSE 流中的消息（指数退避重连）"""
         if not self._client:
             return
 
+        # 基于 sse_read_timeout 计算单次读取超时（至少 60 秒）
+        read_timeout = max(60.0, self._sse_read_timeout / 5)
+        attempt = 0
+
         while self._connected:
             try:
-                async with self._client.stream("GET", self._url) as response:
+                logger.debug("SSE 监听连接: %s", self._url)
+                async with self._client.stream(
+                    "GET", self._url, timeout=httpx.Timeout(
+                        self._timeout, read=read_timeout,
+                    ),
+                ) as response:
                     response.raise_for_status()
+                    # 连接成功，重置重连计数和 endpoint URL
+                    attempt = 0
                     current_event = ""
                     async for line in response.aiter_lines():
                         if not self._connected:
                             break
                         if line.startswith("event: "):
-                            current_event = line[7:].strip()
+                            event_type = line[7:].strip()
+                            # 重新读取 endpoint URL（服务器可能轮换）
+                            if event_type == "endpoint":
+                                current_event = "endpoint"
+                            else:
+                                current_event = event_type
                         elif line.startswith("data: "):
                             data = line[6:].strip()
-                            if current_event == "message":
+                            if current_event == "endpoint":
+                                # 更新 endpoint URL
+                                if data.startswith("http://") or data.startswith("https://"):
+                                    self._endpoint_url = data
+                                else:
+                                    base = self._url.rstrip("/")
+                                    self._endpoint_url = base + data if data.startswith("/") else base + "/" + data
+                                logger.debug("SSE endpoint 更新: %s", self._endpoint_url)
+                            elif current_event == "message":
                                 try:
                                     msg = json.loads(data)
                                     self._handle_message(msg)
@@ -436,8 +473,16 @@ class _MCPSSETransport(_Transport):
             except Exception as exc:
                 if not self._connected:
                     break
-                logger.warning("SSE 监听异常，将在 5 秒后重连: %s", exc)
-                await asyncio.sleep(5.0)
+                attempt += 1
+                if attempt >= MAX_RECONNECT_ATTEMPTS:
+                    logger.error("SSE 监听重连 %d 次后放弃: %s", attempt, exc)
+                    break
+                delay = RECONNECT_BASE_DELAY * (2 ** (attempt - 1))
+                logger.warning(
+                    "SSE 监听异常，%.1fs 后重连 (%d/%d): %s",
+                    delay, attempt, MAX_RECONNECT_ATTEMPTS, exc,
+                )
+                await asyncio.sleep(delay)
 
     def _handle_message(self, msg: Dict[str, Any]) -> None:
         """处理 SSE 流中收到的消息"""
@@ -476,11 +521,13 @@ class _MCPSSETransport(_Transport):
             return None
 
         # 请求消息：注册 Future，发送请求，等待 SSE 流中的响应
-        self._request_id += 1
-        request_id = str(self._request_id)
-        message["id"] = request_id
+        # 仅在调用方未设置 id 时分配新 id
+        if "id" not in message:
+            self._request_id += 1
+            message["id"] = str(self._request_id)
+        request_id = str(message["id"])
 
-        future: asyncio.Future[Dict[str, Any]] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[Dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = future
 
         try:
@@ -567,8 +614,15 @@ class MCPServerConfig:
     @property
     def effective_transport(self) -> str:
         """获取实际使用的传输类型（解析 auto 检测）"""
+        _VALID_TRANSPORTS = {"stdio", "http", "sse"}
         if self.transport != "auto":
-            return self.transport
+            if self.transport not in _VALID_TRANSPORTS:
+                logger.warning(
+                    "MCP 服务器 %r 指定了无效传输类型 %r，回退为 auto 检测",
+                    self.name, self.transport,
+                )
+            else:
+                return self.transport
         # 自动检测
         if self.sse_url:
             return "sse"
@@ -852,7 +906,8 @@ class MCPManager:
                 command = resolved
 
         cmd_parts = [command] + config.args
-        logger.info("启动 MCP 服务器 %r: %s", name, " ".join(cmd_parts))
+        # 只记录命令名，不记录参数（参数可能含 API key 等敏感信息）
+        logger.info("启动 MCP 服务器 %r: %s", name, command)
 
         # 合并环境变量
         env = os.environ.copy()
@@ -863,7 +918,7 @@ class MCPManager:
             *cmd_parts,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=errlog.fileno() if errlog is not None else asyncio.subprocess.DEVNULL,
+            stderr=errlog if errlog is not None else asyncio.subprocess.DEVNULL,
             env=env,
             cwd=config.cwd,
         )
