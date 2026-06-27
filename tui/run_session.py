@@ -69,6 +69,13 @@ async def run_single_prompt(
         _print_err("Error: Failed to initialize agent loop. Check your LLM configuration.")
         return 1
 
+    # 设置权限回调：非交互模式下自动批准所有工具调用
+    if integration._agent_loop:
+        async def _auto_approve(tool_name: str, description: str, args_preview: str) -> str:
+            """非交互模式自动批准工具调用"""
+            return "session"
+        integration._agent_loop.set_permission_callback(_auto_approve)
+
     # 如果指定了 model/provider，覆盖 agent loop 配置
     if model or provider:
         _apply_model_override(integration, model, provider)
