@@ -147,6 +147,7 @@ class GenerationOptions:
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     seed: Optional[int] = None
+    reasoning_effort: Optional[str] = None  # "low" | "medium" | "high" | "xhigh"
 
 
 @dataclass
@@ -959,6 +960,8 @@ class OpenAIChatBody(ProtocolBody[Dict[str, Any]]):
             body["frequency_penalty"] = opts.frequency_penalty
         if opts.seed is not None:
             body["seed"] = opts.seed
+        if opts.reasoning_effort is not None:
+            body["reasoning_effort"] = opts.reasoning_effort
 
         # 额外参数
         body.update(request.extra.get("provider_options", {}))
@@ -1491,6 +1494,7 @@ class ProtocolLLMClient:
         messages: List[Dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
         **kwargs,
     ) -> AsyncIterator[LLMEvent]:
         """
@@ -1528,6 +1532,7 @@ class ProtocolLLMClient:
         options = GenerationOptions(
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
         )
 
         async for event in self._model.stream_events(

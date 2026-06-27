@@ -586,6 +586,7 @@ class AgentLoop:
         user_message: str,
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         system_prompt: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> AsyncIterator[LoopEvent]:
         """
         处理用户消息 — 流式版本。
@@ -689,6 +690,7 @@ class AgentLoop:
                         messages=_stream_msgs,
                         temperature=self._generation_options.temperature or 0.7,
                         max_tokens=self._generation_options.max_tokens,
+                        reasoning_effort=reasoning_effort or self._generation_options.reasoning_effort,
                     ):
                         if self._abort_signal.is_set():
                             break

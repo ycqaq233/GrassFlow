@@ -131,6 +131,7 @@ class AgentIntegration:
         text: str,
         history: Optional[List[Dict[str, Any]]] = None,
         system_prompt: str = "",
+        reasoning_effort: Optional[str] = None,
         on_token: Optional[TokenCallback] = None,
         on_thinking: Optional[TokenCallback] = None,
         on_tool_call_start: Optional[ToolCallCallback] = None,
@@ -165,7 +166,7 @@ class AgentIntegration:
         self._agent_running = True
         try:
             history = history or []
-            async for event in self._agent_loop.process_streaming(text, history, system_prompt):
+            async for event in self._agent_loop.process_streaming(text, history, system_prompt, reasoning_effort=reasoning_effort):
                 etype = event.type
                 edata = event.data
 
@@ -252,6 +253,7 @@ class AgentIntegration:
         text: str,
         history: Optional[List[Dict[str, Any]]] = None,
         system_prompt: str = "",
+        reasoning_effort: Optional[str] = None,
         on_done: Optional[Callable[[], None]] = None,
     ) -> threading.Thread:
         """在后台线程中运行 Agent Loop（适用于无 asyncio 事件循环的场景）
@@ -277,7 +279,7 @@ class AgentIntegration:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 loop.run_until_complete(
-                    self._background_agent_loop(text, history or [], system_prompt)
+                    self._background_agent_loop(text, history or [], system_prompt, reasoning_effort)
                 )
                 loop.close()
             except Exception as e:
@@ -297,6 +299,7 @@ class AgentIntegration:
         text: str,
         history: List[Dict[str, Any]],
         system_prompt: str,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         """后台线程中的异步 Agent Loop
 
@@ -307,7 +310,7 @@ class AgentIntegration:
             self._ui_update_queue.put((action, kwargs))
 
         try:
-            async for event in self._agent_loop.process_streaming(text, history, system_prompt):
+            async for event in self._agent_loop.process_streaming(text, history, system_prompt, reasoning_effort=reasoning_effort):
                 etype = event.type
                 edata = event.data
 
@@ -381,6 +384,7 @@ class AgentIntegration:
         console: Any,
         history: Optional[List[Dict[str, Any]]] = None,
         system_prompt: str = "",
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         """同步流式处理（降级模式，使用 asyncio.run 消费事件流）
 
@@ -399,7 +403,7 @@ class AgentIntegration:
         async def _consume():
             full_text = ""
             thinking_shown = False
-            async for event in self._agent_loop.process_streaming(text, history or [], system_prompt):
+            async for event in self._agent_loop.process_streaming(text, history or [], system_prompt, reasoning_effort=reasoning_effort):
                 etype = event.type
                 edata = event.data
 
