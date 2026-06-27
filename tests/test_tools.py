@@ -502,7 +502,8 @@ class TestIntegration:
         assert "write" in tools
         assert "glob" in tools
         assert "grep" in tools
-        assert len(tools) == 5
+        assert "webfetch" in tools
+        assert len(tools) == 6
 
     @pytest.mark.asyncio
     async def test_write_then_read(self, temp_dir):

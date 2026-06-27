@@ -290,12 +290,14 @@ def register_builtin_tools() -> ToolRegistry:
     from .write import WriteTool
     from .glob import GlobTool
     from .grep import GrepTool
+    from .webfetch import WebFetchTool
 
     registry.register(ShellTool())
     registry.register(ReadTool())
     registry.register(WriteTool())
     registry.register(GlobTool())
     registry.register(GrepTool())
+    registry.register(WebFetchTool())
 
     logger.info(f"Registered {len(registry.list_tools())} builtin tools")
     return registry

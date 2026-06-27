@@ -7,6 +7,7 @@ GrassFlow 内置工具系统
 - write: 写入文件
 - glob: 文件模式匹配
 - grep: 内容搜索
+- webfetch: 获取网页内容
 """
 
 from .tool import Tool, ToolContext, ToolResult, ToolRegistry
@@ -16,6 +17,7 @@ from .read import ReadTool
 from .write import WriteTool
 from .glob import GlobTool
 from .grep import GrepTool
+from .webfetch import WebFetchTool
 
 __all__ = [
     "Tool",
@@ -28,4 +30,5 @@ __all__ = [
     "WriteTool",
     "GlobTool",
     "GrepTool",
+    "WebFetchTool",
 ]
