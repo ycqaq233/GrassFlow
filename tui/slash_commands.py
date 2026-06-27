@@ -364,7 +364,7 @@ def _cmd_think(repl, args: List[str]) -> None:
             f"Thinking mode: {status}\n"
             f"Effort: {effort}\n"
             f"Display: {display}\n"
-            f"Usage: /think [on|off|low|medium|high|xhigh|show|display collapsed|full]",
+            f"Usage: /think [on|off|low|medium|high|xhigh|show|full|collapsed]",
             role="system",
         )
         return
@@ -383,6 +383,15 @@ def _cmd_think(repl, args: List[str]) -> None:
             f"    display: {display}",
             role="system",
         )
+        return
+
+    # Shortcut: /think full or /think collapsed (without "display" prefix)
+    if arg in ("collapsed", "full"):
+        if repl.session:
+            thinking = repl.session.metadata.get("thinking", {})
+            thinking["display"] = arg
+            repl.session.metadata["thinking"] = thinking
+        repl.add_output(f"Thinking display mode: {arg}", role="system")
         return
 
     if arg == "display":
@@ -404,7 +413,7 @@ def _cmd_think(repl, args: List[str]) -> None:
     if parsed is None:
         repl.add_output(
             f"Unknown option: '{arg}'\n"
-            f"Usage: /think [on|off|low|medium|high|xhigh|show|display collapsed|full]",
+            f"Usage: /think [on|off|low|medium|high|xhigh|show|full|collapsed]",
             role="error",
         )
         return
@@ -922,7 +931,7 @@ COMMAND_REGISTRY: List[CommandDef] = [
         description="切换/设置思考模式",
         category="Configuration",
         aliases=(),
-        args_hint="[on|off|low|medium|high|xhigh|show|display collapsed|full]",
+        args_hint="[on|off|low|medium|high|xhigh|show|full|collapsed]",
         handler_name="_cmd_think",
     ),
     CommandDef(
@@ -1146,7 +1155,7 @@ class SlashCommandCompleter(Completer):
 
     # 命令参数补全映射
     _ARG_COMPLETIONS: Dict[str, List[str]] = {
-        "think": ["on", "off", "low", "medium", "high", "xhigh", "show", "display"],
+        "think": ["on", "off", "low", "medium", "high", "xhigh", "show", "full", "collapsed", "display"],
         "theme": ["default", "dark", "light", "cyber", "ocean"],
         "mcp": ["list", "start", "stop", "status", "add", "remove", "test"],
         "skills": ["list", "view", "search", "install"],
