@@ -459,6 +459,9 @@ class GrassFlowREPL:
             thinking = self.session.metadata.get("thinking", {})
             if thinking.get("enabled", False):
                 reasoning_effort = thinking.get("effort", "medium")
+                # Show thinking mode indicator when thinking is ON
+                effort_label = reasoning_effort or "medium"
+                cprint(f"\033[2;3m  \U0001f4ad Thinking: ON ({effort_label})\033[0m")
 
         if self.app and self.app.loop and self.app.loop.is_running():
             self.app.loop.create_task(self._run_agent_loop_async(text, reasoning_effort=reasoning_effort))
