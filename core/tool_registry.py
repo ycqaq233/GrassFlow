@@ -496,7 +496,8 @@ class MCPToolAdapter:
         """
         Args:
             server_name: MCP 服务器名称（如 "github", "sonarqube"）
-            tool_id: 工具在 MCP 服务器中的 ID
+            tool_id: 工具 ID。如果已经包含 mcp_ 前缀（如 mcp_server_tool），
+                     则直接用作注册 ID；否则以 mcp_{server}_{tool_id} 格式注册。
             description: 工具描述
             parameters: 参数 JSON Schema
             mcp_client: MCP 客户端实例，需实现 call_tool(tool_id, args) -> result
@@ -510,7 +511,13 @@ class MCPToolAdapter:
         self.mcp_client = mcp_client
         self.permission = permission
         self.tags = tags or []
-        self._full_id = f"mcp_{server_name}.{tool_id}"
+        # Avoid double-prefixing: if tool_id already starts with "mcp_", use it
+        # directly as the registry ID (this is the case when called from
+        # MCPManager.register_tools_to_registry which passes qualified names).
+        if tool_id.startswith("mcp_"):
+            self._full_id = tool_id
+        else:
+            self._full_id = f"mcp_{server_name}_{tool_id}"
 
     def to_tool_def(self) -> ToolDef:
         """转换为 ToolDef"""

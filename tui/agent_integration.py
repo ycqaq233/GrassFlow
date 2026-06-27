@@ -127,11 +127,28 @@ class AgentIntegration:
                     try:
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
+                            # Schedule MCP startup as background task.
+                            # Tools will be registered into the shared tool_registry
+                            # once servers connect (via register_tools_to_registry
+                            # called inside start_all and _run_server_loop).
                             loop.create_task(self._mcp_manager.start_all())
+                            logger.info("MCP startup scheduled as background task")
                         else:
                             loop.run_until_complete(self._mcp_manager.start_all())
                     except RuntimeError:
                         logger.debug("No event loop for MCP startup, will start later")
+
+                    # Explicitly register any already-discovered MCP tools into the
+                    # tool_registry.  When start_all() ran synchronously above the
+                    # tools are already registered; when it was scheduled as a
+                    # background task this is a no-op (tools register themselves
+                    # once each server connects).
+                    try:
+                        mcp_count = self._mcp_manager.register_tools_to_registry(tool_registry)
+                        if mcp_count:
+                            logger.info("Registered %d MCP tools into tool registry", mcp_count)
+                    except Exception as reg_err:
+                        logger.warning("MCP tool registration error: %s", reg_err)
             except Exception as e:
                 logger.warning("MCP initialization failed: %s", e)
                 self._mcp_manager = None
