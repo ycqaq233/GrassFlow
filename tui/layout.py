@@ -653,6 +653,7 @@ def get_input_prefix(line_number: int = 0, wrap_count: int = 0) -> List[Tuple[st
 def build_layout(
     input_buffer: Buffer,
     status_text_cb: Callable[[], List[Tuple[str, str]]],
+    completer: Any = None,
 ) -> Layout:
     """构建 hermes 模式布局 — 只有底部 chrome
 
@@ -672,6 +673,7 @@ def build_layout(
     Args:
         input_buffer: prompt_toolkit Buffer 实例
         status_text_cb: 底部状态栏文本回调
+        completer: prompt_toolkit Completer 实例（用于 Tab 补全和 complete_while_typing）
 
     Returns:
         prompt_toolkit Layout 实例
@@ -691,12 +693,15 @@ def build_layout(
     )
 
     # 输入区域：hermes 风格，1~8 行动态高度
+    # Pass completer to TextArea so its internal BufferControl has it,
+    # which is required for complete_while_typing to trigger auto-completion.
     input_area = TextArea(
         height=Dimension(min=1, max=8, preferred=1),
         prompt=get_input_prefix,
         style='class:input-area',
         multiline=True,
         wrap_lines=True,
+        completer=completer,
     )
     # Replace TextArea's internal buffer with the caller's buffer.
     # Must update both the attribute AND the BufferControl reference,
@@ -743,6 +748,7 @@ def build_layout_from_repl(repl: Any) -> Layout:
     layout = build_layout(
         input_buffer=repl.input_buffer,
         status_text_cb=status_cb,
+        completer=repl._completer,
     )
     return layout
 
