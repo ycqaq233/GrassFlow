@@ -24,20 +24,23 @@ class ApprovalChoice(str, Enum):
 
 
 # 危险工具模式 -- 需要审批的操作类型
+# 使用 word-boundary 匹配，避免子串误匹配（如 "write" 匹配 "write_file"）。
+# \b 不可靠于 tool id（无空格分隔），所以同时列出短 id 和长 id。
 DANGEROUS_TOOL_PATTERNS: List[Tuple[str, str]] = [
-    # 文件写入类
-    (r"write_file|patch_file|create_file", "文件写入操作"),
-    (r"delete_file|remove_file|unlink", "文件删除操作"),
-    # 命令执行类
-    (r"run_command|execute_command|shell_exec|terminal", "命令执行操作"),
+    # 文件写入类（匹配 "write", "write_file", "patch_file", "create_file" 等）
+    (r"^(write|patch_file|create_file|save_file|write_file)$", "文件写入操作"),
+    # 文件删除类
+    (r"^(delete_file|remove_file|unlink|rm)$", "文件删除操作"),
+    # 命令执行类（匹配 "shell", "run_command", "execute_command" 等）
+    (r"^(shell|run_command|execute_command|shell_exec|terminal|exec)$", "命令执行操作"),
     # 代码执行类
-    (r"execute_code|eval_code|exec_code", "代码执行操作"),
+    (r"^(execute_code|eval_code|exec_code)$", "代码执行操作"),
     # 网络请求类
-    (r"http_request|fetch|curl|wget|send_request", "网络请求操作"),
+    (r"^(http_request|fetch|curl|wget|send_request)$", "网络请求操作"),
     # 数据库操作
-    (r"drop_table|truncate|delete_from", "数据库破坏性操作"),
+    (r"^(drop_table|truncate|delete_from)$", "数据库破坏性操作"),
     # 系统操作
-    (r"system_call|process_exec|spawn", "系统调用操作"),
+    (r"^(system_call|process_exec|spawn)$", "系统调用操作"),
 ]
 
 _COMPILED_DANGEROUS = [
