@@ -797,61 +797,6 @@ class GrassFlowREPL:
                 self.add_output(f"Shell error: {e}", role="error")
         threading.Thread(target=_run, daemon=True).start()
 
-    async def _approval_callback(self, tool_name: str, description: str, args_preview: str) -> str:
-        """审批回调：根据 _permission_mode 决定工具调用是否批准。
-
-        Returns:
-            "once"    — 批准本次调用
-            "session" — 本会话内批准该工具
-            "always"  — 永久批准
-            "deny"    — 拒绝
-        """
-        # allow 模式：自动批准一切
-        if self._permission_mode == "allow":
-            return "once"
-
-        # deny 模式：自动拒绝
-        if self._permission_mode == "deny":
-            return "deny"
-
-        # ask 模式：提示用户确认
-        # Use prompt_toolkit prompt_async which handles raw-mode terminal correctly.
-        try:
-            from prompt_toolkit import prompt as pt_prompt
-            from prompt_toolkit.patch_stdout import patch_stdout as _pt_patch
-
-            prompt_text = (
-                f"\n  Approve tool: {tool_name}({args_preview})?\n"
-                f"  {description}\n"
-                f"  [y]es / [n]o / [s]ession / [a]lways : "
-            )
-
-            loop = asyncio.get_running_loop()
-            # Run prompt in a thread to avoid blocking the agent loop.
-            # prompt_toolkit's prompt() creates its own Application which
-            # properly manages terminal mode (exits raw mode for input).
-            def _ask_user() -> str:
-                try:
-                    answer = pt_prompt(prompt_text)
-                    return answer.strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    return "n"
-
-            answer = await loop.run_in_executor(None, _ask_user)
-
-            if answer in ("y", "yes"):
-                return "once"
-            elif answer in ("s", "session"):
-                return "session"
-            elif answer in ("a", "always"):
-                return "always"
-            else:
-                return "deny"
-
-        except Exception as e:
-            logger.warning("Approval prompt failed: %s — defaulting to deny", e)
-            return "deny"
-
     # ==================== 生命周期 ====================
 
     def _init_session(self) -> None:
