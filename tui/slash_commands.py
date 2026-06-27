@@ -727,6 +727,32 @@ def _cmd_yolo(repl, args: List[str]) -> None:
     repl.add_output(f"YOLO mode: {status}", role="system")
 
 
+def _cmd_tools(repl, args: List[str]) -> None:
+    """切换工具调用显示模式（compact / verbose）"""
+    if not args:
+        mode = "verbose" if repl._tool_verbose else "compact"
+        repl.add_output(
+            f"Tool display: {mode}\n"
+            f"Usage: /tools [compact|verbose|on|off|toggle]",
+            role="system",
+        )
+        return
+
+    arg = args[0].lower()
+    if arg in ("compact", "off"):
+        repl._tool_verbose = False
+        repl.add_output("Tool display: compact (summary lines, truncated output)", role="system")
+    elif arg in ("verbose", "on"):
+        repl._tool_verbose = True
+        repl.add_output("Tool display: verbose (full args and output)", role="system")
+    elif arg == "toggle":
+        repl._tool_verbose = not repl._tool_verbose
+        mode = "verbose" if repl._tool_verbose else "compact"
+        repl.add_output(f"Tool display: {mode}", role="system")
+    else:
+        repl.add_output(f"Unknown option: '{arg}'. Use: compact|verbose|on|off|toggle", role="error")
+
+
 # ---------------------------------------------------------------------------
 # 操作处理函数
 # ---------------------------------------------------------------------------
@@ -1061,6 +1087,14 @@ COMMAND_REGISTRY: List[CommandDef] = [
         handler_name="_cmd_yolo",
         subcommands=("on", "off", "status"),
     ),
+    CommandDef(
+        name="tools",
+        description="切换工具调用显示模式",
+        category="Configuration",
+        aliases=(),
+        args_hint="[compact|verbose|on|off|toggle]",
+        handler_name="_cmd_tools",
+    ),
 
     # Info
     CommandDef(
@@ -1161,6 +1195,7 @@ _HANDLER_MAP: Dict[str, Callable] = {
     "_cmd_version": _cmd_version,
     "_cmd_connect": _cmd_connect,
     "_cmd_yolo": _cmd_yolo,
+    "_cmd_tools": _cmd_tools,
 }
 
 
@@ -1255,6 +1290,7 @@ class SlashCommandCompleter(Completer):
         "models": ["--api", "--config"],
         "skills": ["list", "view", "search", "install"],
         "yolo": ["on", "off", "status"],
+        "tools": ["compact", "verbose", "on", "off", "toggle"],
         "connect": ["openai", "anthropic", "deepseek", "ollama"],
     }
 
