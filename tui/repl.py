@@ -287,17 +287,31 @@ class GrassFlowREPL:
     def _handle_agent_message(self, text: str) -> None:
         self._api_start_time = time.monotonic()
         self.add_output(text, role="user")
+        # Persist user message to session DB
+        if self.session and self.session_mgr:
+            try:
+                self.session_mgr.add_user_message(self.session.id, text)
+            except Exception:
+                pass
         if not self._agent.is_initialized:
             self.add_output(
                 "No agent loop available. Set up an LLM provider to enable AI responses.\n"
                 "Use /help for available commands.", role="system",
             )
             return
+        # Extract thinking config from session metadata
+        reasoning_effort = None
+        if self.session:
+            thinking = self.session.metadata.get("thinking", {})
+            if thinking.get("enabled", False):
+                reasoning_effort = thinking.get("effort", "medium")
+
         if self.app and self.app.loop and self.app.loop.is_running():
             self.app.loop.create_task(self._run_agent_loop_async(text))
         else:
             self._agent.process_in_background(
                 text=text, history=self._build_history(), system_prompt=self._get_system_prompt(),
+                reasoning_effort=reasoning_effort,
             )
 
     # ==================== Agent Loop 事件处理 ====================
@@ -322,6 +336,14 @@ class GrassFlowREPL:
         elif etype == "text_end":
             self._flush_stream()
             self._reset_stream_state()
+            # Persist assistant response to session DB
+            if self.session and self.session_mgr and self.output:
+                last = self.output[-1]
+                if last.role == "assistant" and last.text.strip():
+                    try:
+                        self.session_mgr.add_assistant_message(self.session.id, last.text)
+                    except Exception:
+                        pass
         elif etype == "thinking_delta":
             token = data.get("text", "")
             # thinking 块用 dim 斜体打印
@@ -371,10 +393,18 @@ class GrassFlowREPL:
 
     async def _run_agent_loop_async(self, text: str) -> None:
         """在 pt 事件循环中运行 Agent Loop（流式输出）"""
+        # Extract thinking config from session metadata
+        reasoning_effort = None
+        if self.session:
+            thinking = self.session.metadata.get("thinking", {})
+            if thinking.get("enabled", False):
+                reasoning_effort = thinking.get("effort", "medium")
+
         try:
             self._reset_stream_state()
             async for event in self._agent.process_streaming(
                 text=text, history=self._build_history(), system_prompt=self._get_system_prompt(),
+                reasoning_effort=reasoning_effort,
             ):
                 if self._apply_event(event.type, event.data):
                     break
@@ -413,14 +443,26 @@ class GrassFlowREPL:
 
     def _get_system_prompt(self) -> str:
         cwd = os.getcwd()
-        return (
+        base = (
             f"You are GrassFlow AI assistant, running inside the GrassFlow REPL.\n\n"
             f"Current directory: {cwd}\n"
             f"You can help users with:\n"
             f"- Creating and managing workflows\n- Writing code and analyzing files\n"
             f"- Running commands and debugging\n\n"
-            f"Be concise and helpful. Use tools when needed to complete tasks."
         )
+
+        # Inject skills prompt if available
+        try:
+            from tui.skills_system import get_skills_manager
+            skills_mgr = get_skills_manager()
+            skills_prompt = skills_mgr.build_skills_prompt()
+            if skills_prompt:
+                base += skills_prompt + "\n\n"
+        except Exception:
+            pass
+
+        base += "Be concise and helpful. Use tools when needed to complete tasks."
+        return base
 
     def _interrupt_agent(self) -> None:
         self._agent.interrupt()
@@ -523,6 +565,15 @@ class GrassFlowREPL:
         )
 
     def _cleanup(self) -> None:
+        # Shutdown MCP servers
+        if hasattr(self._agent, '_mcp_manager') and self._agent._mcp_manager:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(self._agent._mcp_manager.stop_all())
+                loop.close()
+            except Exception:
+                pass
         print("\n  Goodbye!\n")
 
     def stop(self) -> None:

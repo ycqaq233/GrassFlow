@@ -456,11 +456,21 @@ def _cmd_agent(repl, args: List[str]) -> None:
 
 def _cmd_mcp(repl, args: List[str]) -> None:
     """MCP 服务器管理"""
+    # Show runtime state if available
+    mcp_mgr = getattr(getattr(repl, '_agent', None), '_mcp_manager', None)
+    if mcp_mgr:
+        try:
+            summary = mcp_mgr.get_tools_summary()
+            repl.add_output(summary, role="system")
+            return
+        except Exception:
+            pass
+    # Fallback to config display
     try:
         from tui.config_integration import get_mcp_servers
         mcp_servers = get_mcp_servers()
         if mcp_servers:
-            lines = ["  MCP servers:"]
+            lines = ["  MCP servers (from config, not started):"]
             for name, srv in mcp_servers.items():
                 lines.append(f"    - {name}")
             repl.add_output("\n".join(lines), role="system")
@@ -472,11 +482,13 @@ def _cmd_mcp(repl, args: List[str]) -> None:
 
 def _cmd_skills(repl, args: List[str]) -> None:
     """浏览技能列表"""
-    repl.add_output(
-        "Skills browser not yet implemented.\n"
-        "Use /help to see available commands.",
-        role="system",
-    )
+    try:
+        from tui.skills_system import get_skills_manager
+        skills_mgr = get_skills_manager()
+        summary = skills_mgr.get_skills_summary()
+        repl.add_output(summary, role="system")
+    except Exception as e:
+        repl.add_output(f"Skills system error: {e}", role="error")
 
 
 def _cmd_copy(repl, args: List[str]) -> None:

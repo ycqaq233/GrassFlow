@@ -968,3 +968,41 @@ def reset_default_registry() -> ToolRegistry:
     global _default_registry
     _default_registry = ToolRegistry()
     return _default_registry
+
+
+def register_builtin_tools(registry: Optional[ToolRegistry] = None) -> int:
+    """Register all built-in tools from tools/ package into the core registry.
+
+    Uses the LegacyToolAdapter bridge to convert tools.tool.Tool instances
+    into core.tool_registry.BaseTool instances.
+
+    Args:
+        registry: Target registry. Defaults to the global singleton.
+
+    Returns:
+        Number of tools successfully registered.
+    """
+    registry = registry or get_default_registry()
+    from tools.bridge import LegacyToolAdapter
+    from tools.shell import ShellTool
+    from tools.read import ReadTool
+    from tools.write import WriteTool
+    from tools.glob import GlobTool
+    from tools.grep import GrepTool
+
+    count = 0
+    for tool_cls in [ShellTool, ReadTool, WriteTool, GlobTool, GrepTool]:
+        try:
+            instance = tool_cls()
+            # Skip if already registered (e.g., from a previous call)
+            if registry.has(instance.id):
+                continue
+            adapter = LegacyToolAdapter(instance)
+            registry.register(adapter)
+            count += 1
+        except Exception as e:
+            logger.warning("Failed to register builtin tool %s: %s", tool_cls.__name__, e)
+
+    if count:
+        logger.info("Registered %d builtin tools into core registry", count)
+    return count
