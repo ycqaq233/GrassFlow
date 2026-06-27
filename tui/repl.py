@@ -987,14 +987,7 @@ class GrassFlowREPL:
         from prompt_toolkit.patch_stdout import patch_stdout
         try:
             with patch_stdout():
-                # 推送光标到终端底部（hermes 技巧）
-                try:
-                    term_lines = shutil.get_terminal_size().lines
-                    if term_lines > 2:
-                        print("\n" * (term_lines - 1), end="", flush=True)
-                except Exception:
-                    pass
-                # 打印 banner（在光标推送之后，确保用户可见）
+                # 打印 banner
                 cprint(BANNER)
                 cprint("  GrassFlow REPL\n  Type /help for commands, /exit to quit.")
                 self.app.run()
