@@ -57,6 +57,30 @@ def _get_default_provider() -> str:
         return "deepseek"
 
 
+def _resolve_model_for_provider(model_name: str, provider: str) -> str:
+    """解析模型名称，如果当前 provider 中不存在该模型则回退到默认模型。
+
+    解决工作流文件硬编码 'gpt-4' 但系统使用 DeepSeek 时的模型不匹配问题。
+    """
+    try:
+        from core.config import config_manager
+        config = config_manager.load_config()
+        provider_config = config.provider.get(provider)
+        if provider_config and provider_config.models:
+            # 去掉 provider/ 前缀进行比较
+            bare_name = model_name.split("/")[-1] if "/" in model_name else model_name
+            if bare_name not in provider_config.models:
+                fallback = config.llm.default_model
+                display.print_info(
+                    f"  Model '{bare_name}' not found in provider '{provider}', "
+                    f"falling back to default: {fallback}"
+                )
+                return fallback
+    except Exception:
+        pass
+    return model_name
+
+
 @click.group()
 @click.version_option(version="0.1.0")
 def main():
@@ -70,7 +94,7 @@ def main():
 # ==================== run 命令 ====================
 
 @main.command()
-@click.argument("workflow_file", type=click.Path(exists=True))
+@click.argument("workflow_file")
 @click.option("--model", "-m", default=None, help="使用的模型（格式: provider/model，默认使用配置中的默认模型）")
 @click.option("--provider", "-p", default=None, help="LLM 提供商（默认使用配置中的默认值）")
 @click.option("--api-key", "-k", help="API key for LLM")
@@ -83,6 +107,16 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
     使用配置中的默认模型，支持 --model 和 --provider 选项覆盖。
     """
     try:
+        # 检查文件是否存在，并提供有用的错误提示
+        if not os.path.exists(workflow_file):
+            if not workflow_file.endswith((".af", ".json", ".yaml", ".yml")):
+                display.print_error(
+                    f"'{workflow_file}' is not a workflow file.\n"
+                    f"  If you want to run a single prompt, use: grassflow ask \"{workflow_file}\""
+                )
+            else:
+                display.print_error(f"Workflow file not found: {workflow_file}")
+            sys.exit(1)
         # 从配置获取默认值
         default_model = _get_default_model()
         effective_model = model or default_model
@@ -110,9 +144,12 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
                     rules=rules,
                 )
             else:
+                # 解析模型名称：如果工作流指定的模型在当前 provider 中不存在，回退到默认模型
+                raw_model = agent_config.model or effective_model
+                resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
                 agent = LLMAgent(
                     name=agent_config.name,
-                    model=agent_config.model or effective_model,
+                    model=resolved_model,
                     prompt=agent_config.prompt,
                     input_schema=agent_config.input_schema,
                     output_schema=agent_config.output_schema,
@@ -505,6 +542,7 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
     """执行工作流并实时监控"""
     try:
         effective_model = model or _get_default_model()
+        effective_provider = _get_default_provider()
 
         display.print_info(f"Loading workflow from {workflow_file}...")
         workflow = parse_file(workflow_file)
@@ -518,9 +556,12 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
                 rules = getattr(agent_config, 'rules', [])
                 agent = ConditionAgent(name=agent_config.name, rules=rules)
             else:
+                # 解析模型名称：如果工作流指定的模型在当前 provider 中不存在，回退到默认模型
+                raw_model = agent_config.model or effective_model
+                resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
                 agent = LLMAgent(
                     name=agent_config.name,
-                    model=agent_config.model or effective_model,
+                    model=resolved_model,
                     prompt=agent_config.prompt,
                     input_schema=agent_config.input_schema,
                     output_schema=agent_config.output_schema,

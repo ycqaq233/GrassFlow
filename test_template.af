@@ -3,14 +3,12 @@
 
 workflow ticket_processing {
   agent classify {
-    model: "gpt-4"
     prompt: "分类工单: {input}"
     input_schema: {'ticket': 'string'}
     output_schema: {'category': 'string'}
   }
 
   agent priority {
-    model: "gpt-4"
     prompt: "判断优先级: {input}"
     input_schema: {'ticket': 'string'}
     output_schema: {'priority': 'string'}
@@ -18,17 +16,14 @@ workflow ticket_processing {
 
   agent route {
     type: "condition"
-    model: "gpt-4"
   }
 
   agent human {
     type: "manual"
-    model: "gpt-4"
     prompt: "人工处理工单"
   }
 
   agent bot {
-    model: "gpt-4"
     prompt: "自动回复: {input}"
     input_schema: {'ticket': 'string', 'category': 'string'}
     output_schema: {'response': 'string'}
