@@ -546,13 +546,13 @@ class SkillsManager:
 
         for skill in skills_sorted:
             if skill.description:
-                lines.append(f"- **{skill.name}**: {skill.description}")
+                lines.append(f"- /{skill.name}: {skill.description}")
             else:
-                lines.append(f"- **{skill.name}**")
+                lines.append(f"- /{skill.name}")
 
         lines.append("")
         lines.append(
-            "To use a skill, the user will type /skill-name. "
+            "User can type /skill-name to load a skill. "
             "When a skill is loaded, follow its instructions."
         )
 

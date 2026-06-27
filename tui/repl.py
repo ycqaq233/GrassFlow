@@ -862,26 +862,9 @@ class GrassFlowREPL:
         try:
             from tui.skills_system import get_skills_manager
             skills_mgr = get_skills_manager()
-            skills = skills_mgr.list_skills()
-            if skills:
-                skills_sorted = sorted(skills, key=lambda s: s.name)
-                lines = [
-                    "## Available Skills",
-                    "",
-                    "The following skills are available. Use a skill when it is relevant to the task.",
-                    "",
-                ]
-                for skill in skills_sorted:
-                    if skill.description:
-                        lines.append(f"- **{skill.name}**: {skill.description}")
-                    else:
-                        lines.append(f"- **{skill.name}**")
-                lines.append("")
-                lines.append(
-                    "To use a skill, the user will type /skill-name. "
-                    "When a skill is loaded, follow its instructions."
-                )
-                base += "\n".join(lines) + "\n\n"
+            skills_prompt = skills_mgr.build_skills_prompt()
+            if skills_prompt:
+                base += skills_prompt + "\n\n"
         except Exception:
             pass
         # Inject MCP tools prompt
