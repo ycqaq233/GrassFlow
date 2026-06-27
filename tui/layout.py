@@ -702,12 +702,16 @@ def build_layout(
         multiline=True,
         wrap_lines=True,
         completer=completer,
+        complete_while_typing=True,
     )
     # Replace TextArea's internal buffer with the caller's buffer.
     # Must update both the attribute AND the BufferControl reference,
     # otherwise the BufferControl still uses the auto-created buffer.
     input_area.buffer = input_buffer
     input_area.control.buffer = input_buffer
+    # Ensure BufferControl has completer and complete_while_typing after buffer swap
+    input_area.control.completer = completer
+    input_area.control.complete_while_typing = True
 
     # 分隔线
     input_rule_top = Window(height=1, char="─", style="class:frame-border")
@@ -955,6 +959,7 @@ def build_keybindings(callbacks: KeybindingCallbacks) -> KeyBindings:
         buffer = event.app.current_buffer
         if buffer.completer:
             buffer.start_completion()
+            event.app.invalidate()
         else:
             buffer.insert_text("    ")
 
