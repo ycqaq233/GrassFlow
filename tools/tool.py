@@ -91,6 +91,11 @@ class Tool(ABC):
         pass
 
     @property
+    def name(self) -> str:
+        """工具名称（别名，等同于 id）"""
+        return self.id
+
+    @property
     @abstractmethod
     def description(self) -> str:
         """工具描述（供 LLM 理解）"""
