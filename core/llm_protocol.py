@@ -1437,6 +1437,7 @@ class ProtocolLLMClient:
         max_tokens: Optional[int] = None,
         stream: bool = False,
         reasoning_effort: Optional[str] = None,
+        tools: Optional[List[ToolDefinition]] = None,
         **kwargs,
     ) -> "LLMResponse":
         """
@@ -1489,6 +1490,7 @@ class ProtocolLLMClient:
         request = self._model.make_request(
             messages=proto_messages,
             system=system_messages,
+            tools=tools,
             options=options,
             stream=stream,
             **kwargs,
@@ -1515,6 +1517,7 @@ class ProtocolLLMClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         reasoning_effort: Optional[str] = None,
+        tools: Optional[List[ToolDefinition]] = None,
         **kwargs,
     ) -> AsyncIterator[LLMEvent]:
         """
@@ -1558,6 +1561,7 @@ class ProtocolLLMClient:
         async for event in self._model.stream_events(
             messages=proto_messages,
             system=system_messages,
+            tools=tools,
             options=options,
             **kwargs,
         ):

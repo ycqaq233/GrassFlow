@@ -694,6 +694,7 @@ class AgentLoop:
                         temperature=self._generation_options.temperature or 0.7,
                         max_tokens=self._generation_options.max_tokens,
                         reasoning_effort=reasoning_effort or self._generation_options.reasoning_effort,
+                        tools=all_tools,
                     ):
                         if self._abort_signal.is_set():
                             break
@@ -949,11 +950,13 @@ class AgentLoop:
                         msg["name"] = m["name"]
                     chat_messages.append(msg)
 
+                all_tools = self._gather_tool_definitions()
                 response = await self._client.chat(
                     messages=chat_messages,
                     temperature=self._generation_options.temperature or 0.7,
                     max_tokens=self._generation_options.max_tokens,
                     reasoning_effort=reasoning_effort or self._generation_options.reasoning_effort,
+                    tools=all_tools,
                 )
 
                 # 转换回 LLMResponse（ProtocolLLMClient.chat 返回 _LegacyLLMResponse）
