@@ -31,7 +31,7 @@ class LLMClient:
 
     def __init__(
         self,
-        model: str = "gpt-4",
+        model: str = "default",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: int = 60,
@@ -176,7 +176,7 @@ class LLMManager:
     def create(
         self,
         name: str,
-        model: str = "gpt-4",
+        model: str = "default",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         **kwargs,

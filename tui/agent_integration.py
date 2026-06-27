@@ -117,8 +117,9 @@ class AgentIntegration:
             # 2. Start MCP servers and register MCP tools
             try:
                 from tui.mcp_integration import MCPManager
-                from tui.config_integration import config_manager as _cfg
-                mcp_config = getattr(_cfg, 'mcp_servers', None)
+                from tui.config_integration import load_config as _load_cfg
+                _cfg_obj = _load_cfg()
+                mcp_config = _cfg_obj.mcp_servers if _cfg_obj.mcp_servers else None
                 if mcp_config:
                     self._mcp_manager = MCPManager()
                     self._mcp_manager.load_config({"mcp_servers": mcp_config})

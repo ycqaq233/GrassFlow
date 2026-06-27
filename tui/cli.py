@@ -70,7 +70,7 @@ def main():
 # ==================== run 命令 ====================
 
 @main.command()
-@click.argument("workflow_file", type=click.Path(exists=True))
+@click.argument("workflow_file")
 @click.option("--model", "-m", default=None, help="使用的模型（格式: provider/model，默认使用配置中的默认模型）")
 @click.option("--provider", "-p", default=None, help="LLM 提供商（默认使用配置中的默认值）")
 @click.option("--api-key", "-k", help="API key for LLM")
@@ -82,6 +82,16 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
 
     使用配置中的默认模型，支持 --model 和 --provider 选项覆盖。
     """
+    # 检查文件是否存在，提供有用的错误提示
+    if not Path(workflow_file).exists():
+        if not workflow_file.endswith(".af"):
+            display.print_error(f"'{workflow_file}' is not a workflow file.")
+            display.print_info("Hint: Use 'grassflow ask \"...\"' for single-prompt execution with tools.")
+            display.print_info("      Use 'grassflow run <file.af>' to execute a workflow file.")
+        else:
+            display.print_error(f"Workflow file not found: {workflow_file}")
+        sys.exit(1)
+
     try:
         # 从配置获取默认值
         default_model = _get_default_model()
@@ -147,10 +157,14 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
 # ==================== save 命令 ====================
 
 @main.command()
-@click.argument("workflow_file", type=click.Path(exists=True))
+@click.argument("workflow_file")
 @click.option("--output", "-o", help="Output file path")
 def save(workflow_file: str, output: Optional[str]):
     """保存工作流"""
+    if not Path(workflow_file).exists():
+        display.print_error(f"Workflow file not found: {workflow_file}")
+        sys.exit(1)
+
     try:
         display.print_info(f"Loading workflow from {workflow_file}...")
         workflow = parse_file(workflow_file)
@@ -195,9 +209,13 @@ def list():
 # ==================== validate 命令 ====================
 
 @main.command()
-@click.argument("workflow_file", type=click.Path(exists=True))
+@click.argument("workflow_file")
 def validate(workflow_file: str):
     """验证工作流文件"""
+    if not Path(workflow_file).exists():
+        display.print_error(f"Workflow file not found: {workflow_file}")
+        sys.exit(1)
+
     try:
         display.print_info(f"Validating {workflow_file}...")
         workflow = parse_file(workflow_file)
@@ -498,11 +516,15 @@ def _generate_dsl(workflow: Workflow) -> str:
 # ==================== monitor 命令 ====================
 
 @main.command()
-@click.argument("workflow_file", type=click.Path(exists=True))
+@click.argument("workflow_file")
 @click.option("--model", "-m", default=None, help="使用的模型")
 @click.option("--watch", "-w", is_flag=True, help="Watch execution in real-time")
 def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
     """执行工作流并实时监控"""
+    if not Path(workflow_file).exists():
+        display.print_error(f"Workflow file not found: {workflow_file}")
+        sys.exit(1)
+
     try:
         effective_model = model or _get_default_model()
 

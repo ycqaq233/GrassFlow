@@ -4,9 +4,76 @@ GrassFlow LLM Agent
 使用 LLM API 的 Agent 实现
 """
 
+import logging
 from typing import Dict, Any, Optional, List
 from core.agent import Agent, AgentConfig
 from core.llm import LLMClient, LLMManager, llm_manager
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_default_model() -> str:
+    """从配置中获取默认模型，而非硬编码 gpt-4。"""
+    try:
+        from core.config import config_manager
+        config = config_manager.load_config()
+        return config.llm.default_model
+    except Exception:
+        return "gpt-4"
+
+
+def _resolve_model(model: str) -> str:
+    """解析模型名称，处理 'default' 和 provider 前缀。
+
+    - 'default' 或空字符串 -> 使用配置中的默认模型
+    - 已有 provider 前缀 (如 'deepseek/xxx') -> 原样返回
+    - 模型名不匹配当前 provider 时 -> 回退到配置默认模型
+
+    这解决了 DSL 工作流硬编码 'gpt-4' 但系统使用 DeepSeek 的问题。
+    """
+    if not model or model == "default":
+        return _resolve_default_model()
+
+    # 如果模型名已包含 provider 前缀，直接返回
+    if "/" in model:
+        return model
+
+    # 检查配置的 provider，判断模型是否匹配
+    try:
+        from core.config import config_manager
+        config = config_manager.load_config()
+        provider = config.llm.default_provider
+        default_model = config.llm.default_model
+
+        # 已知的 provider 模型前缀映射
+        provider_model_prefixes = {
+            "openai": ["gpt-", "o1-", "o3-", "o4-"],
+            "deepseek": ["deepseek-"],
+            "anthropic": ["claude-"],
+            "ollama": [],  # ollama 模型名格式不固定
+        }
+
+        prefixes = provider_model_prefixes.get(provider, [])
+
+        # 如果有前缀列表，检查模型是否匹配当前 provider
+        if prefixes:
+            matches_provider = any(model.startswith(p) for p in prefixes)
+            if not matches_provider:
+                # 模型不匹配当前 provider，回退到默认模型
+                logger.info(
+                    "Model '%s' does not match provider '%s', using default: %s",
+                    model, provider, default_model,
+                )
+                return default_model
+
+        # deepseek 模型需要前缀才能被 LiteLLM 正确路由
+        if provider == "deepseek" and "deepseek" in model.lower() and "/" not in model:
+            return f"deepseek/{model}"
+
+    except Exception:
+        pass
+
+    return model
 
 
 class LLMAgent(Agent):
@@ -28,7 +95,7 @@ class LLMAgent(Agent):
     def __init__(
         self,
         name: str,
-        model: str = "gpt-4",
+        model: str = "default",
         prompt: str = "",
         input_schema: Optional[Dict[str, Any]] = None,
         output_schema: Optional[Dict[str, Any]] = None,
@@ -53,9 +120,14 @@ class LLMAgent(Agent):
             llm_client: LLM 客户端实例（优先使用）
             llm_manager: LLM 管理器（用于获取客户端）
         """
+        # 解析模型名称（处理 'default'、provider 前缀等）
+        resolved_model = _resolve_model(model)
+        if resolved_model != model:
+            logger.debug("Model resolved: %s -> %s", model, resolved_model)
+
         config = AgentConfig(
             name=name,
-            model=model,
+            model=resolved_model,
             prompt=prompt,
             input_schema=input_schema or {},
             output_schema=output_schema or {},
@@ -71,11 +143,11 @@ class LLMAgent(Agent):
             self._client = llm_client
         else:
             manager = llm_manager or globals()["llm_manager"]
-            # 如果客户端不存在，创建一个
+            # 如果客户端不存在，创建一个（使用解析后的模型名）
             try:
-                self._client = manager.get(model)
+                self._client = manager.get(resolved_model)
             except Exception:
-                self._client = manager.create(model, model=model)
+                self._client = manager.create(resolved_model, model=resolved_model)
 
     def _format_prompt(self, input_data: Dict[str, Any]) -> str:
         """
@@ -185,7 +257,7 @@ class LLMAgentFactory:
     def create(
         self,
         name: str,
-        model: str = "gpt-4",
+        model: str = "default",
         prompt: str = "",
         **kwargs,
     ) -> LLMAgent:
