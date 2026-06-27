@@ -3,18 +3,25 @@ GrassFlow MCP (Model Context Protocol) 客户端集成
 
 参考 hermes 的 MCP 实现架构，为 GrassFlow REPL 提供：
 - MCP 服务器配置加载与管理
-- stdio / HTTP / SSE 三种传输方式（stdio 完整实现，HTTP/SSE 骨架）
+- stdio / HTTP / SSE 三种传输方式（全部完整实现）
 - JSON-RPC 2.0 协议通信
 - 动态工具发现（tools/list）
 - 工具调用（tools/call）
 - 自动重连（指数退避）
 - 工具过滤（include / exclude）
+- 传输类型自动检测（根据配置字段推断）
 
 设计要点：
 - 每个 MCP 服务器对应一个长生命周期 asyncio Task
-- 不依赖 mcp 库，使用原生 asyncio + subprocess
-- JSON-RPC 2.0 消息格式（Content-Length 头 + JSON 体）
+- 不依赖 mcp 库，使用原生 asyncio + subprocess + httpx
+- JSON-RPC 2.0 消息格式（Content-Length 头 + JSON 体用于 stdio）
 - MCP 协议版本：2024-11-05
+
+传输类型自动检测规则：
+- 配置中存在 "command" 字段 → stdio 传输
+- 配置中存在 "url" 字段 → HTTP 传输（Streamable HTTP）
+- 配置中存在 "sse_url" 字段 → SSE 传输
+- 显式指定 "transport" 字段时优先使用
 """
 
 from __future__ import annotations
@@ -24,9 +31,12 @@ import json
 import logging
 import os
 import shutil
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from core.tool_registry import (
     MCPToolAdapter,
@@ -72,12 +82,467 @@ MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_BASE_DELAY = 1.0  # 秒，指数退避基数
 
 
+# ==================== 传输抽象层 ====================
+
+
+class _Transport(ABC):
+    """MCP 传输抽象基类
+
+    所有传输方式（stdio、HTTP、SSE）的统一接口。
+    """
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """建立连接"""
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """断开连接"""
+
+    @abstractmethod
+    async def send_jsonrpc(self, message: Dict[str, Any],
+                           timeout: float = 30.0) -> Optional[Dict[str, Any]]:
+        """发送 JSON-RPC 请求并等待响应
+
+        Args:
+            message: JSON-RPC 消息（包含 jsonrpc, id, method, params 等）
+            timeout: 等待响应的超时时间（秒）
+
+        Returns:
+            响应消息字典，超时返回 None。
+            对于通知消息（无 id），返回 None 表示已发送。
+
+        Raises:
+            MCPConnectionError: 连接异常
+        """
+
+    @property
+    @abstractmethod
+    def is_connected(self) -> bool:
+        """是否已连接"""
+
+
+class _StdioTransport(_Transport):
+    """Stdio 传输实现
+
+    通过子进程的 stdin/stdout 进行 JSON-RPC 通信。
+    使用 Content-Length 头 + JSON 体的消息格式。
+    """
+
+    def __init__(self, process: asyncio.subprocess.Process):
+        self._process = process
+
+    async def connect(self) -> None:
+        """stdio 传输在创建子进程时已连接，无需额外操作"""
+
+    async def disconnect(self) -> None:
+        """终止子进程"""
+        if self._process and self._process.returncode is None:
+            try:
+                self._process.terminate()
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    self._process.kill()
+                    await self._process.wait()
+            except ProcessLookupError:
+                pass
+        self._process = None  # type: ignore[assignment]
+
+    async def send_jsonrpc(self, message: Dict[str, Any],
+                           timeout: float = 30.0) -> Optional[Dict[str, Any]]:
+        """通过 stdin 发送 JSON-RPC 消息，从 stdout 读取响应"""
+        if self._process is None or self._process.stdin is None:
+            raise MCPConnectionError("stdio 传输未连接")
+
+        # 发送消息
+        body = json.dumps(message, ensure_ascii=False).encode("utf-8")
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
+        self._process.stdin.write(header + body)
+        await self._process.stdin.drain()
+
+        # 如果是通知消息（无 id），不等待响应
+        if "id" not in message:
+            return None
+
+        # 读取响应
+        return await self._read_response(timeout, expected_id=message.get("id"))
+
+    async def _read_response(self, timeout: float,
+                             expected_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """从 stdout 读取一条 JSON-RPC 响应"""
+        if self._process is None or self._process.stdout is None:
+            return None
+
+        loop = asyncio.get_running_loop()
+        msg_deadline = loop.time() + timeout
+
+        async def _read_line() -> Optional[bytes]:
+            remaining = msg_deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            line = await asyncio.wait_for(
+                self._process.stdout.readline(), timeout=remaining  # type: ignore[arg-type]
+            )
+            if not line:
+                return None
+            return line.rstrip(b"\r\n")
+
+        try:
+            # 读取 Content-Length 头
+            content_length = -1
+            while True:
+                line = await _read_line()
+                if line is None:
+                    return None
+                if line == b"":
+                    break
+                header_str = line.decode("utf-8").strip()
+                if header_str.lower().startswith("content-length:"):
+                    content_length = int(header_str.split(":", 1)[1].strip())
+
+            if content_length < 0:
+                logger.warning("收到无 Content-Length 的消息")
+                return None
+
+            # 读取消息体
+            body = b""
+            remaining = content_length
+            while remaining > 0:
+                time_left = msg_deadline - loop.time()
+                if time_left <= 0:
+                    raise asyncio.TimeoutError()
+                chunk = await asyncio.wait_for(
+                    self._process.stdout.read(remaining), timeout=time_left
+                )
+                if not chunk:
+                    return None
+                body += chunk
+                remaining -= len(chunk)
+
+            msg = json.loads(body.decode("utf-8"))
+
+            # 跳过通知消息（无 id 字段），读取下一条
+            if "id" not in msg:
+                logger.debug("跳过 MCP 通知: %s", msg.get("method", "unknown"))
+                return await self._read_response(
+                    timeout=max(0, msg_deadline - loop.time()),
+                    expected_id=expected_id,
+                )
+
+            # 校验响应 id
+            if expected_id is not None and msg.get("id") != expected_id:
+                logger.warning(
+                    "MCP 响应 id 不匹配: 期望 %d, 收到 %s",
+                    expected_id, msg.get("id"),
+                )
+
+            return msg
+
+        except asyncio.TimeoutError:
+            logger.warning("读取 MCP 消息超时 (%.1fs)", timeout)
+            return None
+        except json.JSONDecodeError as exc:
+            logger.warning("MCP 消息 JSON 解析失败: %s", exc)
+            return None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._process is not None and self._process.returncode is None
+
+
+class _HTTPTransport(_Transport):
+    """HTTP 传输实现（Streamable HTTP）
+
+    通过 HTTP POST 发送 JSON-RPC 请求，响应在同一 HTTP 响应中返回。
+    支持自定义请求头（如 Authorization）。
+    """
+
+    def __init__(self, url: str, headers: Optional[Dict[str, str]] = None,
+                 timeout: float = 30.0):
+        self._url = url.rstrip("/")
+        self._base_headers = headers or {}
+        self._timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def connect(self) -> None:
+        """创建 HTTP 客户端并验证连接"""
+        self._client = httpx.AsyncClient(
+            base_url=self._url,
+            headers=self._base_headers,
+            timeout=httpx.Timeout(self._timeout, read=120.0),
+            follow_redirects=True,
+        )
+
+    async def disconnect(self) -> None:
+        """关闭 HTTP 客户端"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+    async def send_jsonrpc(self, message: Dict[str, Any],
+                           timeout: float = 30.0) -> Optional[Dict[str, Any]]:
+        """通过 HTTP POST 发送 JSON-RPC 请求"""
+        if not self._client:
+            raise MCPConnectionError("HTTP 传输未连接")
+
+        # 通知消息（无 id）不等待响应
+        is_notification = "id" not in message
+
+        try:
+            response = await self._client.post(
+                "/mcp",
+                json=message,
+                headers={"Content-Type": "application/json"},
+                timeout=httpx.Timeout(timeout, read=120.0),
+            )
+            response.raise_for_status()
+
+            if is_notification:
+                return None
+
+            result = response.json()
+            return result
+
+        except httpx.TimeoutException:
+            if is_notification:
+                logger.debug("HTTP 通知发送超时: %s", message.get("method"))
+                return None
+            logger.warning("HTTP 请求超时 (%.1fs): %s", timeout, message.get("method"))
+            return None
+        except httpx.HTTPStatusError as exc:
+            raise MCPConnectionError(
+                f"HTTP 错误 {exc.response.status_code}: {exc.response.text[:200]}"
+            )
+        except Exception as exc:
+            raise MCPConnectionError(f"HTTP 请求失败: {exc}")
+
+    @property
+    def is_connected(self) -> bool:
+        return self._client is not None and not self._client.is_closed
+
+
+class _MCPSSETransport(_Transport):
+    """SSE (Server-Sent Events) 传输实现
+
+    通过 SSE 端点获取服务端推送的响应和通知。
+    请求通过 HTTP POST 发送到从 SSE 流中获取的端点 URL。
+    支持自动重连。
+
+    MCP SSE 传输协议流程：
+    1. GET 请求 SSE 端点，建立长连接
+    2. 服务端通过 SSE 事件推送 endpoint URL
+    3. 客户端通过 HTTP POST 向 endpoint URL 发送 JSON-RPC 请求
+    4. 服务端通过 SSE 事件推送响应
+    """
+
+    def __init__(self, url: str, headers: Optional[Dict[str, str]] = None,
+                 timeout: float = 30.0, sse_read_timeout: float = 300.0):
+        self._url = url
+        self._base_headers = headers or {}
+        self._timeout = timeout
+        self._sse_read_timeout = sse_read_timeout
+        self._client: Optional[httpx.AsyncClient] = None
+        self._endpoint_url: Optional[str] = None
+        self._pending_requests: Dict[str, asyncio.Future] = {}
+        self._request_id = 0
+        self._listener_task: Optional[asyncio.Task] = None
+        self._connected = False
+
+    async def connect(self) -> None:
+        """建立 SSE 连接并获取端点 URL"""
+        self._client = httpx.AsyncClient(
+            headers=self._base_headers,
+            timeout=httpx.Timeout(self._timeout, read=self._sse_read_timeout),
+            follow_redirects=True,
+        )
+
+        try:
+            await self._connect_sse()
+            self._connected = True
+        except Exception:
+            await self._client.aclose()
+            self._client = None
+            raise
+
+    async def _connect_sse(self) -> None:
+        """连接到 SSE 端点，获取 endpoint URL"""
+        if not self._client:
+            raise MCPConnectionError("SSE HTTP 客户端未创建")
+
+        logger.debug("连接 SSE 端点: %s", self._url)
+        try:
+            async with self._client.stream("GET", self._url) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("event: endpoint"):
+                        continue
+                    if line.startswith("data: "):
+                        raw = line[6:].strip()
+                        # 端点 URL 可能是相对路径或绝对路径
+                        if raw.startswith("http://") or raw.startswith("https://"):
+                            self._endpoint_url = raw
+                        else:
+                            # 相对路径，基于 SSE URL 构建完整 URL
+                            base = self._url.rstrip("/")
+                            self._endpoint_url = base + raw if raw.startswith("/") else base + "/" + raw
+                        logger.info("SSE 端点 URL: %s", self._endpoint_url)
+                        break
+
+            if not self._endpoint_url:
+                raise MCPConnectionError("SSE 端点未返回 endpoint URL")
+
+            # 启动后台监听任务
+            self._listener_task = asyncio.create_task(
+                self._listen_for_messages(), name="mcp-sse-listener"
+            )
+
+        except httpx.HTTPStatusError as exc:
+            raise MCPConnectionError(
+                f"SSE 连接失败 (HTTP {exc.response.status_code}): {exc.response.text[:200]}"
+            )
+        except MCPConnectionError:
+            raise
+        except Exception as exc:
+            raise MCPConnectionError(f"SSE 连接失败: {exc}")
+
+    async def _listen_for_messages(self) -> None:
+        """后台任务：监听 SSE 流中的消息"""
+        if not self._client:
+            return
+
+        while self._connected:
+            try:
+                async with self._client.stream("GET", self._url) as response:
+                    response.raise_for_status()
+                    current_event = ""
+                    async for line in response.aiter_lines():
+                        if not self._connected:
+                            break
+                        if line.startswith("event: "):
+                            current_event = line[7:].strip()
+                        elif line.startswith("data: "):
+                            data = line[6:].strip()
+                            if current_event == "message":
+                                try:
+                                    msg = json.loads(data)
+                                    self._handle_message(msg)
+                                except json.JSONDecodeError:
+                                    logger.warning("SSE 消息 JSON 解析失败: %s", data[:100])
+                            current_event = ""
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                if not self._connected:
+                    break
+                logger.warning("SSE 监听异常，将在 5 秒后重连: %s", exc)
+                await asyncio.sleep(5.0)
+
+    def _handle_message(self, msg: Dict[str, Any]) -> None:
+        """处理 SSE 流中收到的消息"""
+        msg_id = msg.get("id")
+        if msg_id is not None and str(msg_id) in self._pending_requests:
+            future = self._pending_requests.pop(str(msg_id))
+            if not future.done():
+                if "error" in msg:
+                    error = msg["error"]
+                    future.set_exception(MCPConnectionError(
+                        f"JSON-RPC 错误: {error.get('message', error)}"
+                    ))
+                else:
+                    future.set_result(msg)
+        elif "method" in msg:
+            logger.debug("收到 SSE 通知: %s", msg["method"])
+
+    async def send_jsonrpc(self, message: Dict[str, Any],
+                           timeout: float = 30.0) -> Optional[Dict[str, Any]]:
+        """通过 HTTP POST 发送请求，通过 SSE 流接收响应"""
+        if not self._client or not self._endpoint_url:
+            raise MCPConnectionError("SSE 传输未连接")
+
+        is_notification = "id" not in message
+
+        # 通知消息直接发送，不等待响应
+        if is_notification:
+            try:
+                await self._client.post(
+                    self._endpoint_url,
+                    json=message,
+                    headers={"Content-Type": "application/json"},
+                )
+            except Exception as exc:
+                logger.warning("SSE 通知发送失败: %s", exc)
+            return None
+
+        # 请求消息：注册 Future，发送请求，等待 SSE 流中的响应
+        self._request_id += 1
+        request_id = str(self._request_id)
+        message["id"] = request_id
+
+        future: asyncio.Future[Dict[str, Any]] = asyncio.get_event_loop().create_future()
+        self._pending_requests[request_id] = future
+
+        try:
+            await self._client.post(
+                self._endpoint_url,
+                json=message,
+                headers={"Content-Type": "application/json"},
+            )
+        except Exception as exc:
+            self._pending_requests.pop(request_id, None)
+            raise MCPConnectionError(f"SSE 请求发送失败: {exc}")
+
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending_requests.pop(request_id, None)
+            logger.warning("SSE 请求超时 (%.1fs): %s", timeout, message.get("method"))
+            return None
+
+    async def disconnect(self) -> None:
+        """断开 SSE 连接"""
+        self._connected = False
+
+        if self._listener_task:
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except asyncio.CancelledError:
+                pass
+            self._listener_task = None
+
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+        # 清理未完成的请求
+        for future in self._pending_requests.values():
+            if not future.done():
+                future.set_exception(MCPConnectionError("SSE 连接已关闭"))
+        self._pending_requests.clear()
+
+        self._endpoint_url = None
+        logger.debug("SSE 传输已断开")
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected and self._client is not None
+
+
 # ==================== 数据模型 ====================
 
 
 @dataclass
 class MCPServerConfig:
-    """单个 MCP 服务器的配置"""
+    """单个 MCP 服务器的配置
+
+    传输类型自动检测规则（当 transport 未显式指定时）：
+    - 存在 "command" 字段 → stdio
+    - 存在 "url" 字段 → http
+    - 存在 "sse_url" 字段 → sse
+    显式指定 "transport" 字段时优先使用。
+    """
 
     name: str
     # stdio 传输
@@ -87,9 +552,10 @@ class MCPServerConfig:
     cwd: Optional[str] = None
     # HTTP / SSE 传输
     url: Optional[str] = None
+    sse_url: Optional[str] = None
     headers: Dict[str, str] = field(default_factory=dict)
     # 通用配置
-    transport: str = "stdio"  # stdio / http / sse
+    transport: str = "auto"  # auto / stdio / http / sse
     timeout: int = 120
     connect_timeout: int = 60
     keepalive_interval: int = 10
@@ -97,6 +563,20 @@ class MCPServerConfig:
     # 工具过滤
     tools_include: Optional[List[str]] = None
     tools_exclude: Optional[List[str]] = None
+
+    @property
+    def effective_transport(self) -> str:
+        """获取实际使用的传输类型（解析 auto 检测）"""
+        if self.transport != "auto":
+            return self.transport
+        # 自动检测
+        if self.sse_url:
+            return "sse"
+        if self.url:
+            return "http"
+        if self.command:
+            return "stdio"
+        return "stdio"  # 默认 fallback
 
     def is_tool_allowed(self, tool_name: str) -> bool:
         """检查工具是否被过滤规则允许"""
@@ -124,6 +604,7 @@ class _ServerState:
 
     config: MCPServerConfig
     process: Optional[asyncio.subprocess.Process] = None
+    transport: Optional[_Transport] = None
     task: Optional[asyncio.Task] = None
     tools: Dict[str, MCPTool] = field(default_factory=dict)
     request_id: int = 0
@@ -175,15 +656,38 @@ class MCPManager:
 
         Args:
             config: 完整配置字典，需包含 mcp_servers 键。
-                    格式示例：
+                    支持的配置格式：
+
+                    stdio 传输:
                     {
-                        "mcp_servers": {
-                            "filesystem": {
-                                "command": "npx",
-                                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-                                "transport": "stdio"
-                            }
+                        "filesystem": {
+                            "command": "npx",
+                            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
                         }
+                    }
+
+                    HTTP 传输:
+                    {
+                        "remote-server": {
+                            "url": "http://localhost:8000/mcp",
+                            "headers": {"Authorization": "Bearer xxx"},
+                            "transport": "http"
+                        }
+                    }
+
+                    SSE 传输:
+                    {
+                        "sse-server": {
+                            "sse_url": "http://localhost:8000/sse",
+                            "transport": "sse"
+                        }
+                    }
+
+                    自动检测（推荐）:
+                    {
+                        "server1": {"command": "npx", "args": [...]},
+                        "server2": {"url": "http://localhost:8000/mcp"},
+                        "server3": {"sse_url": "http://localhost:8000/sse"}
                     }
         """
         mcp_servers = config.get("mcp_servers", {})
@@ -196,6 +700,7 @@ class MCPManager:
                 logger.warning("MCP 服务器 %r 配置格式错误，跳过", name)
                 continue
 
+            # 兼容 "mcpServers" 格式（与 hermes/opencode 一致）
             server_config = MCPServerConfig(
                 name=name,
                 command=srv_cfg.get("command"),
@@ -203,8 +708,9 @@ class MCPManager:
                 env=srv_cfg.get("env", {}),
                 cwd=srv_cfg.get("cwd"),
                 url=srv_cfg.get("url"),
+                sse_url=srv_cfg.get("sse_url"),
                 headers=srv_cfg.get("headers", {}),
-                transport=srv_cfg.get("transport", "stdio"),
+                transport=srv_cfg.get("transport", "auto"),
                 timeout=srv_cfg.get("timeout", 120),
                 connect_timeout=srv_cfg.get("connect_timeout", 60),
                 keepalive_interval=srv_cfg.get("keepalive_interval", 10),
@@ -217,16 +723,21 @@ class MCPManager:
                 logger.info("MCP 服务器 %r 已禁用，跳过", name)
                 continue
 
+            effective = server_config.effective_transport
+
             # 校验必要字段
-            if server_config.transport == "stdio" and not server_config.command:
+            if effective == "stdio" and not server_config.command:
                 logger.warning("MCP 服务器 %r 使用 stdio 传输但未指定 command，跳过", name)
                 continue
-            if server_config.transport in ("http", "sse") and not server_config.url:
-                logger.warning("MCP 服务器 %r 使用 %s 传输但未指定 url，跳过", name, server_config.transport)
+            if effective == "http" and not server_config.url:
+                logger.warning("MCP 服务器 %r 使用 http 传输但未指定 url，跳过", name)
+                continue
+            if effective == "sse" and not server_config.sse_url:
+                logger.warning("MCP 服务器 %r 使用 sse 传输但未指定 sse_url，跳过", name)
                 continue
 
             self._servers[name] = _ServerState(config=server_config)
-            logger.info("已加载 MCP 服务器配置: %r (transport=%s)", name, server_config.transport)
+            logger.info("已加载 MCP 服务器配置: %r (transport=%s)", name, effective)
 
     # -------------------- 生命周期 --------------------
 
@@ -278,12 +789,14 @@ class MCPManager:
 
         while attempt < MAX_RECONNECT_ATTEMPTS and not state.stopping:
             try:
-                if config.transport == "stdio":
+                transport_type = config.effective_transport
+
+                if transport_type == "stdio":
                     await self._start_stdio_server(name, config)
-                elif config.transport in ("http", "sse"):
-                    await self._start_http_server(name, config)
+                elif transport_type in ("http", "sse"):
+                    await self._start_remote_server(name, config, transport_type)
                 else:
-                    logger.error("不支持的 MCP 传输类型: %r", config.transport)
+                    logger.error("不支持的 MCP 传输类型: %r", transport_type)
                     return
 
                 # 连接成功，重置重连计数
@@ -293,9 +806,14 @@ class MCPManager:
                 # Re-register tools after reconnect
                 self.register_tools_to_registry()
 
-                # 等待进程结束（或被停止）
+                # 等待连接结束（或被停止）
                 if state.process:
+                    # stdio 传输：等待子进程退出
                     await state.process.wait()
+                else:
+                    # HTTP/SSE 传输：等待停止信号
+                    while not state.stopping and state.transport and state.transport.is_connected:
+                        await asyncio.sleep(1.0)
 
                 state.connected = False
 
@@ -304,10 +822,10 @@ class MCPManager:
 
                 attempt += 1
                 if attempt >= MAX_RECONNECT_ATTEMPTS:
-                    logger.error("MCP 服务器 %r 进程反复退出，重连 %d 次后放弃", name, attempt)
+                    logger.error("MCP 服务器 %r 连接反复断开，重连 %d 次后放弃", name, attempt)
                     break
                 delay = RECONNECT_BASE_DELAY * (2 ** (attempt - 1))
-                logger.warning("MCP 服务器 %r 进程退出，%.1fs 后重连 (%d/%d)", name, delay, attempt, MAX_RECONNECT_ATTEMPTS)
+                logger.warning("MCP 服务器 %r 连接断开，%.1fs 后重连 (%d/%d)", name, delay, attempt, MAX_RECONNECT_ATTEMPTS)
                 await asyncio.sleep(delay)
 
             except Exception as exc:
@@ -352,13 +870,14 @@ class MCPManager:
 
         state = self._servers[name]
         state.process = process
+        state.transport = _StdioTransport(process)
 
         try:
             # MCP 握手：initialize -> notifications/initialized
-            await self._do_handshake(name, process, config)
+            await self._do_handshake(name, state.transport, config)
 
             # 工具发现
-            await self._discover_tools(name, process, config)
+            await self._discover_tools(name, state.transport, config)
         except Exception:
             # Kill leaked process on handshake/discovery failure
             try:
@@ -370,22 +889,62 @@ class MCPManager:
                 except ProcessLookupError:
                     pass
             state.process = None
+            state.transport = None
             raise
 
         logger.info("MCP 服务器 %r 就绪，发现 %d 个工具", name, len(state.tools))
 
-    async def _start_http_server(self, name: str, config: MCPServerConfig) -> None:
-        """通过 HTTP/SSE 启动 MCP 服务器（骨架实现）
+    async def _start_remote_server(self, name: str, config: MCPServerConfig,
+                                   transport_type: str) -> None:
+        """通过 HTTP 或 SSE 启动 MCP 服务器
 
-        TODO: 实现 HTTP/SSE 传输
-        - HTTP: POST JSON-RPC 消息到 config.url
-        - SSE: 建立 SSE 连接接收服务端推送
+        Args:
+            name: 服务器名称
+            config: 服务器配置
+            transport_type: 传输类型 ("http" 或 "sse")
         """
-        logger.warning("MCP 服务器 %r: HTTP/SSE 传输尚未实现（骨架）", name)
-        # 模拟连接成功，等待停止信号
         state = self._servers[name]
-        state.connected = True
-        await asyncio.sleep(float("inf"))
+
+        if transport_type == "http":
+            url = config.url
+            if not url:
+                raise MCPConnectionError(f"服务器 {name!r} 未指定 url")
+            transport = _HTTPTransport(
+                url=url,
+                headers=config.headers or None,
+                timeout=float(config.connect_timeout),
+            )
+            logger.info("连接 MCP 服务器 %r (HTTP): %s", name, url)
+        elif transport_type == "sse":
+            sse_url = config.sse_url
+            if not sse_url:
+                raise MCPConnectionError(f"服务器 {name!r} 未指定 sse_url")
+            transport = _MCPSSETransport(
+                url=sse_url,
+                headers=config.headers or None,
+                timeout=float(config.connect_timeout),
+            )
+            logger.info("连接 MCP 服务器 %r (SSE): %s", name, sse_url)
+        else:
+            raise MCPConnectionError(f"不支持的远程传输类型: {transport_type}")
+
+        state.transport = transport
+
+        try:
+            await transport.connect()
+
+            # MCP 握手
+            await self._do_handshake(name, transport, config)
+
+            # 工具发现
+            await self._discover_tools(name, transport, config)
+        except Exception:
+            await transport.disconnect()
+            state.transport = None
+            raise
+
+        logger.info("MCP 服务器 %r 就绪 (%s)，发现 %d 个工具",
+                     name, transport_type, len(state.tools))
 
     async def _stop_server(self, name: str) -> None:
         """停止单个 MCP 服务器"""
@@ -395,7 +954,15 @@ class MCPManager:
 
         state.stopping = True
 
-        # 终止子进程
+        # 断开传输连接
+        if state.transport:
+            try:
+                await state.transport.disconnect()
+            except Exception as exc:
+                logger.warning("MCP 服务器 %r 传输断开异常: %s", name, exc)
+            state.transport = None
+
+        # 终止子进程（stdio 传输额外保障）
         if state.process and state.process.returncode is None:
             try:
                 state.process.terminate()
@@ -422,7 +989,7 @@ class MCPManager:
 
     # -------------------- JSON-RPC 协议 --------------------
 
-    async def _do_handshake(self, name: str, process: asyncio.subprocess.Process,
+    async def _do_handshake(self, name: str, transport: _Transport,
                             config: MCPServerConfig) -> None:
         """执行 MCP 握手：initialize + notifications/initialized"""
         state = self._servers[name]
@@ -442,8 +1009,9 @@ class MCPManager:
             },
         }
         async with state.rpc_lock:
-            await self._send_message(process, init_request)
-            response = await self._read_message(process, timeout=config.connect_timeout, expected_id=init_request['id'])
+            response = await transport.send_jsonrpc(
+                init_request, timeout=config.connect_timeout
+            )
         if response is None:
             raise MCPConnectionError(f"服务器 {name!r} initialize 无响应")
         if "error" in response:
@@ -460,10 +1028,10 @@ class MCPManager:
             "method": "notifications/initialized",
         }
         async with state.rpc_lock:
-            await self._send_message(process, initialized_notification)
+            await transport.send_jsonrpc(initialized_notification)
         logger.debug("MCP 服务器 %r 握手完成", name)
 
-    async def _discover_tools(self, name: str, process: asyncio.subprocess.Process,
+    async def _discover_tools(self, name: str, transport: _Transport,
                               config: MCPServerConfig) -> None:
         """通过 tools/list 发现服务器提供的工具"""
         state = self._servers[name]
@@ -475,8 +1043,9 @@ class MCPManager:
             "method": "tools/list",
         }
         async with state.rpc_lock:
-            await self._send_message(process, list_request)
-            response = await self._read_message(process, timeout=config.timeout, expected_id=list_request['id'])
+            response = await transport.send_jsonrpc(
+                list_request, timeout=config.timeout
+            )
         if response is None:
             logger.warning("MCP 服务器 %r tools/list 无响应", name)
             return
@@ -535,7 +1104,7 @@ class MCPManager:
         if target_state is None:
             raise MCPToolCallError(f"未找到工具: {tool_name}")
 
-        if not target_state.connected or target_state.process is None:
+        if not target_state.connected or target_state.transport is None:
             raise MCPConnectionError(
                 f"MCP 服务器 {target_state.config.name!r} 未连接"
             )
@@ -555,10 +1124,8 @@ class MCPManager:
         }
 
         async with target_state.rpc_lock:
-            await self._send_message(target_state.process, call_request)
-            response = await self._read_message(
-                target_state.process, timeout=target_state.config.timeout,
-                expected_id=call_request['id']
+            response = await target_state.transport.send_jsonrpc(
+                call_request, timeout=target_state.config.timeout
             )
         if response is None:
             raise MCPToolCallError(f"工具 {tool_name} 调用超时")
@@ -569,110 +1136,6 @@ class MCPManager:
             )
 
         return response.get("result", {})
-
-    # -------------------- IO 操作 --------------------
-
-    @staticmethod
-    async def _send_message(process: asyncio.subprocess.Process,
-                            message: Dict[str, Any]) -> None:
-        """通过 stdin 发送 JSON-RPC 消息（Content-Length 头 + JSON 体）"""
-        if process.stdin is None:
-            raise MCPConnectionError("进程 stdin 不可用")
-
-        body = json.dumps(message, ensure_ascii=False).encode("utf-8")
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
-
-        process.stdin.write(header + body)
-        await process.stdin.drain()
-
-    @staticmethod
-    async def _read_message(process: asyncio.subprocess.Process,
-                            timeout: float = 30.0,
-                            expected_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        """从 stdout 读取一条 JSON-RPC 消息
-
-        协议格式：
-            Content-Length: <length>\r\n
-            \r\n
-            <JSON body>
-
-        Returns:
-            解析后的 JSON 字典，超时或 EOF 返回 None
-        """
-        if process.stdout is None:
-            return None
-
-        loop = asyncio.get_running_loop()
-        msg_deadline = loop.time() + timeout
-
-        async def _read_line() -> Optional[bytes]:
-            """读取一行（以 \\r\\n 结尾），使用 deadline 累计超时"""
-            remaining = msg_deadline - loop.time()
-            if remaining <= 0:
-                raise asyncio.TimeoutError()
-            line = await asyncio.wait_for(
-                process.stdout.readline(), timeout=remaining  # type: ignore[arg-type]
-            )
-            if not line:
-                return None  # EOF
-            return line.rstrip(b"\r\n")
-
-        try:
-            # 读取 Content-Length 头
-            content_length = -1
-            while True:
-                line = await _read_line()
-                if line is None:
-                    return None
-                if line == b"":
-                    break
-                header_str = line.decode("utf-8").strip()
-                if header_str.lower().startswith("content-length:"):
-                    content_length = int(header_str.split(":", 1)[1].strip())
-
-            if content_length < 0:
-                logger.warning("收到无 Content-Length 的消息")
-                return None
-
-            # 读取消息体 -- 使用剩余 deadline
-            body = b""
-            remaining = content_length
-            while remaining > 0:
-                time_left = msg_deadline - loop.time()
-                if time_left <= 0:
-                    raise asyncio.TimeoutError()
-                chunk = await asyncio.wait_for(
-                    process.stdout.read(remaining), timeout=time_left
-                )
-                if not chunk:
-                    return None  # EOF
-                body += chunk
-                remaining -= len(chunk)
-
-            msg = json.loads(body.decode("utf-8"))
-
-            # Skip notifications (no id field) -- read next message
-            if 'id' not in msg:
-                logger.debug("Skipping MCP notification: %s", msg.get('method', 'unknown'))
-                return await MCPManager._read_message(
-                    process, timeout=max(0, msg_deadline - loop.time()), expected_id=expected_id
-                )
-
-            # Validate response id matches request
-            if expected_id is not None and msg.get('id') != expected_id:
-                logger.warning(
-                    "MCP response id mismatch: expected %d, got %s",
-                    expected_id, msg.get('id')
-                )
-
-            return msg
-
-        except asyncio.TimeoutError:
-            logger.warning("读取 MCP 消息超时 (%.1fs)", timeout)
-            return None
-        except json.JSONDecodeError as exc:
-            logger.warning("MCP 消息 JSON 解析失败: %s", exc)
-            return None
 
     # -------------------- 查询接口 --------------------
 
@@ -726,7 +1189,7 @@ class MCPManager:
             return None
         return {
             "name": name,
-            "transport": state.config.transport,
+            "transport": state.config.effective_transport,
             "connected": state.connected,
             "tools_count": len(state.tools),
             "tools": [t.name for t in state.tools.values()],
@@ -743,7 +1206,7 @@ class MCPManager:
 
         for name, state in self._servers.items():
             status = "已连接" if state.connected else "未连接"
-            transport = state.config.transport
+            transport = state.config.effective_transport
             lines.append(f"  {name} ({transport}) — {status}")
 
             if state.tools:
