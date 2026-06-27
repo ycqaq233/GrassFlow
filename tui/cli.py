@@ -81,6 +81,24 @@ def _resolve_model_for_provider(model_name: str, provider: str) -> str:
     return model_name
 
 
+def _setup_terminal_encoding():
+    """Configure terminal encoding for UTF-8 (fixes Chinese character garbling)."""
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            os.system("chcp 65001 > nul 2>&1")
+        except Exception:
+            pass
+
+
 @click.group()
 @click.version_option(version="0.1.0")
 def main():
@@ -88,7 +106,7 @@ def main():
 
     声明式 DSL 语法 + DAG 并行调度引擎
     """
-    pass
+    _setup_terminal_encoding()
 
 
 # ==================== run 命令 ====================

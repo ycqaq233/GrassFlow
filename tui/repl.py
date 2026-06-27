@@ -997,6 +997,16 @@ class GrassFlowREPL:
 
     def run(self) -> None:
         self._running, self._should_exit = True, False
+        # Ensure UTF-8 encoding for terminal I/O (fixes Chinese character garbling)
+        os.environ["PYTHONIOENCODING"] = "utf-8"
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
         self._init_session()
         # Register /skill-name commands after session init
         register_skill_commands()

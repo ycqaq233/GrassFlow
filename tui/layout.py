@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re as _re
 import shutil
+import sys
 from collections import deque
 from io import StringIO
 from datetime import datetime
@@ -299,6 +300,18 @@ def format_output_line(entry: OutputEntry) -> str:
     return f"{dim}[{timestamp}]{reset}{color}{prefix}{entry.text}{reset}"
 
 
+def _safe_print(text: str) -> None:
+    """Print text with UTF-8 encoding fallback for Chinese character support."""
+    try:
+        sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.buffer.flush()
+    except Exception:
+        try:
+            print(text)
+        except Exception:
+            pass
+
+
 def cprint(text: str) -> None:
     """Print ANSI-colored text through prompt_toolkit's native renderer (hermes _cprint).
 
@@ -311,7 +324,7 @@ def cprint(text: str) -> None:
         from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
         from prompt_toolkit import print_formatted_text as _pt_print
     except Exception:
-        print(text)
+        _safe_print(text)
         return
 
     app = None
@@ -325,10 +338,7 @@ def cprint(text: str) -> None:
         try:
             _pt_print(_PT_ANSI(text))
         except Exception:
-            try:
-                print(text)
-            except Exception:
-                pass
+            _safe_print(text)
         return
 
     # Cross-thread emission: ask the app's event loop to schedule
@@ -349,10 +359,7 @@ def cprint(text: str) -> None:
         try:
             _pt_print(_PT_ANSI(text))
         except Exception:
-            try:
-                print(text)
-            except Exception:
-                pass
+            _safe_print(text)
 
 
 class ChatConsole:
