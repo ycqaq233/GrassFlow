@@ -2,63 +2,106 @@
 GrassFlow Agent 基类 + Schema 系统
 
 所有 Agent 的基类，提供：
-- Schema 定义和校验
+- 从 Component 推导 Schema
 - 失败策略配置
 - 统一的执行接口
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
-from pydantic import BaseModel, Field, field_validator
+from typing import Any, Dict, List, Optional
 import jsonschema
 
+from .dsl_v2_ast import Component, Port, ModelConfig
 
-class AgentConfig(BaseModel):
-    """Agent 配置"""
-    name: str
-    model: str = "gpt-4"
-    prompt: str = ""
-    input_schema: Dict[str, Any] = Field(default_factory=dict)
-    output_schema: Dict[str, Any] = Field(default_factory=dict)
-    on_fail: str = "stop"  # stop / skip / retry
-    retry_count: int = 3
-    timeout: Optional[int] = None  # 秒
 
-    @field_validator("on_fail")
-    @classmethod
-    def validate_on_fail(cls, v: str) -> str:
-        if v not in ("stop", "skip", "retry"):
-            raise ValueError("on_fail must be one of: stop, skip, retry")
-        return v
+# ---------------------------------------------------------------------------
+# 端口类型到 JSON Schema 的映射
+# ---------------------------------------------------------------------------
+
+PORT_TYPE_TO_JSON_SCHEMA: Dict[str, Dict[str, str]] = {
+    "string": {"type": "string"},
+    "number": {"type": "number"},
+    "boolean": {"type": "boolean"},
+    "object": {"type": "object"},
+    "array": {"type": "array"},
+}
+
+
+def ports_to_schema(ports: List[Port], direction: str) -> Dict[str, Any]:
+    """将端口列表转换为 JSON Schema。
+
+    Args:
+        ports: 端口定义列表
+        direction: "input" 或 "output"
+
+    Returns:
+        JSON Schema 字典，无端口时返回空字典
+    """
+    properties: Dict[str, Any] = {}
+    required: List[str] = []
+    for p in ports:
+        if p.direction != direction:
+            continue
+        properties[p.name] = PORT_TYPE_TO_JSON_SCHEMA.get(
+            p.type, {"type": "object"}
+        )
+        required.append(p.name)
+
+    if not properties:
+        return {}
+    return {"type": "object", "properties": properties, "required": required}
+
+
+# ---------------------------------------------------------------------------
+# Agent 基类
+# ---------------------------------------------------------------------------
 
 
 class Agent(ABC):
-    """所有 Agent 的基类"""
+    """所有 Agent 的基类。
 
-    def __init__(self, config: AgentConfig):
-        self.config = config
-        self.name = config.name
-        self.input_schema = config.input_schema
-        self.output_schema = config.output_schema
-        self.on_fail = config.on_fail
-        self.retry_count = config.retry_count
+    接受一个 Component 定义，从 Component 的 ports 推导 input_schema / output_schema。
+    """
+
+    def __init__(self, component: Component):
+        self._component = component
+        self.name = component.name
+        self.on_fail = component.on_fail
+        self.retry_count = component.retry_count
+
+    @property
+    def component(self) -> Component:
+        """返回此 Agent 关联的 Component"""
+        return self._component
+
+    @property
+    def input_schema(self) -> Dict[str, Any]:
+        """从 Component 的 input 端口推导的 JSON Schema"""
+        return ports_to_schema(self._component.ports, direction="input")
+
+    @property
+    def output_schema(self) -> Dict[str, Any]:
+        """从 Component 的 output 端口推导的 JSON Schema"""
+        return ports_to_schema(self._component.ports, direction="output")
 
     def validate_input(self, data: Dict[str, Any]) -> bool:
         """校验输入数据是否符合 Schema"""
-        if not self.input_schema:
+        schema = self.input_schema
+        if not schema:
             return True
         try:
-            jsonschema.validate(instance=data, schema=self.input_schema)
+            jsonschema.validate(instance=data, schema=schema)
             return True
         except jsonschema.ValidationError as e:
             raise ValueError(f"Input validation failed: {e.message}")
 
     def validate_output(self, data: Dict[str, Any]) -> bool:
         """校验输出数据是否符合 Schema"""
-        if not self.output_schema:
+        schema = self.output_schema
+        if not schema:
             return True
         try:
-            jsonschema.validate(instance=data, schema=self.output_schema)
+            jsonschema.validate(instance=data, schema=schema)
             return True
         except jsonschema.ValidationError as e:
             raise ValueError(f"Output validation failed: {e.message}")
@@ -112,10 +155,11 @@ class Agent(ABC):
 
     def to_dict(self) -> Dict[str, Any]:
         """导出为字典"""
+        model_default = self._component.model.default if self._component.model else "gpt-4"
         return {
             "name": self.name,
-            "model": self.config.model,
-            "prompt": self.config.prompt,
+            "model": model_default,
+            "prompt": self._component.system_prompt or "",
             "input_schema": self.input_schema,
             "output_schema": self.output_schema,
             "on_fail": self.on_fail,

@@ -4,7 +4,8 @@
 
 import asyncio
 import pytest
-from core.agent import Agent, AgentConfig
+from core.agent import Agent
+from core.dsl_v2_ast import Component, Port, ModelConfig
 from core.context import WorkflowContext
 from core.models import Workflow, AgentConfig as ModelAgentConfig, Edge, InteractionType
 
@@ -18,29 +19,23 @@ class MockAgent(Agent):
 
 
 @pytest.fixture
-def agent_config():
-    """创建测试用的 Agent 配置"""
-    return AgentConfig(
+def agent_component():
+    """创建测试用的 Component"""
+    return Component(
         name="test_agent",
-        model="gpt-4",
-        prompt="test prompt",
-        input_schema={
-            "type": "object",
-            "properties": {"input": {"type": "string"}},
-            "required": ["input"],
-        },
-        output_schema={
-            "type": "object",
-            "properties": {"result": {"type": "string"}},
-            "required": ["result"],
-        },
+        system_prompt="test prompt",
+        ports=[
+            Port(name="input", direction="input", type="string"),
+            Port(name="result", direction="output", type="string"),
+        ],
+        model=ModelConfig(default="gpt-4"),
     )
 
 
 @pytest.fixture
-def mock_agent(agent_config):
+def mock_agent(agent_component):
     """创建测试用的 Mock Agent"""
-    return MockAgent(agent_config)
+    return MockAgent(agent_component)
 
 
 @pytest.fixture

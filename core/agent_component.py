@@ -18,8 +18,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
-from .agent import Agent, AgentConfig
-from .models import (
+from .agent import Agent
+from .dsl_v2_ast import (
     AgentInstance,
     Component,
     Connection,
@@ -29,19 +29,6 @@ from .models import (
     Port,
     Workflow,
 )
-
-# ---------------------------------------------------------------------------
-# 端口类型到 JSON Schema 的映射
-# ---------------------------------------------------------------------------
-
-PORT_TYPE_TO_JSON_SCHEMA: Dict[str, Dict[str, str]] = {
-    "string": {"type": "string"},
-    "number": {"type": "number"},
-    "boolean": {"type": "boolean"},
-    "object": {"type": "object"},
-    "array": {"type": "array"},
-}
-
 
 # ---------------------------------------------------------------------------
 # 异常
@@ -267,13 +254,17 @@ class ComponentAgent(Agent):
             overrides: 运行时覆盖参数
         """
         overrides = overrides or {}
-        self._component = component
         self._agent_name = agent_name or component.name
         self._overrides = overrides
 
-        # 构建 AgentConfig
-        config = self._build_config(component, self._agent_name, overrides)
-        super().__init__(config)
+        # 将 overrides 合并到组件副本中，然后传给基类
+        merged = self._apply_overrides(component, overrides)
+        # 用 agent_name 覆盖组件名
+        if self._agent_name != component.name:
+            merged = copy.deepcopy(merged)
+            merged.name = self._agent_name
+
+        super().__init__(merged)
 
         # 保留端口定义，便于运行时映射
         self._ports: Dict[str, Port] = {}
@@ -293,58 +284,50 @@ class ComponentAgent(Agent):
     # ---- 构建 ----
 
     @staticmethod
-    def _build_config(
+    def _apply_overrides(
         component: Component,
-        agent_name: str,
         overrides: Dict[str, Any],
-    ) -> AgentConfig:
-        """从 Component + overrides 构建 AgentConfig"""
-        # 模型
-        model = overrides.get("model") or component.model.default or "gpt-4"
+    ) -> Component:
+        """将 overrides 合并到组件副本中，返回新的 Component。
 
-        # system_prompt
-        system_prompt = component.system_prompt or ""
+        不修改原始 component。
+        """
+        if not overrides:
+            return component
 
-        # 端口 -> JSON Schema
-        input_schema = ComponentAgent._ports_to_schema(
-            component.ports, direction="input"
-        )
-        output_schema = ComponentAgent._ports_to_schema(
-            component.ports, direction="output"
-        )
+        merged = copy.deepcopy(component)
 
-        # 失败策略
-        on_fail = overrides.get("on_fail", component.on_fail)
-        retry_count = overrides.get("retry_count", component.retry_count)
-
-        return AgentConfig(
-            name=agent_name,
-            model=model,
-            prompt=system_prompt,
-            input_schema=input_schema,
-            output_schema=output_schema,
-            on_fail=on_fail,
-            retry_count=retry_count,
-        )
-
-    @staticmethod
-    def _ports_to_schema(
-        ports: List[Port], direction: str
-    ) -> Dict[str, Any]:
-        """将端口列表转换为 JSON Schema properties"""
-        properties: Dict[str, Any] = {}
-        required: List[str] = []
-        for p in ports:
-            if p.direction != direction:
-                continue
-            properties[p.name] = PORT_TYPE_TO_JSON_SCHEMA.get(
-                p.type, {"type": "object"}
+        # 模型覆盖
+        if "model" in overrides:
+            merged.model = ModelConfig(
+                default=overrides["model"],
+                fallback=merged.model.fallback,
+                temperature=overrides.get("temperature", merged.model.temperature),
+                max_tokens=overrides.get("max_tokens", merged.model.max_tokens),
             )
-            required.append(p.name)
+        else:
+            if "temperature" in overrides:
+                merged.model = ModelConfig(
+                    default=merged.model.default,
+                    fallback=merged.model.fallback,
+                    temperature=overrides["temperature"],
+                    max_tokens=merged.model.max_tokens,
+                )
+            if "max_tokens" in overrides:
+                merged.model = ModelConfig(
+                    default=merged.model.default,
+                    fallback=merged.model.fallback,
+                    temperature=merged.model.temperature,
+                    max_tokens=overrides["max_tokens"],
+                )
 
-        if not properties:
-            return {}
-        return {"type": "object", "properties": properties, "required": required}
+        # 失败策略覆盖
+        if "on_fail" in overrides:
+            merged.on_fail = overrides["on_fail"]
+        if "retry_count" in overrides:
+            merged.retry_count = overrides["retry_count"]
+
+        return merged
 
     # ---- 端口访问 ----
 
@@ -356,10 +339,6 @@ class ComponentAgent(Agent):
 
     def get_port(self, name: str) -> Optional[Port]:
         return self._ports.get(name)
-
-    @property
-    def component(self) -> Component:
-        return self._component
 
     @property
     def agent_name(self) -> str:
@@ -388,7 +367,7 @@ class ComponentAgent(Agent):
 
         例如: "审查代码: {code}" -> "审查代码: <actual code>"
         """
-        template = self.config.prompt or ""
+        template = self.component.system_prompt or ""
         if not template:
             return ""
 
@@ -429,13 +408,14 @@ class ComponentAgent(Agent):
         if user_parts:
             messages.append({"role": "user", "content": "\n\n".join(user_parts)})
 
+        model_default = self.component.model.default if self.component.model else "gpt-4"
         return {
             "messages": messages,
-            "model": self.config.model,
-            "temperature": self._overrides.get("temperature"),
-            "max_tokens": self._overrides.get("max_tokens"),
+            "model": self._overrides.get("model") or model_default,
+            "temperature": self._overrides.get("temperature", self.component.model.temperature if self.component.model else None),
+            "max_tokens": self._overrides.get("max_tokens", self.component.model.max_tokens if self.component.model else None),
             "fallback": self._overrides.get(
-                "fallback", self._component.model.fallback
+                "fallback", self.component.model.fallback if self.component.model else None
             ),
         }
 
@@ -467,8 +447,8 @@ class ComponentAgent(Agent):
 
         # 附加元信息
         output["_component"] = {
-            "name": self._component.name,
-            "version": self._component.version,
+            "name": self.component.name,
+            "version": self.component.version,
             "mode": self._mode,
             "context": self._context_strategy,
             "llm_request": llm_request,

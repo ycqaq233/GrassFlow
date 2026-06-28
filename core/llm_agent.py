@@ -6,7 +6,8 @@ GrassFlow LLM Agent
 
 import logging
 from typing import Dict, Any, Optional, List
-from core.agent import Agent, AgentConfig
+from core.agent import Agent
+from core.dsl_v2_ast import Component, Port, ModelConfig
 from core.llm import LLMClient, LLMManager, llm_manager
 
 logger = logging.getLogger(__name__)
@@ -132,14 +133,20 @@ class LLMAgent(Agent):
         if resolved_model != model:
             logger.debug("Model resolved: %s -> %s", model, resolved_model)
 
-        config = AgentConfig(
+        # 构建 Component
+        ports: List[Port] = []
+        for field_name, field_schema in (input_schema or {}).items():
+            ports.append(Port(name=field_name, direction="input", type=field_schema.get("type", "object")))
+        for field_name, field_schema in (output_schema or {}).items():
+            ports.append(Port(name=field_name, direction="output", type=field_schema.get("type", "object")))
+
+        component = Component(
             name=name,
-            model=resolved_model,
-            prompt=prompt,
-            input_schema=input_schema or {},
-            output_schema=output_schema or {},
+            system_prompt=prompt,
+            ports=ports,
+            model=ModelConfig(default=resolved_model),
         )
-        super().__init__(config)
+        super().__init__(component)
 
         self.system_prompt = system_prompt
         self.temperature = temperature
@@ -166,7 +173,7 @@ class LLMAgent(Agent):
         Returns:
             格式化后的提示词
         """
-        if not self.config.prompt:
+        if not self.component.system_prompt:
             # 如果没有 prompt，直接返回输入数据的字符串表示
             return str(input_data)
 
@@ -185,10 +192,10 @@ class LLMAgent(Agent):
 
         # 格式化 prompt
         try:
-            return self.config.prompt.format(**variables)
+            return self.component.system_prompt.format(**variables)
         except KeyError as e:
             # 如果缺少变量，返回原始 prompt
-            return self.config.prompt
+            return self.component.system_prompt
 
     def _parse_response(self, response_content: str) -> Dict[str, Any]:
         """
@@ -290,22 +297,33 @@ class LLMAgentFactory:
             **kwargs,
         )
 
-    def create_from_config(self, config: AgentConfig) -> LLMAgent:
+    def create_from_component(self, component: Component) -> LLMAgent:
         """
-        从配置创建 LLM Agent
+        从组件定义创建 LLM Agent
 
         Args:
-            config: Agent 配置
+            component: 组件定义
 
         Returns:
             LLMAgent 实例
         """
+        # 从 Component.ports 推导 schema
+        input_schema = {}
+        output_schema = {}
+        for port in component.ports:
+            schema_entry = {"type": port.type}
+            if port.direction == "input":
+                input_schema[port.name] = schema_entry
+            elif port.direction == "output":
+                output_schema[port.name] = schema_entry
+
+        model_default = component.model.default if component.model else "gpt-4"
         return LLMAgent(
-            name=config.name,
-            model=config.model,
-            prompt=config.prompt,
-            input_schema=config.input_schema,
-            output_schema=config.output_schema,
+            name=component.name,
+            model=model_default,
+            prompt=component.system_prompt or "",
+            input_schema=input_schema,
+            output_schema=output_schema,
             llm_manager=self._manager,
         )
 
