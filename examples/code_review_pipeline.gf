@@ -48,7 +48,7 @@ component code_reader {
   version: "1.0.0"
 
   system_prompt: """
-    你是一个代码分析助手。读取代码文件，提取：
+    你是一个代码分析助手。根据任务描述读取代码文件，提取：
     1. 文件结构和模块划分
     2. 函数/类的签名
     3. 依赖关系
@@ -56,7 +56,7 @@ component code_reader {
     返回 JSON 格式。
   """
 
-  port input file_path: string "代码文件路径"
+  port input task: string "任务描述，例如：审查 examples/code_review_pipeline.gf 的代码质量"
   port input context: object "项目上下文信息"
   port output code_content: string "代码内容"
   port output structure: object "代码结构摘要"
@@ -194,6 +194,8 @@ component report_generator {
 
 workflow code_review_pipeline {
   description: "代码审查流水线 — 多维度并行分析 + 聚合审查"
+
+  port input task: string "任务描述，例如：审查 examples/code_review_pipeline.gf 的代码质量"
 
   # Agent 实例化（引用上面定义的 Component）
   agent reader use code_reader

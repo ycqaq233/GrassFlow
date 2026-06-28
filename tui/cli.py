@@ -115,8 +115,9 @@ def main():
 @click.option("--stream/--no-stream", default=True, help="启用/禁用流式输出（默认启用）")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.option("--input", "-i", "workflow_input", multiple=True, help="工作流输入 (key=value)，可多次指定")
+@click.option("--task", "-t", default=None, help="任务描述（等价于 --input task=...）")
 def run(workflow_file: str, model: Optional[str], provider: Optional[str],
-        api_key: Optional[str], stream: bool, verbose: bool, workflow_input: tuple):
+        api_key: Optional[str], stream: bool, verbose: bool, workflow_input: tuple, task: Optional[str]):
     """执行工作流"""
     workflow_path = Path(workflow_file)
     if not workflow_path.exists():
@@ -201,6 +202,10 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
                     parsed_input[key] = json.loads(value)
                 except (json.JSONDecodeError, ValueError):
                     parsed_input[key] = value
+
+        # --task 选项：作为 task key 注入 workflow_input
+        if task:
+            parsed_input["task"] = task
 
         # 创建调度器
         scheduler = Scheduler(workflow, agents, workflow_input=parsed_input)
@@ -560,7 +565,8 @@ def _generate_dsl(workflow: Workflow) -> str:
 @click.option("--model", "-m", default=None, help="使用的模型")
 @click.option("--watch", "-w", is_flag=True, help="Watch execution in real-time")
 @click.option("--input", "-i", "workflow_input", multiple=True, help="工作流输入 (key=value)，可多次指定")
-def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool, workflow_input: tuple):
+@click.option("--task", "-t", default=None, help="任务描述（等价于 --input task=...）")
+def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool, workflow_input: tuple, task: Optional[str]):
     """执行工作流并实时监控"""
     if not Path(workflow_file).exists():
         display.print_error(f"Workflow file not found: {workflow_file}")
@@ -620,6 +626,10 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool, workflow_
                     parsed_input[key] = json.loads(value)
                 except (json.JSONDecodeError, ValueError):
                     parsed_input[key] = value
+
+        # --task 选项：作为 task key 注入 workflow_input
+        if task:
+            parsed_input["task"] = task
 
         scheduler = Scheduler(workflow, agents, workflow_input=parsed_input)
 

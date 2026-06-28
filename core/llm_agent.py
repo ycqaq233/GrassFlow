@@ -154,13 +154,22 @@ class LLMAgent(Agent):
         return self._resolved_model
 
     def _format_prompt(self, input_data: Dict[str, Any]) -> str:
-        """格式化提示词"""
+        """格式化提示词
+
+        当 input_data 中包含 `task` 字段时，优先使用 task 作为 prompt 的主输入内容。
+        这使得工作流可以通过 --task 选项接收用户指令。
+        """
         prompt = self._component.system_prompt or ""
 
         if not prompt:
             return str(input_data)
 
-        variables = {"input": str(input_data)}
+        # 优先使用 task 字段作为 input 变量的值
+        task_value = input_data.get("task")
+        if task_value:
+            variables = {"input": str(task_value), "task": str(task_value)}
+        else:
+            variables = {"input": str(input_data)}
 
         for key, value in input_data.items():
             if key != "_deps":
