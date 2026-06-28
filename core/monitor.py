@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from core.models import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
 
 
 @dataclass

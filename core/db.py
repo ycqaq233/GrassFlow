@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-from core.models import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
 
 
 class DatabaseError(Exception):
