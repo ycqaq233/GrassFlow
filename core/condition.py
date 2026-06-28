@@ -5,8 +5,14 @@ GrassFlow ConditionAgent
 """
 
 from typing import Dict, Any, List, Optional
-from core.agent import Agent
-from core.dsl_v2_ast import Component, Port
+
+try:
+    from core.agent import Agent
+    from core.models import Component
+except ImportError:
+    from core.dsl_v2_ast import Component
+
+from core.agent import AgentConfig
 
 
 class ConditionAgent(Agent):
@@ -23,20 +29,24 @@ class ConditionAgent(Agent):
     调度器根据这个字段值来决定执行哪个分支。
     """
 
-    def __init__(self, name: str, rules: List[str], route_field: str = "route"):
+    def __init__(self, component: Component, rules: List[str], route_field: str = "route"):
         """
         初始化 ConditionAgent
 
         Args:
-            name: Agent 名称
+            component: DSL v2 组件定义
             rules: 条件规则列表，如 ["urgent", "normal", "info"]
             route_field: 用于路由的字段名，默认为 "route"
         """
-        component = Component(
-            name=name,
-            ports=[Port(name="route", direction="output", type="string")],
+        config = AgentConfig(
+            name=component.name,
+            model=component.model.default or "gpt-4",
+            input_schema={},
+            output_schema={"route": "string"},
+            on_fail=component.on_fail,
+            retry_count=component.retry_count,
         )
-        super().__init__(component)
+        super().__init__(config)
         self.rules = rules
         self.route_field = route_field
 
@@ -90,7 +100,7 @@ class SimpleConditionAgent(Agent):
 
     def __init__(
         self,
-        name: str,
+        component: Component,
         field: str,
         mapping: Dict[str, str],
         default: Optional[str] = None,
@@ -99,16 +109,20 @@ class SimpleConditionAgent(Agent):
         初始化 SimpleConditionAgent
 
         Args:
-            name: Agent 名称
+            component: DSL v2 组件定义
             field: 用于判断的字段名
             mapping: 字段值到路由值的映射
             default: 默认路由值（当字段值不在映射中时使用）
         """
-        component = Component(
-            name=name,
-            ports=[Port(name="route", direction="output", type="string")],
+        config = AgentConfig(
+            name=component.name,
+            model=component.model.default or "gpt-4",
+            input_schema={},
+            output_schema={"route": "string"},
+            on_fail=component.on_fail,
+            retry_count=component.retry_count,
         )
-        super().__init__(component)
+        super().__init__(config)
         self.field = field
         self.mapping = mapping
         self.default = default
