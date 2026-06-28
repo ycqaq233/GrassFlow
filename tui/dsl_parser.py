@@ -14,7 +14,7 @@ GrassFlow DSL 解析器
 
 import re
 from typing import List, Dict, Any, Optional
-from core.models import Workflow, AgentConfig, Edge, AgentType, InteractionType
+from core.models import WorkflowV1 as Workflow, AgentConfig, Edge, AgentType, InteractionType
 
 
 class DSLError(Exception):

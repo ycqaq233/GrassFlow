@@ -5,10 +5,10 @@ GrassFlow DSL v2 解析器测试
 """
 
 import pytest
-from core.dsl_v2_ast import (
-    Port, MCPConfig, PermissionConfig, ModelConfig,
-    Component, AgentInstance, Connection, Workflow, ParseResult
-)
+try:
+    from core.models import Component, Workflow, AgentInstance, Connection, Port, ModelConfig, MCPConfig, PermissionConfig, ParseResult
+except ImportError:
+    from core.dsl_v2_ast import Component, Workflow, AgentInstance, Connection, Port, ModelConfig, MCPConfig, PermissionConfig, ParseResult
 from tui.dsl_parser_v2 import DSLv2Parser
 
 

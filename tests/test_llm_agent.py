@@ -10,6 +10,10 @@ LLM Agent 测试
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+try:
+    from core.models import Component, ModelConfig
+except ImportError:
+    from core.dsl_v2_ast import Component, ModelConfig
 from core.llm_agent import LLMAgent, LLMAgentFactory
 from core.llm import LLMClient, LLMManager, LLMResponse
 
@@ -109,7 +113,7 @@ class TestLLMAgentFactory:
 
     def test_factory_create_from_config(self):
         """测试从配置创建"""
-        from core.models import AgentConfig
+        from core.agent import AgentConfig
 
         manager = LLMManager()
         factory = LLMAgentFactory(llm_manager=manager)
@@ -123,3 +127,24 @@ class TestLLMAgentFactory:
         agent = factory.create_from_config(config)
         assert agent.name == "test"
         assert agent.config.model == "gpt-4"
+
+    def test_factory_create_from_component(self):
+        """测试从 Component 创建"""
+        comp = Component(
+            name="test-agent",
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="test prompt from component",
+        )
+
+        manager = LLMManager()
+        factory = LLMAgentFactory(llm_manager=manager)
+
+        # Component 的 model.default 映射到 agent model
+        agent = factory.create(
+            comp.name,
+            model=comp.model.default or "gpt-4",
+            prompt=comp.system_prompt or "",
+        )
+        assert agent.name == "test-agent"
+        assert agent.config.model == "gpt-4"
+        assert agent.config.prompt == "test prompt from component"

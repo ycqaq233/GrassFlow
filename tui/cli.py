@@ -24,7 +24,7 @@ from typing import Optional
 
 import click
 
-from core.models import Workflow
+from core.models import WorkflowV1 as Workflow
 from core.context import WorkflowContext
 from core.scheduler import Scheduler
 from core.condition import ConditionAgent

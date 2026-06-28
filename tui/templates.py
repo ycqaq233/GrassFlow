@@ -5,7 +5,7 @@ GrassFlow 工作流模板
 """
 
 from typing import Dict, Any, List, Optional
-from core.models import Workflow, AgentConfig, Edge, AgentType, InteractionType
+from core.models import WorkflowV1 as Workflow, AgentConfig, Edge, AgentType, InteractionType
 
 
 # 模板定义

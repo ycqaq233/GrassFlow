@@ -2,11 +2,16 @@
 GrassFlow 数据模型
 
 定义：
-- Workflow: 工作流定义
-- AgentConfig: Agent 配置
+- Component: v2 组件定义
+- Workflow: v2 工作流定义
+- AgentInstance: v2 Agent 实例
+- Connection: v2 连接定义
 - ExecutionRecord: 执行记录
+- AgentConfig (legacy): v1 Agent 配置
+- Edge (legacy): v1 边定义
 """
 
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
@@ -54,8 +59,8 @@ class Edge(BaseModel):
     condition: Optional[str] = None  # 条件分支的条件
 
 
-class Workflow(BaseModel):
-    """工作流定义"""
+class WorkflowV1(BaseModel):
+    """工作流定义 (v1 legacy)"""
     name: str
     description: str = ""
     agents: List[AgentConfig] = Field(default_factory=list)
@@ -86,6 +91,10 @@ class Workflow(BaseModel):
             raise ValueError(f"Target agent '{edge.target}' not found")
         self.edges.append(edge)
         self.updated_at = datetime.now()
+
+
+# Backward compatibility alias
+Workflow = WorkflowV1
 
 
 class ExecutionStatus(str, Enum):
@@ -142,3 +151,96 @@ class ExecutionRecord(BaseModel):
             self.total_duration_ms = int(
                 (self.completed_at - self.started_at).total_seconds() * 1000
             )
+
+
+# ============================================================================
+# v2 DSL types (dataclasses)
+# ============================================================================
+
+
+@dataclass
+class Port:
+    """端口定义"""
+    name: str
+    direction: str  # "input" | "output"
+    type: str       # "string" | "number" | "boolean" | "object" | "array"
+    description: Optional[str] = None
+    sync: bool = True  # True = sync, False = async
+
+
+@dataclass
+class MCPConfig:
+    """MCP 服务器配置"""
+    server_name: str
+    tools: List[str] = field(default_factory=list)
+
+
+@dataclass
+class PermissionConfig:
+    """权限配置"""
+    allow: List[str] = field(default_factory=list)
+    deny: List[str] = field(default_factory=list)
+    ask: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ModelConfig:
+    """模型配置"""
+    default: Optional[str] = None
+    fallback: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+
+
+@dataclass
+class Component:
+    """组件定义"""
+    name: str
+    description: Optional[str] = None
+    version: Optional[str] = None
+    system_prompt: Optional[str] = None
+    ports: List[Port] = field(default_factory=list)
+    mcp: List[MCPConfig] = field(default_factory=list)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    permission: PermissionConfig = field(default_factory=PermissionConfig)
+    mode: str = "batch"      # "batch" | "stream"
+    context: str = "shared"  # "shared" | "independent"
+    on_fail: str = "stop"    # "stop" | "skip" | "retry"
+    retry_count: int = 3
+
+
+@dataclass
+class AgentInstance:
+    """Agent 实例（在 workflow 中使用）"""
+    name: str
+    component: Optional[str] = None  # use 关键字引用的组件名
+    overrides: Dict[str, Any] = field(default_factory=dict)
+    inline_ports: List[Port] = field(default_factory=list)
+    inline_system_prompt: Optional[str] = None
+
+
+@dataclass
+class Connection:
+    """连接定义"""
+    source_agent: str
+    source_port: Optional[str] = None  # None = 默认端口
+    target_agents: List[str] = field(default_factory=list)
+    target_ports: List[str] = field(default_factory=list)
+
+
+@dataclass
+class Workflow:
+    """工作流定义 (v2)"""
+    name: str
+    ports: List[Port] = field(default_factory=list)
+    agents: List[AgentInstance] = field(default_factory=list)
+    connections: List[Connection] = field(default_factory=list)
+    output_mappings: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ParseResult:
+    """解析结果"""
+    components: List[Component] = field(default_factory=list)
+    workflows: List[Workflow] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)

@@ -12,6 +12,10 @@ import pytest
 from datetime import datetime
 
 from core.models import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+try:
+    from core.models import Component, Workflow, AgentInstance, Connection, Port, ModelConfig
+except ImportError:
+    from core.dsl_v2_ast import Component, Workflow, AgentInstance, Connection, Port, ModelConfig
 from core.monitor import Monitor, MonitorReport, MonitorIssue
 
 

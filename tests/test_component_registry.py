@@ -9,13 +9,10 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from core.dsl_v2_ast import (
-    Component,
-    MCPConfig,
-    ModelConfig,
-    PermissionConfig,
-    Port,
-)
+try:
+    from core.models import Component, Port, ModelConfig, MCPConfig, PermissionConfig
+except ImportError:
+    from core.dsl_v2_ast import Component, Port, ModelConfig, MCPConfig, PermissionConfig
 from core.component_registry import (
     ComponentDuplicateError,
     ComponentEntry,

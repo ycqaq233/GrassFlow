@@ -10,7 +10,7 @@ GrassFlow DAG 引擎
 
 from typing import List, Set, Dict, Optional
 from collections import defaultdict, deque
-from core.models import Workflow, Edge, InteractionType
+from core.models import WorkflowV1 as Workflow, Edge, InteractionType
 
 
 class DAGError(Exception):

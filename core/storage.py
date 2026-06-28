@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
-from core.models import Workflow
+from core.models import WorkflowV1 as Workflow
 
 
 class StorageError(Exception):

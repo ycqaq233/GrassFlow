@@ -11,9 +11,53 @@
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-from core.models import Workflow, AgentConfig, Edge, AgentType, InteractionType, ExecutionStatus
+try:
+    from core.models import (
+        Component, Workflow, AgentInstance, Connection, Port, ModelConfig,
+        WorkflowV1, AgentConfig, Edge, AgentType, InteractionType, ExecutionStatus,
+    )
+except ImportError:
+    from core.dsl_v2_ast import Component, Workflow, AgentInstance, Connection, Port, ModelConfig
+    from core.models import WorkflowV1, AgentConfig, Edge, AgentType, InteractionType, ExecutionStatus
 from core.context import WorkflowContext
 from core.scheduler import Scheduler, SchedulerError
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def make_v1_workflow(
+    agents: list[tuple[str, str]] | None = None,
+    edges: list[tuple[str, str, str | None, str | None]] | None = None,
+    name: str = "test",
+) -> WorkflowV1:
+    """Build a v1 Workflow from concise specs."""
+    type_map = {
+        "llm": AgentType.LLM,
+        "condition": AgentType.CONDITION,
+        "manual": AgentType.MANUAL,
+        "input": AgentType.INPUT,
+        "output": AgentType.OUTPUT,
+    }
+    interaction_map = {
+        "sequence": InteractionType.SEQUENCE,
+        "parallel": InteractionType.PARALLEL,
+        "immediate": InteractionType.IMMEDIATE,
+        "condition": InteractionType.CONDITION,
+        None: InteractionType.SEQUENCE,
+    }
+    wf = WorkflowV1(name=name)
+    for agent_name, agent_type in (agents or []):
+        wf.add_agent(AgentConfig(name=agent_name, type=type_map.get(agent_type, AgentType.LLM)))
+    for src, tgt, itype, cond in (edges or []):
+        wf.add_edge(Edge(
+            source=src, target=tgt,
+            interaction_type=interaction_map.get(itype, InteractionType.SEQUENCE),
+            condition=cond,
+        ))
+    return wf
 
 
 class MockAgent:
@@ -46,11 +90,10 @@ class TestScheduler:
     @pytest.fixture
     def workflow(self):
         """创建测试工作流"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        return workflow
+        return make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            name="test",
+        )
 
     @pytest.fixture
     def context(self):
@@ -155,10 +198,11 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_failure_retry(self, context):
         """测试失败策略：retry"""
-        workflow = Workflow(name="test_retry")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm")],
+            edges=[("A", "B", None, None)],
+            name="test_retry",
+        )
 
         # 创建一个会失败两次然后成功的 Agent
         call_count = 0
@@ -195,15 +239,15 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_condition_branch(self, context):
         """测试条件分支"""
-        workflow = Workflow(name="test_condition")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="route", type=AgentType.CONDITION))
-        workflow.add_agent(AgentConfig(name="output1", type=AgentType.OUTPUT))
-        workflow.add_agent(AgentConfig(name="output2", type=AgentType.OUTPUT))
-
-        workflow.add_edge(Edge(source="A", target="route"))
-        workflow.add_edge(Edge(source="route", target="output1", interaction_type=InteractionType.CONDITION, condition="urgent"))
-        workflow.add_edge(Edge(source="route", target="output2", interaction_type=InteractionType.CONDITION, condition="normal"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("route", "condition"), ("output1", "output"), ("output2", "output")],
+            edges=[
+                ("A", "route", None, None),
+                ("route", "output1", "condition", "urgent"),
+                ("route", "output2", "condition", "normal"),
+            ],
+            name="test_condition",
+        )
 
         agent_a = MockAgent("A")
         agent_route = MockAgent("route")
@@ -241,7 +285,7 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_empty_workflow(self, context):
         """测试空工作流"""
-        workflow = Workflow(name="test_empty")
+        workflow = WorkflowV1(name="test_empty")
         agents = {}
 
         scheduler = Scheduler(workflow, agents)
@@ -253,8 +297,7 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_single_agent(self, context):
         """测试单个 Agent"""
-        workflow = Workflow(name="test_single")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
+        workflow = make_v1_workflow(agents=[("A", "llm")], name="test_single")
 
         agent_a = MockAgent("A")
         agents = {"A": agent_a}
@@ -271,10 +314,11 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_context_data_passing(self, context):
         """测试数据传递"""
-        workflow = Workflow(name="test_data")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm")],
+            edges=[("A", "B", None, None)],
+            name="test_data",
+        )
 
         agent_a = MockAgent("A")
         agent_b = MockAgent("B")
@@ -292,10 +336,11 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_execution_record(self, context):
         """测试执行记录"""
-        workflow = Workflow(name="test_record")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm")],
+            edges=[("A", "B", None, None)],
+            name="test_record",
+        )
 
         agent_a = MockAgent("A")
         agent_b = MockAgent("B")
@@ -315,10 +360,11 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_immediate_execution(self, context):
         """测试立即执行：A | B"""
-        workflow = Workflow(name="test_immediate")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B", interaction_type=InteractionType.IMMEDIATE))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm")],
+            edges=[("A", "B", "immediate", None)],
+            name="test_immediate",
+        )
 
         agent_a = MockAgent("A", delay=0.1)
         agent_b = MockAgent("B")

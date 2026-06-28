@@ -12,8 +12,45 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from core.models import Workflow, AgentConfig, Edge, AgentType, InteractionType
+try:
+    from core.models import (
+        Component, Workflow, AgentInstance, Connection, Port, ModelConfig,
+        WorkflowV1, AgentConfig, Edge, AgentType, InteractionType,
+    )
+except ImportError:
+    from core.dsl_v2_ast import Component, Workflow, AgentInstance, Connection, Port, ModelConfig
+    from core.models import WorkflowV1, AgentConfig, Edge, AgentType, InteractionType
 from core.storage import WorkflowStorage, StorageError
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def make_v1_workflow(
+    agents: list[tuple[str, str, str]] | None = None,
+    edges: list[tuple[str, str]] | None = None,
+    name: str = "test",
+) -> WorkflowV1:
+    """Build a v1 Workflow from concise specs."""
+    type_map = {
+        "llm": AgentType.LLM,
+        "condition": AgentType.CONDITION,
+        "manual": AgentType.MANUAL,
+        "input": AgentType.INPUT,
+        "output": AgentType.OUTPUT,
+    }
+    wf = WorkflowV1(name=name)
+    for agent_name, agent_type, model in (agents or []):
+        wf.add_agent(AgentConfig(
+            name=agent_name,
+            type=type_map.get(agent_type, AgentType.LLM),
+            model=model,
+        ))
+    for src, tgt in (edges or []):
+        wf.add_edge(Edge(source=src, target=tgt))
+    return wf
 
 
 class TestWorkflowStorage:
@@ -33,11 +70,11 @@ class TestWorkflowStorage:
     @pytest.fixture
     def sample_workflow(self):
         """创建示例工作流"""
-        workflow = Workflow(name="test_workflow")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM, model="gpt-4"))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM, model="gpt-4"))
-        workflow.add_edge(Edge(source="A", target="B"))
-        return workflow
+        return make_v1_workflow(
+            agents=[("A", "llm", "gpt-4"), ("B", "llm", "gpt-4")],
+            edges=[("A", "B")],
+            name="test_workflow",
+        )
 
     def test_save_and_load(self, storage, sample_workflow):
         """测试保存和加载"""
@@ -119,11 +156,8 @@ class TestWorkflowStorage:
     def test_multiple_workflows(self, storage):
         """测试多个工作流"""
         # 创建多个工作流
-        workflow1 = Workflow(name="workflow1")
-        workflow1.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-
-        workflow2 = Workflow(name="workflow2")
-        workflow2.add_agent(AgentConfig(name="B", type=AgentType.LLM))
+        workflow1 = make_v1_workflow(agents=[("A", "llm", "gpt-4")], name="workflow1")
+        workflow2 = make_v1_workflow(agents=[("B", "llm", "gpt-4")], name="workflow2")
 
         # 保存
         storage.save(workflow1)

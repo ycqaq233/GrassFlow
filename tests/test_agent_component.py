@@ -23,16 +23,10 @@ from core.agent_component import (
     PortMappingError,
     WorkflowInstantiator,
 )
-from core.dsl_v2_ast import (
-    AgentInstance,
-    Component,
-    Connection,
-    MCPConfig,
-    ModelConfig,
-    PermissionConfig,
-    Port,
-    Workflow,
-)
+try:
+    from core.models import Component, Workflow, AgentInstance, Connection, Port, ModelConfig, MCPConfig, PermissionConfig
+except ImportError:
+    from core.dsl_v2_ast import Component, Workflow, AgentInstance, Connection, Port, ModelConfig, MCPConfig, PermissionConfig
 
 
 # ---------------------------------------------------------------------------
