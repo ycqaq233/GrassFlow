@@ -263,10 +263,10 @@ permission ask:   [commit_changes]          # 每次调用前询问用户
 
 ```
 mode: "batch"     # 批处理：等待所有输入就绪后执行一次（默认）
-mode: "stream"    # 流处理：规划中，未完整实现
+mode: "stream"    # 流处理：每次收到上游数组输出项就执行一次
 ```
 
-> **注意**：`stream` 模式已定义在数据模型中，但当前调度器仅实现了 `batch` 模式的调度逻辑。`stream` 模式的完整支持（包括异步端口触发、共享上下文累积等）在后续版本中实现。
+> **已实现**：`stream` 模式已在调度器中实现。上游 agent 输出中的数组项会逐个触发 stream agent 执行。配合 `context: "shared"` 可累积状态，配合 `context: "independent"` 每次触发使用独立实例。
 
 #### 3.3.9 context（上下文策略）
 
@@ -731,19 +731,27 @@ port output issues: array
 # C.in = {"A": <A的输出>, "B": <B的输出>}
 ```
 
-### 8.3 stream 模式数据流（规划中，未完整实现）
+### 8.3 stream 模式数据流（已实现）
 
 ```grassflow
 component counter {
     mode: "stream"
     context: "shared"
-    port input item: string [async]
+    port input item: string
     port output count: number
 }
 
-# A 输出 3 次 → counter 执行 3 次（共享上下文，累积计数）
-A -> counter
+# source 输出 {"items": ["apple", "banana", "cherry"]}
+# → counter 执行 3 次（每次接收一个 item，共享上下文累积计数）
+source -> counter
 ```
+
+**实现细节**：
+- 调度器从上游输出中自动提取数组项，每个项触发一次 stream agent
+- `context: "shared"`：复用同一 agent 实例，状态跨触发累积
+- `context: "independent"`：每次触发 deepcopy 创建新实例
+- `on_fail: "skip"`：单次失败不影响后续项的处理
+- 无数组项时自动回退到单次 batch 执行
 
 ---
 
