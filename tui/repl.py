@@ -1261,7 +1261,88 @@ class GrassFlowREPL:
         except Exception:
             pass
 
-        base += "Be concise and helpful. Use tools when needed to complete tasks."
+        # 5. Inject Workflow Orchestration awareness
+        try:
+            from tui.intent_detector import IntentDetector
+            from core.component_registry import get_default_component_registry
+
+            workflow_section = """## Workflow Orchestration
+
+You are running inside GrassFlow — a declarative multi-agent workflow orchestration platform.
+You can orchestrate multiple sub-agents to work in parallel, which is MORE EFFICIENT than doing everything yourself.
+
+### When to use workflows
+
+When the user asks for multi-step tasks, you should GENERATE a DSL workflow and EXECUTE it via `/run`.
+Examples of multi-step tasks:
+- "分析代码然后生成报告" → sequential workflow (analyze → report)
+- "对比A和B" → parallel workflow (analyze_A | analyze_B) → compare → report
+- "先做X再做Y最后做Z" → multi-step sequential
+- "分别分析这三个文件" → parallel execution
+
+### How to use workflows
+
+1. Write a DSL v2 workflow definition (see syntax below)
+2. Save it to a .gf file using the `write` tool
+3. Execute it by telling the user to run `/run <file.gf>`, or describe the workflow in your response
+
+### DSL v2 Syntax (condensed)
+
+```
+component name {
+  system_prompt: "..."
+  port input data: string "input description"
+  port output result: object "output description"
+  model default: "gpt-4"
+  permission allow: [read, glob, grep]
+}
+
+workflow my_workflow {
+  agent step1 { model: "gpt-4"; prompt: "..." }
+  agent step2 use my_component
+  step1 -> step2
+}
+```
+
+Key patterns:
+- `A -> B` : sequential (A finishes before B starts)
+- `(A, B) -> C` : parallel fan-in (A and B run together, C waits for both)
+- `A -> (B, C)` : fan-out (A's output goes to both B and C)
+- `agent name use component_name` : reuse a component definition
+- `permission allow: [read, glob, grep]` : restrict agent tools
+
+### Important
+
+- Do NOT try to do everything yourself when the task has multiple independent sub-tasks
+- Generate the DSL, save it, and let the user execute it with `/run`
+- Each agent in the workflow gets its own tool permissions
+- The workflow engine handles parallel execution, dependency resolution, and data flow
+"""
+
+            # Only add if intent detector is available
+            _ = IntentDetector  # noqa: F841
+            base += workflow_section
+        except ImportError:
+            pass
+
+        # 6. Inject available components
+        try:
+            registry = get_default_component_registry()
+            registry.discover()
+            components = registry.all()
+            if components:
+                lines = ["## Available Components", ""]
+                for entry in components[:20]:  # limit to 20
+                    desc = entry.description or "no description"
+                    ports_in = ", ".join(entry.input_ports()) or "none"
+                    ports_out = ", ".join(entry.output_ports()) or "none"
+                    lines.append(f"- **{entry.name}**: {desc} (in: {ports_in}, out: {ports_out})")
+                lines.append("")
+                base += "\n".join(lines) + "\n\n"
+        except Exception:
+            pass
+
+        base += "Be concise and helpful. Use tools when needed to complete tasks. For multi-step tasks, consider generating a DSL workflow."
         return base
 
     def _interrupt_agent(self) -> None:
