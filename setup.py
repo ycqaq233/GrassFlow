@@ -10,8 +10,11 @@ setup(
     install_requires=[
         "pydantic>=2.0.0",
         "jsonschema>=4.0.0",
+        "httpx>=0.25.0",
+        "html2text>=2024.0.0",
         "rich>=13.0.0",
         "click>=8.0.0",
+        "prompt_toolkit>=3.0.0",
         "fastapi>=0.100.0",
         "uvicorn>=0.23.0",
         "websockets>=11.0",

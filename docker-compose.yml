@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  grassflow:
+    build: .
+    container_name: grassflow
+    stdin_open: true
+    tty: true
+    volumes:
+      # Mount workflows directory for persistence
+      - grassflow-workflows:/root/.Grass/workflows
+      # Mount current directory for development (optional)
+      # - .:/app
+    environment:
+      # Pass API keys via environment variables
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    ports:
+      # FastAPI server port (if using server mode)
+      - "8000:8000"
+
+  # Run tests
+  test:
+    build: .
+    container_name: grassflow-test
+    entrypoint: ["pytest", "tests/", "-v", "--tb=short"]
+    environment:
+      - GRASSFLOW_TESTING=1
+
+volumes:
+  grassflow-workflows:
