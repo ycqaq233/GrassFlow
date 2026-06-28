@@ -51,6 +51,9 @@ logs/
 
 # Config
 ~/.grassflow/
+.env
+.env.*
+*.env
 
 # OS
 .DS_Store
