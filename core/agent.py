@@ -38,18 +38,16 @@ def ports_to_schema(ports: List[Port], direction: str) -> Dict[str, Any]:
         JSON Schema 字典，无端口时返回空字典
     """
     properties: Dict[str, Any] = {}
-    required: List[str] = []
     for p in ports:
         if p.direction != direction:
             continue
         properties[p.name] = PORT_TYPE_TO_JSON_SCHEMA.get(
             p.type, {"type": "object"}
         )
-        required.append(p.name)
 
     if not properties:
         return {}
-    return {"type": "object", "properties": properties, "required": required}
+    return {"type": "object", "properties": properties}
 
 
 # ---------------------------------------------------------------------------
