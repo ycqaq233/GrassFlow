@@ -129,11 +129,25 @@ class LLMAgent(Agent):
         if llm_client:
             self._client = llm_client
         else:
+            from core.config import config_manager
             manager = llm_manager or globals()["llm_manager"]
+
+            # 从配置获取 provider 的 api_key 和 base_url
+            config = config_manager.load_config()
+            provider_name = config.llm.default_provider
+            provider_config = config.provider.get(provider_name)
+            api_key = provider_config.options.apiKey if provider_config else None
+            base_url = provider_config.options.baseURL if provider_config else None
+
             try:
                 self._client = manager.get(resolved_model)
             except Exception:
-                self._client = manager.create(resolved_model, model=resolved_model)
+                self._client = manager.create(
+                    resolved_model,
+                    model=resolved_model,
+                    api_key=api_key,
+                    base_url=base_url,
+                )
 
     @property
     def resolved_model(self) -> str:
