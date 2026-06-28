@@ -581,6 +581,8 @@ class TestWorkflowRunnerRunWorkflow:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(side_effect=RuntimeError("LLM exploded"))
             mock_agent.execute = AsyncMock(side_effect=RuntimeError("LLM exploded"))
+            mock_agent.on_fail = "stop"
+            mock_agent.retry_count = 1
             mock_llm_cls.return_value = mock_agent
 
             with pytest.raises(RuntimeError, match="LLM exploded"):
