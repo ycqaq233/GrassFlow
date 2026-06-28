@@ -9,6 +9,10 @@ ConditionAgent 测试
 
 import pytest
 import asyncio
+try:
+    from core.models import Component, ModelConfig, Port
+except ImportError:
+    from core.dsl_v2_ast import Component, ModelConfig, Port
 from core.condition import ConditionAgent, SimpleConditionAgent
 
 
@@ -136,3 +140,54 @@ class TestSimpleConditionAgent:
 
         result = await agent.run({})
         assert result == {"route": "normal"}
+
+
+class TestConditionFromComponent:
+    """从 Component 构造条件 Agent"""
+
+    def test_component_for_condition(self):
+        """Component 可以描述条件路由"""
+        comp = Component(
+            name="ticket-router",
+            description="工单路由器",
+            ports=[
+                Port(name="ticket", direction="input", type="object"),
+                Port(name="urgent", direction="output", type="object"),
+                Port(name="normal", direction="output", type="object"),
+            ],
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="根据工单 {ticket} 判断优先级",
+        )
+
+        # Component 描述了条件路由的元信息
+        assert comp.name == "ticket-router"
+        assert len(comp.ports) == 3
+        input_ports = [p for p in comp.ports if p.direction == "input"]
+        output_ports = [p for p in comp.ports if p.direction == "output"]
+        assert len(input_ports) == 1
+        assert len(output_ports) == 2
+
+        # 可以从 Component 的 ports 推断路由规则
+        route_rules = [p.name for p in output_ports]
+        assert "urgent" in route_rules
+        assert "normal" in route_rules
+
+    @pytest.mark.asyncio
+    async def test_condition_agent_with_component_rules(self):
+        """从 Component 的输出端口推断条件规则"""
+        comp = Component(
+            name="router",
+            ports=[
+                Port(name="input", direction="input", type="object"),
+                Port(name="urgent", direction="output", type="object"),
+                Port(name="normal", direction="output", type="object"),
+                Port(name="info", direction="output", type="object"),
+            ],
+        )
+
+        # 从 Component 的输出端口提取规则
+        rules = [p.name for p in comp.ports if p.direction == "output"]
+        agent = ConditionAgent(name=comp.name, rules=rules)
+
+        result = await agent.run({"route": "urgent"})
+        assert result == {"route": "urgent"}

@@ -24,6 +24,7 @@ from typing import Optional
 
 import click
 
+from core.models import WorkflowV1 as Workflow
 from core.context import WorkflowContext
 from core.scheduler import Scheduler
 from core.condition import ConditionAgent
@@ -31,12 +32,7 @@ from core.llm_agent import LLMAgent
 from core.storage import workflow_storage
 from core.db import execution_db
 from core.monitor import monitor
-try:
-    from core.models import Workflow, Component, AgentInstance, Connection, ParseResult
-except ImportError:
-    from core.dsl_v2_ast import Workflow, Component, AgentInstance, Connection, ParseResult
-from core.execution import ExecutionRecord, ExecutionStatus
-from tui.dsl_parser_v2 import DSLv2Parser
+from tui.dsl_parser import parse_file
 from tui.display import display, progress_display
 from tui.error_handler import handle_cli_error, ErrorContext
 
@@ -103,45 +99,6 @@ def _setup_terminal_encoding():
             pass
 
 
-def _create_agents_from_workflow(workflow, components_dict):
-    from core.llm_agent import LLMAgent
-    from core.condition import ConditionAgent
-    import copy
-
-    agents = {}
-    for agent_inst in workflow.agents:
-        if agent_inst.component:
-            comp = components_dict.get(agent_inst.component)
-            if not comp:
-                raise ValueError(f"Component '{agent_inst.component}' not found")
-            comp = copy.deepcopy(comp)
-            for k, v in agent_inst.overrides.items():
-                if k == "model" and isinstance(v, dict):
-                    for mk, mv in v.items():
-                        setattr(comp.model, mk, mv)
-                elif hasattr(comp, k):
-                    setattr(comp, k, v)
-        else:
-            comp = Component(name=agent_inst.name)
-
-        agent = LLMAgent(component=comp)
-        agents[agent_inst.name] = agent
-    return agents
-
-
-def _parse_workflow_file(workflow_file):
-    parser = DSLv2Parser()
-    with open(workflow_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-    result = parser.parse(content)
-    if result.errors:
-        raise ValueError(f"Parse errors: {result.errors}")
-    if not result.workflows:
-        raise ValueError("No workflow found in file")
-    components_dict = {c.name: c for c in result.components}
-    return result.workflows[0], components_dict, result
-
-
 @click.group()
 @click.version_option(version="0.1.0")
 def main():
@@ -190,20 +147,39 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
         effective_model = model or default_model
         effective_provider = provider or _get_default_provider()
 
-        # 解析工作流文件（v2 parser）
+        # 解析工作流文件
         display.print_info(f"Loading workflow from {workflow_file}...")
-        workflow, components_dict, parse_result = _parse_workflow_file(workflow_file)
+        workflow = parse_file(workflow_file)
 
         # 打印工作流信息
         agent_names = [agent.name for agent in workflow.agents]
-        display.print_workflow_info(workflow.name, agent_names, len(workflow.connections))
+        display.print_workflow_info(workflow.name, agent_names, len(workflow.edges))
 
         if verbose:
             display.print_info(f"  Model: {effective_provider}/{effective_model}")
             display.print_info(f"  Streaming: {'on' if stream else 'off'}")
 
         # 创建 Agent 实例
-        agents = _create_agents_from_workflow(workflow, components_dict)
+        agents = {}
+        for agent_config in workflow.agents:
+            if agent_config.type.value == "condition":
+                rules = getattr(agent_config, 'rules', [])
+                agent = ConditionAgent(
+                    name=agent_config.name,
+                    rules=rules,
+                )
+            else:
+                # 解析模型名称：如果工作流指定的模型在当前 provider 中不存在，回退到默认模型
+                raw_model = agent_config.model or effective_model
+                resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
+                agent = LLMAgent(
+                    name=agent_config.name,
+                    model=resolved_model,
+                    prompt=agent_config.prompt,
+                    input_schema=agent_config.input_schema,
+                    output_schema=agent_config.output_schema,
+                )
+            agents[agent_config.name] = agent
 
         # 创建调度器
         scheduler = Scheduler(workflow, agents)
@@ -243,7 +219,7 @@ def save(workflow_file: str, output: Optional[str]):
 
     try:
         display.print_info(f"Loading workflow from {workflow_file}...")
-        workflow, components_dict, parse_result = _parse_workflow_file(workflow_file)
+        workflow = parse_file(workflow_file)
 
         if output:
             import json
@@ -294,11 +270,11 @@ def validate(workflow_file: str):
 
     try:
         display.print_info(f"Validating {workflow_file}...")
-        workflow, components_dict, parse_result = _parse_workflow_file(workflow_file)
+        workflow = parse_file(workflow_file)
 
         display.print_success(f"Workflow: {workflow.name}")
         display.print_info(f"  Agents: {len(workflow.agents)}")
-        display.print_info(f"  Connections: {len(workflow.connections)}")
+        display.print_info(f"  Edges: {len(workflow.edges)}")
 
         # 检查 DAG
         from core.dag import DAG, DAGError
@@ -485,15 +461,15 @@ def create(template_name: str, output: Optional[str]):
             display.print_error(f"Template '{template_name}' not found.")
             sys.exit(1)
 
-        workflow, components_dict = create_from_template(template)
+        workflow = create_from_template(template)
 
         if output:
             output_path = Path(output)
         else:
-            output_path = Path(f"{workflow.name}.gf")
+            output_path = Path(f"{workflow.name}.af")
 
         # 使用共享的 DSL 生成函数
-        dsl_content = _generate_dsl_v2(workflow, components_dict)
+        dsl_content = _generate_dsl(workflow)
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(dsl_content)
@@ -589,61 +565,6 @@ def _generate_dsl(workflow: Workflow) -> str:
     return "\n".join(lines)
 
 
-def _generate_dsl_v2(workflow, components_dict: dict) -> str:
-    """
-    生成 v2 DSL 内容
-
-    从 v2 Workflow + Components 生成 .gf 文件内容。
-    """
-    lines = []
-    lines.append(f"# {workflow.name}")
-    lines.append("")
-
-    # Component 声明
-    for comp in components_dict.values():
-        lines.append(f"component {comp.name} {{")
-        if comp.description:
-            lines.append(f'  description: "{comp.description}"')
-        if comp.system_prompt:
-            escaped = comp.system_prompt.replace('"', '\\"')
-            lines.append(f'  system_prompt: "{escaped}"')
-        if comp.model and comp.model.default:
-            lines.append(f'  model default: "{comp.model.default}"')
-        for port in comp.ports:
-            desc = f' "{port.description}"' if port.description else ""
-            lines.append(f"  port {port.direction} {port.name}: {port.type}{desc}")
-        lines.append("}")
-        lines.append("")
-
-    # Workflow 声明
-    lines.append(f"workflow {workflow.name} {{")
-
-    for agent in workflow.agents:
-        if agent.component:
-            lines.append(f"  agent {agent.name} use {agent.component}")
-        else:
-            lines.append(f"  agent {agent.name} {{}}")
-
-    # 连接
-    if workflow.connections:
-        lines.append("")
-        lines.append("  # 执行流")
-        for conn in workflow.connections:
-            targets = ", ".join(conn.target_agents)
-            if len(conn.target_agents) > 1:
-                targets = f"({targets})"
-            if conn.target_ports:
-                port_str = ", ".join(conn.target_ports)
-                lines.append(f"  {conn.source_agent} -> {targets}.{port_str}")
-            else:
-                lines.append(f"  {conn.source_agent} -> {targets}")
-
-    lines.append("}")
-    lines.append("")
-
-    return "\n".join(lines)
-
-
 # ==================== monitor 命令 ====================
 
 @main.command()
@@ -661,12 +582,28 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
         effective_provider = _get_default_provider()
 
         display.print_info(f"Loading workflow from {workflow_file}...")
-        workflow, components_dict, parse_result = _parse_workflow_file(workflow_file)
+        workflow = parse_file(workflow_file)
 
         agent_names = [agent.name for agent in workflow.agents]
-        display.print_workflow_info(workflow.name, agent_names, len(workflow.connections))
+        display.print_workflow_info(workflow.name, agent_names, len(workflow.edges))
 
-        agents = _create_agents_from_workflow(workflow, components_dict)
+        agents = {}
+        for agent_config in workflow.agents:
+            if agent_config.type.value == "condition":
+                rules = getattr(agent_config, 'rules', [])
+                agent = ConditionAgent(name=agent_config.name, rules=rules)
+            else:
+                # 解析模型名称：如果工作流指定的模型在当前 provider 中不存在，回退到默认模型
+                raw_model = agent_config.model or effective_model
+                resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
+                agent = LLMAgent(
+                    name=agent_config.name,
+                    model=resolved_model,
+                    prompt=agent_config.prompt,
+                    input_schema=agent_config.input_schema,
+                    output_schema=agent_config.output_schema,
+                )
+            agents[agent_config.name] = agent
 
         scheduler = Scheduler(workflow, agents)
 

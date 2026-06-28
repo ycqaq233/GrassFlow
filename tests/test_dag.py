@@ -9,8 +9,56 @@ DAG 引擎测试
 """
 
 import pytest
-from core.models import Workflow, AgentConfig, Edge, AgentType, InteractionType
+try:
+    from core.models import (
+        Component, Workflow, AgentInstance, Connection, Port, ModelConfig,
+        WorkflowV1, AgentConfig, Edge, AgentType, InteractionType,
+    )
+except ImportError:
+    from core.dsl_v2_ast import Component, Workflow, AgentInstance, Connection, Port, ModelConfig
+    from core.models import WorkflowV1, AgentConfig, Edge, AgentType, InteractionType
 from core.dag import DAG, DAGError, topological_sort, get_parallel_groups, detect_cycle
+
+
+def make_v1_workflow(
+    agents: list[tuple[str, str]] | None = None,
+    edges: list[tuple[str, str, str | None, str | None]] | None = None,
+    name: str = "test",
+) -> WorkflowV1:
+    """Helper: build a v1 Workflow from concise specs.
+
+    Args:
+        agents: list of (name, type_str) e.g. [("A", "llm"), ("B", "condition")]
+        edges: list of (source, target, interaction_str, condition)
+               interaction_str is one of "sequence","parallel","immediate","condition" or None
+        name: workflow name
+    """
+    type_map = {
+        "llm": AgentType.LLM,
+        "condition": AgentType.CONDITION,
+        "manual": AgentType.MANUAL,
+        "input": AgentType.INPUT,
+        "output": AgentType.OUTPUT,
+    }
+    interaction_map = {
+        "sequence": InteractionType.SEQUENCE,
+        "parallel": InteractionType.PARALLEL,
+        "immediate": InteractionType.IMMEDIATE,
+        "condition": InteractionType.CONDITION,
+        None: InteractionType.SEQUENCE,
+    }
+
+    wf = WorkflowV1(name=name)
+    for agent_name, agent_type in (agents or []):
+        wf.add_agent(AgentConfig(name=agent_name, type=type_map.get(agent_type, AgentType.LLM)))
+    for src, tgt, itype, cond in (edges or []):
+        wf.add_edge(Edge(
+            source=src,
+            target=tgt,
+            interaction_type=interaction_map.get(itype, InteractionType.SEQUENCE),
+            condition=cond,
+        ))
+    return wf
 
 
 class TestDAG:
@@ -18,12 +66,10 @@ class TestDAG:
 
     def test_simple_sequence(self):
         """测试简单顺序：A -> B -> C"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B"))
-        workflow.add_edge(Edge(source="B", target="C"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            edges=[("A", "B", None, None), ("B", "C", None, None)],
+        )
 
         dag = DAG(workflow)
         order = dag.topological_sort()
@@ -34,12 +80,10 @@ class TestDAG:
 
     def test_parallel_execution(self):
         """测试并行执行：(A, B) -> C"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="C", interaction_type=InteractionType.PARALLEL))
-        workflow.add_edge(Edge(source="B", target="C", interaction_type=InteractionType.PARALLEL))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            edges=[("A", "C", "parallel", None), ("B", "C", "parallel", None)],
+        )
 
         dag = DAG(workflow)
         groups = dag.get_parallel_groups()
@@ -51,15 +95,15 @@ class TestDAG:
 
     def test_diamond_pattern(self):
         """测试菱形依赖：A -> (B, C) -> D"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="D", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B"))
-        workflow.add_edge(Edge(source="A", target="C"))
-        workflow.add_edge(Edge(source="B", target="D"))
-        workflow.add_edge(Edge(source="C", target="D"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm"), ("D", "llm")],
+            edges=[
+                ("A", "B", None, None),
+                ("A", "C", None, None),
+                ("B", "D", None, None),
+                ("C", "D", None, None),
+            ],
+        )
 
         dag = DAG(workflow)
         groups = dag.get_parallel_groups()
@@ -72,29 +116,27 @@ class TestDAG:
 
     def test_cycle_detection(self):
         """测试环检测：A -> B -> C -> A（应该报错）"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B"))
-        workflow.add_edge(Edge(source="B", target="C"))
-        workflow.add_edge(Edge(source="C", target="A"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            edges=[("A", "B", None, None), ("B", "C", None, None), ("C", "A", None, None)],
+        )
 
         with pytest.raises(DAGError, match="Cycle detected"):
             DAG(workflow)
 
     def test_self_loop_detection(self):
         """测试自环检测：A -> A（应该报错）"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="A"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm")],
+            edges=[("A", "A", None, None)],
+        )
 
         with pytest.raises(DAGError, match="Cycle detected"):
             DAG(workflow)
 
     def test_empty_workflow(self):
         """测试空工作流"""
-        workflow = Workflow(name="test")
+        workflow = WorkflowV1(name="test")
         dag = DAG(workflow)
 
         assert dag.topological_sort() == []
@@ -102,8 +144,7 @@ class TestDAG:
 
     def test_single_agent(self):
         """测试单个 Agent"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
+        workflow = make_v1_workflow(agents=[("A", "llm")])
 
         dag = DAG(workflow)
         assert dag.topological_sort() == ["A"]
@@ -111,12 +152,10 @@ class TestDAG:
 
     def test_get_dependencies(self):
         """测试获取依赖关系"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="C"))
-        workflow.add_edge(Edge(source="B", target="C"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            edges=[("A", "C", None, None), ("B", "C", None, None)],
+        )
 
         dag = DAG(workflow)
 
@@ -126,12 +165,10 @@ class TestDAG:
 
     def test_get_dependents(self):
         """测试获取被依赖关系"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B"))
-        workflow.add_edge(Edge(source="A", target="C"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            edges=[("A", "B", None, None), ("A", "C", None, None)],
+        )
 
         dag = DAG(workflow)
 
@@ -141,12 +178,10 @@ class TestDAG:
 
     def test_is_ready(self):
         """测试判断 Agent 是否就绪"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="C"))
-        workflow.add_edge(Edge(source="B", target="C"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            edges=[("A", "C", None, None), ("B", "C", None, None)],
+        )
 
         dag = DAG(workflow)
 
@@ -163,10 +198,10 @@ class TestDAG:
 
     def test_immediate_interaction(self):
         """测试立即执行类型：A | B"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B", interaction_type=InteractionType.IMMEDIATE))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm")],
+            edges=[("A", "B", "immediate", None)],
+        )
 
         dag = DAG(workflow)
 
@@ -176,12 +211,13 @@ class TestDAG:
 
     def test_condition_interaction(self):
         """测试条件分支类型"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="route", type=AgentType.CONDITION))
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="route", target="A", interaction_type=InteractionType.CONDITION, condition="urgent"))
-        workflow.add_edge(Edge(source="route", target="B", interaction_type=InteractionType.CONDITION, condition="normal"))
+        workflow = make_v1_workflow(
+            agents=[("route", "condition"), ("A", "llm"), ("B", "llm")],
+            edges=[
+                ("route", "A", "condition", "urgent"),
+                ("route", "B", "condition", "normal"),
+            ],
+        )
 
         dag = DAG(workflow)
 
@@ -193,29 +229,22 @@ class TestDAG:
 
     def test_complex_workflow(self):
         """测试复杂工作流：多个并行组和条件分支"""
-        workflow = Workflow(name="test")
-        # 输入层
-        workflow.add_agent(AgentConfig(name="input1", type=AgentType.INPUT))
-        workflow.add_agent(AgentConfig(name="input2", type=AgentType.INPUT))
-
-        # 处理层（并行）
-        workflow.add_agent(AgentConfig(name="process1", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="process2", type=AgentType.LLM))
-
-        # 路由层
-        workflow.add_agent(AgentConfig(name="route", type=AgentType.CONDITION))
-
-        # 输出层
-        workflow.add_agent(AgentConfig(name="output1", type=AgentType.OUTPUT))
-        workflow.add_agent(AgentConfig(name="output2", type=AgentType.OUTPUT))
-
-        # 边
-        workflow.add_edge(Edge(source="input1", target="process1"))
-        workflow.add_edge(Edge(source="input2", target="process2"))
-        workflow.add_edge(Edge(source="process1", target="route"))
-        workflow.add_edge(Edge(source="process2", target="route"))
-        workflow.add_edge(Edge(source="route", target="output1", interaction_type=InteractionType.CONDITION, condition="success"))
-        workflow.add_edge(Edge(source="route", target="output2", interaction_type=InteractionType.CONDITION, condition="fail"))
+        workflow = make_v1_workflow(
+            agents=[
+                ("input1", "input"), ("input2", "input"),
+                ("process1", "llm"), ("process2", "llm"),
+                ("route", "condition"),
+                ("output1", "output"), ("output2", "output"),
+            ],
+            edges=[
+                ("input1", "process1", None, None),
+                ("input2", "process2", None, None),
+                ("process1", "route", None, None),
+                ("process2", "route", None, None),
+                ("route", "output1", "condition", "success"),
+                ("route", "output2", "condition", "fail"),
+            ],
+        )
 
         dag = DAG(workflow)
         order = dag.topological_sort()
@@ -226,12 +255,10 @@ class TestDAG:
 
     def test_multiple_roots(self):
         """测试多个根节点"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="C"))
-        workflow.add_edge(Edge(source="B", target="C"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            edges=[("A", "C", None, None), ("B", "C", None, None)],
+        )
 
         dag = DAG(workflow)
         roots = dag.get_roots()
@@ -240,12 +267,10 @@ class TestDAG:
 
     def test_multiple_leaves(self):
         """测试多个叶子节点"""
-        workflow = Workflow(name="test")
-        workflow.add_agent(AgentConfig(name="A", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="B", type=AgentType.LLM))
-        workflow.add_agent(AgentConfig(name="C", type=AgentType.LLM))
-        workflow.add_edge(Edge(source="A", target="B"))
-        workflow.add_edge(Edge(source="A", target="C"))
+        workflow = make_v1_workflow(
+            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+            edges=[("A", "B", None, None), ("A", "C", None, None)],
+        )
 
         dag = DAG(workflow)
         leaves = dag.get_leaves()

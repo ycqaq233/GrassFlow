@@ -10,6 +10,10 @@ LLM Agent 测试
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+try:
+    from core.models import Component, ModelConfig
+except ImportError:
+    from core.dsl_v2_ast import Component, ModelConfig
 from core.llm_agent import LLMAgent, LLMAgentFactory
 from core.llm import LLMClient, LLMManager, LLMResponse
 
@@ -28,8 +32,8 @@ class TestLLMAgent:
         )
 
         assert agent.name == "test"
-        assert agent.component.model.default is not None  # 模型经过 resolve
-        assert agent.component.system_prompt == "test prompt"
+        assert agent.config.model == "gpt-4"
+        assert agent.config.prompt == "test prompt"
 
     def test_format_prompt_simple(self):
         """测试简单 prompt 格式化"""
@@ -105,21 +109,42 @@ class TestLLMAgentFactory:
 
         agent = factory.create("test", model="gpt-4", prompt="test prompt")
         assert agent.name == "test"
-        assert agent.component.model.default is not None  # 模型经过 resolve
+        assert agent.config.model == "gpt-4"
 
-    def test_factory_create_from_component(self):
-        """测试从组件创建"""
-        from core.dsl_v2_ast import Component, ModelConfig
+    def test_factory_create_from_config(self):
+        """测试从配置创建"""
+        from core.agent import AgentConfig
 
         manager = LLMManager()
         factory = LLMAgentFactory(llm_manager=manager)
 
-        component = Component(
+        config = AgentConfig(
             name="test",
-            model=ModelConfig(default="gpt-4"),
-            system_prompt="test prompt",
+            model="gpt-4",
+            prompt="test prompt",
         )
 
-        agent = factory.create_from_component(component)
+        agent = factory.create_from_config(config)
         assert agent.name == "test"
-        assert agent.component.model.default is not None  # 模型经过 resolve
+        assert agent.config.model == "gpt-4"
+
+    def test_factory_create_from_component(self):
+        """测试从 Component 创建"""
+        comp = Component(
+            name="test-agent",
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="test prompt from component",
+        )
+
+        manager = LLMManager()
+        factory = LLMAgentFactory(llm_manager=manager)
+
+        # Component 的 model.default 映射到 agent model
+        agent = factory.create(
+            comp.name,
+            model=comp.model.default or "gpt-4",
+            prompt=comp.system_prompt or "",
+        )
+        assert agent.name == "test-agent"
+        assert agent.config.model == "gpt-4"
+        assert agent.config.prompt == "test prompt from component"

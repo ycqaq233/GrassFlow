@@ -23,8 +23,7 @@ try:
 except ImportError:
     HAS_RICH = False
 
-from core.models import Workflow
-from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+from core.models import WorkflowV1 as Workflow, ExecutionRecord, AgentExecutionRecord, ExecutionStatus
 from core.context import WorkflowContext
 from core.scheduler import Scheduler
 

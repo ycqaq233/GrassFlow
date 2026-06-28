@@ -7,7 +7,10 @@ import pytest
 from core.agent import Agent
 from core.dsl_v2_ast import Component, Port, ModelConfig
 from core.context import WorkflowContext
-from core.models import Workflow, AgentConfig as ModelAgentConfig, Edge, InteractionType
+try:
+    from core.models import Workflow, AgentInstance, Connection
+except ImportError:
+    from core.dsl_v2_ast import Workflow, AgentInstance, Connection
 
 
 # 测试用的 Agent 实现
@@ -115,55 +118,71 @@ def test_context_dependency_data(context, mock_agent):
     assert deps["_deps"]["dep2"] == {"output": "test2"}
 
 
-# Workflow 测试
+# Workflow 测试 (v2 dataclass)
 def test_workflow_creation():
     """测试 Workflow 创建"""
     workflow = Workflow(name="test_workflow")
     assert workflow.name == "test_workflow"
     assert len(workflow.agents) == 0
-    assert len(workflow.edges) == 0
+    assert len(workflow.connections) == 0
+    assert workflow.ports == []
+    assert workflow.output_mappings == {}
 
 
-def test_workflow_add_agent():
-    """测试添加 Agent"""
-    workflow = Workflow(name="test_workflow")
-    agent_config = ModelAgentConfig(name="agent1")
-    workflow.add_agent(agent_config)
+def test_workflow_with_agents():
+    """测试带 Agent 的 Workflow"""
+    workflow = Workflow(
+        name="test_workflow",
+        agents=[
+            AgentInstance(name="agent1"),
+            AgentInstance(name="agent2"),
+        ],
+    )
 
-    assert len(workflow.agents) == 1
-    assert workflow.get_agent("agent1") is not None
-
-
-def test_workflow_add_duplicate_agent():
-    """测试添加重复 Agent"""
-    workflow = Workflow(name="test_workflow")
-    agent_config = ModelAgentConfig(name="agent1")
-    workflow.add_agent(agent_config)
-
-    with pytest.raises(ValueError):
-        workflow.add_agent(agent_config)
+    assert len(workflow.agents) == 2
+    assert workflow.agents[0].name == "agent1"
+    assert workflow.agents[1].name == "agent2"
 
 
-def test_workflow_add_edge():
-    """测试添加边"""
-    workflow = Workflow(name="test_workflow")
-    workflow.add_agent(ModelAgentConfig(name="agent1"))
-    workflow.add_agent(ModelAgentConfig(name="agent2"))
+def test_workflow_with_connections():
+    """测试带连接的 Workflow"""
+    workflow = Workflow(
+        name="test_workflow",
+        agents=[
+            AgentInstance(name="agent1"),
+            AgentInstance(name="agent2"),
+        ],
+        connections=[
+            Connection(source_agent="agent1", target_agents=["agent2"]),
+        ],
+    )
 
-    edge = Edge(source="agent1", target="agent2")
-    workflow.add_edge(edge)
+    assert len(workflow.connections) == 1
+    assert workflow.connections[0].source_agent == "agent1"
+    assert workflow.connections[0].target_agents == ["agent2"]
 
-    assert len(workflow.edges) == 1
+
+def test_workflow_with_component_reference():
+    """测试引用组件的 Workflow"""
+    workflow = Workflow(
+        name="test_workflow",
+        agents=[
+            AgentInstance(name="reviewer", component="code-reviewer"),
+        ],
+    )
+
+    assert workflow.agents[0].component == "code-reviewer"
 
 
-def test_workflow_add_edge_invalid_source():
-    """测试添加边时源 Agent 不存在"""
-    workflow = Workflow(name="test_workflow")
-    workflow.add_agent(ModelAgentConfig(name="agent2"))
+def test_workflow_with_output_mappings():
+    """测试带输出映射的 Workflow"""
+    workflow = Workflow(
+        name="test_workflow",
+        agents=[AgentInstance(name="proc")],
+        output_mappings={"result": "proc.output"},
+    )
 
-    edge = Edge(source="nonexistent", target="agent2")
-    with pytest.raises(ValueError):
-        workflow.add_edge(edge)
+    assert workflow.output_mappings == {"result": "proc.output"}
 
 
 if __name__ == "__main__":

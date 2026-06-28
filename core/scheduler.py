@@ -1,25 +1,22 @@
 """
-GrassFlow 调度器 (v2)
+GrassFlow 调度器
 
 实现功能：
 - asyncio 并行调度
-- port-aware 输入映射
-- 基于 Connection 的条件判断
+- 顺序/并行执行
 - 失败策略（stop/skip/retry）
+- 条件分支
 """
 
 import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any, Optional, Set
 from datetime import datetime
-
-try:
-    from core.models import Workflow, AgentInstance
-except ImportError:
-    from core.dsl_v2_ast import Workflow, AgentInstance
-from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
-from core.agent import Agent
-from core.dag import DAG, DAGError
+from core.models import (
+    WorkflowV1 as Workflow, AgentConfig, Edge, AgentType,
+    InteractionType, ExecutionStatus, ExecutionRecord, AgentExecutionRecord
+)
 from core.context import WorkflowContext
+from core.dag import DAG, DAGError
 
 
 class SchedulerError(Exception):
@@ -28,14 +25,14 @@ class SchedulerError(Exception):
 
 
 class Scheduler:
-    """工作流调度器 (v2 - port-aware)"""
+    """工作流调度器"""
 
-    def __init__(self, workflow: Workflow, agents: Dict[str, Agent]):
+    def __init__(self, workflow: Workflow, agents: Dict[str, Any]):
         """
         初始化调度器
 
         Args:
-            workflow: 工作流定义 (v2 Workflow)
+            workflow: 工作流定义
             agents: Agent 实例字典，key 为 Agent 名称，value 为 Agent 实例
         """
         self.workflow = workflow
@@ -56,8 +53,10 @@ class Scheduler:
         self.execution_record.start()
 
         try:
+            # 获取并行执行组
             groups = self.dag.get_parallel_groups()
 
+            # 按组执行
             for group in groups:
                 await self._execute_group(group, context)
 
@@ -69,7 +68,7 @@ class Scheduler:
 
         return self.execution_record
 
-    async def _execute_group(self, group: List[str], context: WorkflowContext) -> None:
+    async def _execute_group(self, group: list, context: WorkflowContext) -> None:
         """
         执行一组可以并行执行的 Agent
 
@@ -77,25 +76,34 @@ class Scheduler:
             group: Agent 名称列表
             context: 工作流上下文
         """
-        agents_to_execute = [
-            name for name in group
-            if self._should_execute(name, context)
-        ]
+        # 过滤出需要执行的 Agent
+        agents_to_execute = []
+        for agent_name in group:
+            # 检查是否满足执行条件
+            if self._should_execute(agent_name, context):
+                agents_to_execute.append(agent_name)
 
         if not agents_to_execute:
             return
 
-        tasks = [
-            asyncio.create_task(self._execute_agent(name, context))
-            for name in agents_to_execute
-        ]
+        # 并行执行所有 Agent
+        tasks = []
+        for agent_name in agents_to_execute:
+            task = asyncio.create_task(
+                self._execute_agent(agent_name, context)
+            )
+            tasks.append(task)
 
+        # 等待所有任务完成
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # 处理结果
         for agent_name, result in zip(agents_to_execute, results):
             if isinstance(result, Exception):
+                # 执行失败
                 await self._handle_failure(agent_name, result, context)
             else:
+                # 执行成功
                 context.set(agent_name, result)
 
     async def _execute_agent(self, agent_name: str, context: WorkflowContext) -> Dict[str, Any]:
@@ -113,17 +121,21 @@ class Scheduler:
         if not agent:
             raise SchedulerError(f"Agent '{agent_name}' not found")
 
+        # 创建执行记录
         record = AgentExecutionRecord(agent_name=agent_name)
         record.started_at = datetime.now()
         record.status = ExecutionStatus.RUNNING
         self.execution_record.agent_records[agent_name] = record
 
         try:
+            # 准备输入数据
             input_data = self._prepare_input(agent_name, context)
             record.input_data = input_data
 
-            output = await agent.execute(input_data)
+            # 执行 Agent
+            output = await agent.run(input_data)
 
+            # 更新执行记录
             record.status = ExecutionStatus.COMPLETED
             record.output_data = output
             record.completed_at = datetime.now()
@@ -135,6 +147,7 @@ class Scheduler:
             return output
 
         except Exception as e:
+            # 更新执行记录
             record.status = ExecutionStatus.FAILED
             record.error = str(e)
             record.completed_at = datetime.now()
@@ -142,16 +155,12 @@ class Scheduler:
                 record.duration_ms = int(
                     (record.completed_at - record.started_at).total_seconds() * 1000
                 )
+
             raise
 
     def _prepare_input(self, agent_name: str, context: WorkflowContext) -> Dict[str, Any]:
         """
-        准备 Agent 输入数据 (port-aware)
-
-        按 Connection 的端口映射组装输入：
-        - 有 source_port + target_ports 时做端口到端口映射
-        - 否则将源输出整体合并
-        - 始终附带 _deps 字段
+        准备 Agent 输入数据
 
         Args:
             agent_name: Agent 名称
@@ -160,34 +169,17 @@ class Scheduler:
         Returns:
             输入数据字典
         """
-        incoming = self.dag.get_incoming_connections(agent_name)
+        # 获取依赖数据
+        dependencies = self.dag.get_dependencies(agent_name)
+        deps = {}
+        for dep_name in dependencies:
+            deps[dep_name] = context.get(dep_name)
 
-        port_inputs: Dict[str, Any] = {}
-        deps: Dict[str, Any] = {}
-
-        for conn in incoming:
-            source_output = context.get(conn.source_agent)
-            deps[conn.source_agent] = source_output
-
-            if conn.source_port and conn.target_ports:
-                for tp in conn.target_ports:
-                    if conn.source_port in source_output:
-                        port_inputs[tp] = source_output[conn.source_port]
-            else:
-                if isinstance(source_output, dict):
-                    port_inputs.update(source_output)
-
-        result = port_inputs if port_inputs else {}
-        result["_deps"] = deps
-        return result
+        return {"_deps": deps}
 
     def _should_execute(self, agent_name: str, context: WorkflowContext) -> bool:
         """
-        判断 Agent 是否应该执行 (基于 Connection)
-
-        规则：
-        - 无入连接 -> 根节点，直接执行
-        - 有入连接 -> 检查所有源 Agent 是否已执行完成
+        判断 Agent 是否应该执行
 
         Args:
             agent_name: Agent 名称
@@ -196,22 +188,34 @@ class Scheduler:
         Returns:
             如果应该执行返回 True，否则返回 False
         """
-        incoming = self.dag.get_incoming_connections(agent_name)
+        # 获取入边
+        incoming_edges = self.dag.get_incoming_edges(agent_name)
 
-        if not incoming:
+        # 如果没有入边，说明是起始节点，应该执行
+        if not incoming_edges:
             return True
 
-        completed = set(context._data.keys())
+        # 检查条件分支
+        condition_edges = [
+            edge for edge in incoming_edges
+            if edge.interaction_type == InteractionType.CONDITION
+        ]
 
-        for conn in incoming:
-            if conn.source_agent not in completed:
-                return False
+        if condition_edges:
+            # 是条件分支节点，检查是否有匹配的条件
+            for edge in condition_edges:
+                source_output = context.get(edge.source)
+                if source_output:
+                    # 检查 route 字段或其他条件
+                    route_value = source_output.get("route")
+                    if route_value == edge.condition:
+                        return True
+            return False
 
-        return True
+        # 检查所有依赖是否都已完成
+        return self.dag.is_ready(agent_name, set(context._data.keys()))
 
-    async def _handle_failure(
-        self, agent_name: str, error: Exception, context: WorkflowContext
-    ) -> None:
+    async def _handle_failure(self, agent_name: str, error: Exception, context: WorkflowContext) -> None:
         """
         处理 Agent 执行失败
 
@@ -220,41 +224,29 @@ class Scheduler:
             error: 异常
             context: 工作流上下文
         """
-        agent_instance = None
-        for a in self.workflow.agents:
-            if a.name == agent_name:
-                agent_instance = a
-                break
+        agent_config = self.workflow.get_agent(agent_name)
+        if not agent_config:
+            raise SchedulerError(f"Agent config '{agent_name}' not found")
 
-        on_fail = "stop"
-        retry_count = 3
-        if agent_instance:
-            on_fail = getattr(agent_instance, "on_fail", "stop") or "stop"
-            retry_count = getattr(agent_instance, "retry_count", 3) or 3
+        on_fail = agent_config.on_fail
 
         if on_fail == "stop":
+            # 停止整个工作流
             raise error
 
         elif on_fail == "skip":
+            # 跳过该 Agent，用空结果继续
             context.set(agent_name, {})
-            record = self.execution_record.agent_records.get(agent_name)
-            if record:
-                record.status = ExecutionStatus.SKIPPED
 
         elif on_fail == "retry":
+            # 重试
+            retry_count = agent_config.retry_count
             for i in range(retry_count):
                 try:
                     agent = self.agents.get(agent_name)
-                    if not agent:
-                        raise SchedulerError(f"Agent '{agent_name}' not found")
                     input_data = self._prepare_input(agent_name, context)
-                    output = await agent.execute(input_data)
+                    output = await agent.run(input_data)
                     context.set(agent_name, output)
-                    record = self.execution_record.agent_records.get(agent_name)
-                    if record:
-                        record.status = ExecutionStatus.COMPLETED
-                        record.output_data = output
-                        record.error = None
                     return
                 except Exception:
                     if i == retry_count - 1:
