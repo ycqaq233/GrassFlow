@@ -267,8 +267,16 @@ class ComponentAgent(Agent):
         return self._ports.get(name)
 
     @property
+    def name(self) -> str:
+        return self._agent_name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._agent_name = value
+
+    @property
     def component(self) -> Component:
-        return self._original_component
+        return self._component
 
     @property
     def agent_name(self) -> str:

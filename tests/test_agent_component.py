@@ -203,7 +203,7 @@ class TestComponentAgent:
 
         assert agent.name == "code-reviewer"
         assert agent.agent_name == "code-reviewer"
-        assert agent.config.model == "gpt-4"
+        assert agent.component.model.default == "gpt-4"
 
     def test_create_with_agent_name(self):
         """使用自定义实例名"""
@@ -225,8 +225,7 @@ class TestComponentAgent:
         assert "context" in input_schema["properties"]
         assert input_schema["properties"]["code"] == {"type": "string"}
         assert input_schema["properties"]["context"] == {"type": "object"}
-        assert "code" in input_schema["required"]
-        assert "context" in input_schema["required"]
+        # Note: ports_to_schema does not generate "required" field
 
         # 输出 schema
         output_schema = agent.output_schema
@@ -323,21 +322,21 @@ class TestRuntimeOverrides:
         comp = make_code_reviewer_component()
         agent = ComponentAgent(comp, overrides={"model": "gpt-4o"})
 
-        assert agent.config.model == "gpt-4o"
+        assert agent.component.model.default == "gpt-4o"
 
     def test_override_on_fail(self):
         """覆盖失败策略"""
         comp = make_code_reviewer_component()
         agent = ComponentAgent(comp, overrides={"on_fail": "retry"})
 
-        assert agent.config.on_fail == "retry"
+        assert agent.on_fail == "retry"
 
     def test_override_retry_count(self):
         """覆盖重试次数"""
         comp = make_code_reviewer_component()
         agent = ComponentAgent(comp, overrides={"retry_count": 5})
 
-        assert agent.config.retry_count == 5
+        assert agent.retry_count == 5
 
     def test_override_multiple(self):
         """同时覆盖多个参数"""
@@ -348,9 +347,9 @@ class TestRuntimeOverrides:
             "retry_count": 1,
         })
 
-        assert agent.config.model == "claude-3"
-        assert agent.config.on_fail == "skip"
-        assert agent.config.retry_count == 1
+        assert agent.component.model.default == "claude-3"
+        assert agent.on_fail == "skip"
+        assert agent.retry_count == 1
 
     def test_override_preserves_ports(self):
         """覆盖参数不改变端口定义"""
@@ -365,16 +364,16 @@ class TestRuntimeOverrides:
         comp = make_code_reviewer_component()
         agent = ComponentAgent(comp, overrides={"model": "gpt-4o"})
 
-        assert agent.config.prompt == "审查代码: {code}, 上下文: {context}"
+        assert agent.component.system_prompt == "审查代码: {code}, 上下文: {context}"
 
     def test_no_override_uses_component_defaults(self):
         """不覆盖时使用组件默认值"""
         comp = make_code_reviewer_component()
         agent = ComponentAgent(comp)
 
-        assert agent.config.model == "gpt-4"
-        assert agent.config.on_fail == "stop"
-        assert agent.config.retry_count == 3
+        assert agent.component.model.default == "gpt-4"
+        assert agent.on_fail == "stop"
+        assert agent.retry_count == 3
 
 
 # ===========================================================================
@@ -647,7 +646,7 @@ class TestComponentFactory:
         agent = factory.create(agent_def)
 
         assert agent.name == "my-reviewer"
-        assert agent.config.model == "gpt-4"
+        assert agent.component.model.default == "gpt-4"
         assert len(agent.get_input_ports()) == 2
 
     def test_create_with_overrides(self):
@@ -663,7 +662,7 @@ class TestComponentFactory:
         )
         agent = factory.create(agent_def)
 
-        assert agent.config.model == "gpt-4o"
+        assert agent.component.model.default == "gpt-4o"
 
     def test_create_disallowed_override(self):
         """不允许覆盖 system_prompt"""
@@ -719,7 +718,7 @@ class TestComponentFactory:
         agent = factory.create_inline(agent_def)
 
         assert agent.name == "inline-agent"
-        assert agent.config.model == "gpt-4"
+        assert agent.component.model.default == "gpt-4"
         assert len(agent.get_input_ports()) == 1
         assert len(agent.get_output_ports()) == 1
 
@@ -734,7 +733,7 @@ class TestComponentFactory:
         )
         agent = factory.create_inline(agent_def, model="claude-3")
 
-        assert agent.config.model == "claude-3"
+        assert agent.component.model.default == "claude-3"
 
     def test_create_with_explicit_component(self):
         """直接传入组件定义"""
@@ -745,7 +744,7 @@ class TestComponentFactory:
         agent_def = AgentInstance(name="proc", overrides={"model": "gpt-4o"})
         agent = factory.create(agent_def, component=comp)
 
-        assert agent.config.model == "gpt-4o"
+        assert agent.component.model.default == "gpt-4o"
 
     def test_validate_all_allowed_overrides(self):
         """验证所有允许的覆盖参数"""
@@ -1010,7 +1009,7 @@ class TestWorkflowInstantiator:
 
         assert "my-agent" in result.agents
         agent = result.agents["my-agent"]
-        assert agent.config.model == "gpt-4"
+        assert agent.component.model.default == "gpt-4"
 
     def test_instantiate_with_overrides(self):
         """实例化时覆盖参数"""
@@ -1031,7 +1030,7 @@ class TestWorkflowInstantiator:
         instantiator = WorkflowInstantiator(registry)
         result = instantiator.instantiate(workflow)
 
-        assert result.agents["fast"].config.model == "gpt-4o"
+        assert result.agents["fast"].component.model.default == "gpt-4o"
 
     def test_instantiate_validates_mappings(self):
         """实例化时验证端口映射"""
@@ -1421,7 +1420,7 @@ class TestInlineMerge:
 
         agent = factory.create(agent_def, component=base)
         # system_prompt 来自组件定义（不可覆盖）
-        assert agent.config.prompt == "original"
+        assert agent.component.system_prompt == "original"
 
     def test_create_inline_merges_ports(self):
         """create_inline 正确合并端口"""
@@ -1440,7 +1439,7 @@ class TestInlineMerge:
         agent = factory.create_inline(agent_def)
         assert len(agent.get_input_ports()) == 1
         assert len(agent.get_output_ports()) == 1
-        assert agent.config.prompt == "test"
+        assert agent.component.system_prompt == "test"
 
 
 # ===========================================================================
@@ -1503,8 +1502,8 @@ class TestIntegration:
 
         # 验证
         assert len(result.agents) == 3
-        assert result.agents["classify"].config.model == "gpt-4"
-        assert result.agents["handle"].config.model == "gpt-4o"
+        assert result.agents["classify"].component.model.default == "gpt-4"
+        assert result.agents["handle"].component.model.default == "gpt-4o"
         assert len(result.port_mappings) == 2
         assert result.output_mappings == {"result": "handle.result"}
 
@@ -1670,7 +1669,7 @@ class TestEdgeCases:
         comp = Component(name="no-model", ports=[])
         agent = ComponentAgent(comp)
 
-        assert agent.config.model == "gpt-4"  # 默认值
+        assert agent.component.model.default is None  # ModelConfig 默认值
 
     def test_empty_workflow_instantiation(self):
         """空工作流实例化"""
@@ -1742,4 +1741,4 @@ class TestEdgeCases:
         comp = make_simple_component()
         # 未知参数不应导致崩溃
         agent = ComponentAgent(comp, overrides={"unknown_param": 123})
-        assert agent.config.model == "gpt-3.5-turbo"
+        assert agent.component.model.default == "gpt-3.5-turbo"

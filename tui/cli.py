@@ -32,6 +32,7 @@ from core.llm_agent import LLMAgent
 from core.storage import workflow_storage, _dataclass_to_dict
 from core.db import execution_db
 from core.monitor import monitor
+from core.tool_registry import register_builtin_tools, get_default_registry
 from tui.dsl_parser import parse_file, parse_file_result
 from tui.display import display, progress_display
 from tui.error_handler import handle_cli_error, ErrorContext
@@ -152,6 +153,12 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
             display.print_info(f"  Model: {effective_provider}/{effective_model}")
             display.print_info(f"  Streaming: {'on' if stream else 'off'}")
 
+        # 注册内置工具
+        tool_registry = get_default_registry()
+        tool_count = register_builtin_tools(tool_registry)
+        if tool_count > 0:
+            display.print_info(f"  Registered {tool_count} builtin tools")
+
         # 创建 Agent 实例
         import copy
         agents = {}
@@ -188,7 +195,22 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
                 rules = agent_instance.overrides.get("rules", [])
                 agent = ConditionAgent(component, rules=rules)
             else:
-                agent = LLMAgent(component=component)
+                # 根据 component 权限过滤工具
+                from core.tool_registry import create_filtered_registry
+                if component.permission and (component.permission.allow or component.permission.deny):
+                    agent_registry = create_filtered_registry(tool_registry, component.permission)
+                else:
+                    agent_registry = tool_registry
+                agent = LLMAgent(component=component, tool_registry=agent_registry)
+
+                # 记录 MCP 声明（基础版：仅打印日志，不做实际连接）
+                if component.mcp:
+                    for mcp in component.mcp:
+                        display.print_info(
+                            f"  [MCP] {component.name} declares MCP server "
+                            f"'{mcp.server_name}' with tools: {mcp.tools}"
+                        )
+
             agents[agent_instance.name] = agent
 
         # 解析工作流输入
@@ -584,6 +606,12 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool, workflow_
         agent_names = [agent.name for agent in workflow.agents]
         display.print_workflow_info(workflow.name, agent_names, len(workflow.connections))
 
+        # 注册内置工具
+        tool_registry = get_default_registry()
+        tool_count = register_builtin_tools(tool_registry)
+        if tool_count > 0:
+            display.print_info(f"  Registered {tool_count} builtin tools")
+
         agents = {}
         import copy
         for agent_instance in workflow.agents:
@@ -613,7 +641,22 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool, workflow_
                 rules = agent_instance.overrides.get("rules", [])
                 agent = ConditionAgent(component, rules=rules)
             else:
-                agent = LLMAgent(component=component)
+                # 根据 component 权限过滤工具
+                from core.tool_registry import create_filtered_registry
+                if component.permission and (component.permission.allow or component.permission.deny):
+                    agent_registry = create_filtered_registry(tool_registry, component.permission)
+                else:
+                    agent_registry = tool_registry
+                agent = LLMAgent(component=component, tool_registry=agent_registry)
+
+                # 记录 MCP 声明（基础版：仅打印日志，不做实际连接）
+                if component.mcp:
+                    for mcp in component.mcp:
+                        display.print_info(
+                            f"  [MCP] {component.name} declares MCP server "
+                            f"'{mcp.server_name}' with tools: {mcp.tools}"
+                        )
+
             agents[agent_instance.name] = agent
 
         # 解析工作流输入

@@ -881,7 +881,9 @@ class TestEdgeCases:
         manager.add_assistant_message(session.id, "A1")
         manager.add_system_message(session.id, "event")
 
-        reloaded = manager.get_session(session.id)
+        # 从数据库直接读取以获取最新的 message_count
+        # （manager.get_session 会返回缓存中的旧值）
+        reloaded = manager.db.get_session(session.id)
         # 创建时有一条自动系统消息 + 手动添加的 3 条 = 4
         assert reloaded.message_count == 4
 

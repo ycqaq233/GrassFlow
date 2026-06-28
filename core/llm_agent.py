@@ -5,8 +5,9 @@ GrassFlow LLM Agent
 LLMAgent 从 Component 构造。
 """
 
+import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from core.agent import Agent
 from core.models import Component, ModelConfig
@@ -100,6 +101,7 @@ class LLMAgent(Agent):
         component: Component,
         llm_client: Optional[LLMClient] = None,
         llm_manager: Optional[LLMManager] = None,
+        tool_registry=None,
     ):
         """
         从 Component 初始化 LLMAgent
@@ -108,8 +110,10 @@ class LLMAgent(Agent):
             component: DSL v2 组件定义
             llm_client: LLM 客户端实例（优先使用）
             llm_manager: LLM 管理器（用于获取客户端）
+            tool_registry: 工具注册表（core.tool_registry.ToolRegistry），用于工具调用
         """
         super().__init__(component)
+        self.tool_registry = tool_registry
 
         # 解析模型名称（处理 'default'、provider 前缀等）
         raw_model = component.model.default or "default"
@@ -148,6 +152,15 @@ class LLMAgent(Agent):
                     api_key=api_key,
                     base_url=base_url,
                 )
+
+        # 记录 MCP 声明（基础版：仅打印日志，不做实际连接）
+        if component.mcp:
+            for mcp in component.mcp:
+                logger.info(
+                    "[MCP] %s declares MCP server '%s' with tools: %s",
+                    component.name, mcp.server_name, mcp.tools,
+                )
+                # TODO: 实际连接 MCP 服务器并注册工具
 
     @property
     def resolved_model(self) -> str:
@@ -212,6 +225,11 @@ class LLMAgent(Agent):
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        # 如果有工具注册表，使用工具调用循环
+        if self.tool_registry:
+            return await self._run_with_tools(messages, input_data)
+
+        # 原有的无工具路径
         response = await self._client.chat(
             messages=messages,
             temperature=self.temperature,
@@ -227,6 +245,117 @@ class LLMAgent(Agent):
         }
 
         return result
+
+    async def _run_with_tools(self, messages: List[Dict], input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """带工具调用的执行循环"""
+        max_iterations = 10
+        tools_schema = self._get_tools_schema()
+        total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        last_model = ""
+        tool_calls_log = []
+
+        for i in range(max_iterations):
+            response = await self._client.chat(
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                tools=tools_schema,
+            )
+
+            # 累计 usage
+            if response.usage:
+                for key in total_usage:
+                    total_usage[key] += response.usage.get(key, 0)
+            last_model = response.model
+
+            # 如果有工具调用，执行它们
+            if response.tool_calls:
+                # 把 assistant 消息（含 tool_calls）加入 messages
+                assistant_msg: Dict[str, Any] = {"role": "assistant", "content": response.content or ""}
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                    } for tc in response.tool_calls
+                ]
+                messages.append(assistant_msg)
+
+                # 执行每个工具调用
+                for tc in response.tool_calls:
+                    tool_name = tc.function.name
+                    try:
+                        tool_args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
+                    except (json.JSONDecodeError, TypeError):
+                        tool_args = {}
+
+                    # 通过 tool_registry 调用
+                    try:
+                        if self.tool_registry.has(tool_name):
+                            tool_result = await self.tool_registry.invoke(tool_name, tool_args)
+                            result_str = tool_result.output if hasattr(tool_result, 'output') else str(tool_result)
+                        else:
+                            result_str = f"Error: Tool '{tool_name}' not found"
+                    except Exception as e:
+                        result_str = f"Error: {e}"
+
+                    tool_calls_log.append({
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "result_preview": result_str[:200] if len(result_str) > 200 else result_str,
+                    })
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result_str,
+                    })
+                continue  # 继续循环，让 LLM 处理工具结果
+
+            # 没有工具调用，解析最终结果
+            result = self._parse_response(response.content)
+
+            result["_llm"] = {
+                "model": last_model,
+                "usage": total_usage,
+                "finish_reason": response.finish_reason,
+            }
+            if tool_calls_log:
+                result["_tool_calls"] = tool_calls_log
+
+            return result
+
+        # 达到最大迭代次数
+        result = self._parse_response(messages[-1].get("content", ""))
+        result["_llm"] = {
+            "model": last_model,
+            "usage": total_usage,
+            "finish_reason": "max_tool_iterations",
+        }
+        if tool_calls_log:
+            result["_tool_calls"] = tool_calls_log
+        return result
+
+    def _get_tools_schema(self) -> List[Dict]:
+        """从 tool_registry 获取 OpenAI 格式的工具定义"""
+        if not self.tool_registry:
+            return []
+        # 优先使用 core.tool_registry.ToolRegistry 的 to_llm_tool_list()
+        if hasattr(self.tool_registry, 'to_llm_tool_list'):
+            return self.tool_registry.to_llm_tool_list()
+        # 回退：手动从 list_tools 构建
+        tools = []
+        for tool in self.tool_registry.list_tools():
+            schema = tool.schema() if hasattr(tool, 'schema') else {}
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": schema.get("name", tool.id),
+                    "description": schema.get("description", ""),
+                    "parameters": schema.get("parameters", {"type": "object", "properties": {}}),
+                }
+            })
+        return tools
 
 
 class LLMAgentFactory:

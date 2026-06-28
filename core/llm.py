@@ -19,6 +19,7 @@ class LLMResponse:
     model: str
     usage: Dict[str, int]  # {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     finish_reason: str
+    tool_calls: Optional[List[Any]] = None
 
 
 class LLMError(Exception):
@@ -99,6 +100,11 @@ class LLMClient:
             # 调用 API
             response = await litellm.acompletion(**params)
 
+            # 解析 tool_calls（如果有）
+            tool_calls_data = None
+            if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
+                tool_calls_data = response.choices[0].message.tool_calls
+
             # 解析响应
             return LLMResponse(
                 content=response.choices[0].message.content,
@@ -109,6 +115,7 @@ class LLMClient:
                     "total_tokens": response.usage.total_tokens,
                 },
                 finish_reason=response.choices[0].finish_reason,
+                tool_calls=tool_calls_data,
             )
 
         except ImportError:

@@ -65,8 +65,8 @@ component code_reader {
   model default: "deepseek-v4-flash"
   model temperature: 0.1
 
-  permission allow: [read_file, glob, grep]
-  permission deny: [write_file, execute_command]
+  permission allow: [read, glob, grep]
+  permission deny: [write, shell]
 }
 
 component complexity_analyzer {

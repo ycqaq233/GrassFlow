@@ -517,7 +517,7 @@ class MCPToolAdapter:
         if tool_id.startswith("mcp_"):
             self._full_id = tool_id
         else:
-            self._full_id = f"mcp_{server_name}_{tool_id}"
+            self._full_id = f"mcp_{server_name}.{tool_id}"
 
     def to_tool_def(self) -> ToolDef:
         """转换为 ToolDef"""
@@ -975,6 +975,50 @@ def reset_default_registry() -> ToolRegistry:
     global _default_registry
     _default_registry = ToolRegistry()
     return _default_registry
+
+
+def create_filtered_registry(source_registry: ToolRegistry, permissions: "PermissionConfig") -> ToolRegistry:
+    """根据权限配置创建过滤后的工具注册表
+
+    规则：
+    - 如果 permissions 为空（allow/deny/ask 都为空），返回源 registry 的完整副本
+    - 如果 allow 非空，只保留 allow 中列出的工具
+    - 如果 deny 非空，排除 deny 中列出的工具
+    - allow 和 deny 同时存在时，先 apply allow 再 remove deny
+
+    Args:
+        source_registry: 源工具注册表
+        permissions: 权限配置（来自 Component.permission）
+
+    Returns:
+        过滤后的新 ToolRegistry 实例
+    """
+    from core.models import PermissionConfig  # 避免循环导入
+
+    filtered = ToolRegistry()
+
+    # 获取源 registry 的所有工具
+    all_tools = source_registry.all()
+
+    if permissions.allow:
+        # allow 模式：只保留列出的工具
+        allowed = set(permissions.allow)
+        for tool in all_tools:
+            if tool.id in allowed:
+                filtered.register(tool)
+    else:
+        # 没有 allow，注册所有工具
+        for tool in all_tools:
+            filtered.register(tool)
+
+    # deny 模式：排除列出的工具
+    if permissions.deny:
+        denied = set(permissions.deny)
+        for tool_name in denied:
+            if filtered.has(tool_name):
+                filtered.unregister(tool_name)
+
+    return filtered
 
 
 def register_builtin_tools(registry: Optional[ToolRegistry] = None) -> int:

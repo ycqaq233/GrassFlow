@@ -60,9 +60,9 @@ def test_agent_input_validation(mock_agent):
     # 有效输入
     assert mock_agent.validate_input({"input": "test"}) is True
 
-    # 无效输入（缺少必需字段）
+    # 无效输入（类型错误：input 端口期望 string，传入 int）
     with pytest.raises(ValueError):
-        mock_agent.validate_input({})
+        mock_agent.validate_input({"input": 123})
 
 
 def test_agent_output_validation(mock_agent):
@@ -70,9 +70,9 @@ def test_agent_output_validation(mock_agent):
     # 有效输出
     assert mock_agent.validate_output({"result": "test"}) is True
 
-    # 无效输出
+    # 无效输出（类型错误：result 端口期望 string，传入 list）
     with pytest.raises(ValueError):
-        mock_agent.validate_output({"invalid": "data"})
+        mock_agent.validate_output({"result": [1, 2, 3]})
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,7 @@ class TestLLMClient:
     def test_llm_client_default_values(self):
         """测试 LLMClient 默认值"""
         client = LLMClient()
-        assert client.model == "gpt-4"
+        assert client.model == "default"
         assert client.api_key is None
         assert client.base_url is None
         assert client.timeout == 60
