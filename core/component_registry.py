@@ -26,7 +26,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from core.models import Component, ParseResult
+try:
+    from core.models import Component, ParseResult
+except ImportError:
+    from core.dsl_v2_ast import Component, ParseResult
 from tui.dsl_parser_v2 import DSLv2Parser
 
 logger = logging.getLogger(__name__)
