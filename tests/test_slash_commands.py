@@ -60,6 +60,8 @@ def mock_repl():
     repl.output = []
     repl._pending_generated_dsl = ""
     repl._pending_generated_name = ""
+    repl._workflow_runner = None
+    repl._workflow_task = None
     repl.add_output = MagicMock()
 
     def _capture_add_output(text, role="system"):
@@ -634,9 +636,9 @@ class TestRunArgumentParsing:
 
     def test_already_running_shows_error(self, mock_repl):
         """已有工作流运行时显示错误"""
-        mock_task = MagicMock()
-        mock_task.done.return_value = False
-        mock_repl._workflow_task = mock_task
+        mock_runner = MagicMock()
+        mock_runner.is_running = True
+        mock_repl._workflow_runner = mock_runner
 
         _cmd_run(mock_repl, ["some_workflow.gf"])
         mock_repl.add_output.assert_called()
@@ -646,9 +648,9 @@ class TestRunArgumentParsing:
     @pytest.mark.asyncio
     async def test_already_running_but_done_allows(self, mock_repl):
         """已有工作流但已结束时允许运行"""
-        mock_task = MagicMock()
-        mock_task.done.return_value = True
-        mock_repl._workflow_task = mock_task
+        mock_runner = MagicMock()
+        mock_runner.is_running = False
+        mock_repl._workflow_runner = mock_runner
 
         self._setup_async_repl(mock_repl)
         _cmd_run(mock_repl, ["nonexistent.gf"])

@@ -607,7 +607,8 @@ def _cmd_run(repl, args: List[str]) -> None:
         return
 
     # 检查是否已有工作流在运行
-    if getattr(repl, "_workflow_task", None) and not repl._workflow_task.done():
+    runner = getattr(repl, "_workflow_runner", None)
+    if runner is not None and runner.is_running:
         repl.add_output(
             "A workflow is already running. Use '/run stop' to cancel it first.",
             role="error",
@@ -634,15 +635,8 @@ def _cmd_run(repl, args: List[str]) -> None:
         """异步执行工作流（在 REPL 事件循环中运行）"""
         try:
             from pathlib import Path
-            from core.models import Component, ModelConfig
-            from core.context import WorkflowContext
-            from core.scheduler import Scheduler
-            from core.condition import ConditionAgent
-            from core.llm_agent import LLMAgent
-            from core.tool_registry import register_builtin_tools, get_default_registry, create_filtered_registry
-            from core.db import execution_db
-            from tui.dsl_parser import parse_file_result
-            import copy
+            from tui.workflow_runner import WorkflowRunner, REPLOutputHandler
+            from core.tool_registry import get_default_registry
 
             wf_path = Path(workflow_file)
             if not wf_path.exists():
@@ -663,133 +657,55 @@ def _cmd_run(repl, args: List[str]) -> None:
                     return
 
             repl.add_output(f"Loading workflow from {wf_path}...", role="system")
-            parse_result = parse_file_result(str(wf_path))
 
-            if not parse_result.workflows:
-                repl.add_output("No workflow definition found in file.", role="error")
-                return
+            # 创建 WorkflowRunner（延迟创建，每次执行都是新实例）
+            tool_registry = get_default_registry()
+            output_handler = REPLOutputHandler()
+            runner = WorkflowRunner(
+                tool_registry=tool_registry,
+                output_handler=output_handler,
+            )
+            repl._workflow_runner = runner
 
-            workflow = parse_result.workflows[0]
-            components_dict = {c.name: c for c in parse_result.components}
-            agent_names = [a.name for a in workflow.agents]
-
-            repl.add_output(
-                f"Workflow: {workflow.name}\n"
-                f"  Agents: {', '.join(agent_names)}\n"
-                f"  Connections: {len(workflow.connections)}",
-                role="system",
+            # 使用 WorkflowRunner 执行工作流
+            result = await runner.run_workflow(
+                str(wf_path),
+                task=task_desc,
+                input_params=parsed_input if parsed_input else None,
             )
 
-            # 获取默认模型和 provider
-            default_model = "gpt-4"
-            default_provider = "deepseek"
-            try:
-                from core.config import config_manager
-                config = config_manager.load_config()
-                default_model = config.llm.default_model
-                default_provider = config.llm.default_provider
-            except Exception:
-                pass
-
-            # 注册内置工具
-            tool_registry = get_default_registry()
-            tool_count = register_builtin_tools(tool_registry)
-            if tool_count > 0:
-                repl.add_output(f"  Registered {tool_count} builtin tools", role="system")
-
-            # 创建 Agent 实例
-            agents = {}
-            for agent_instance in workflow.agents:
-                if agent_instance.component and agent_instance.component in components_dict:
-                    component = copy.deepcopy(components_dict[agent_instance.component])
-                    # 应用 overrides
-                    for k, v in agent_instance.overrides.items():
-                        if k == "model" and isinstance(v, dict):
-                            for mk, mv in v.items():
-                                setattr(component.model, mk, mv)
-                        elif k == "model":
-                            component.model.default = v
-                        elif hasattr(component, k):
-                            setattr(component, k, v)
-                    # 解析模型
-                    if component.model.default:
-                        component.model.default = _resolve_model_for_provider(
-                            component.model.default, default_provider
-                        )
-                else:
-                    raw_model = agent_instance.overrides.get("model", default_model)
-                    resolved_model = _resolve_model_for_provider(raw_model, default_provider)
-                    component = Component(
-                        name=agent_instance.name,
-                        system_prompt=agent_instance.inline_system_prompt or "",
-                        model=ModelConfig(default=resolved_model),
-                        ports=list(agent_instance.inline_ports),
-                    )
-
-                # 判断是否是条件 Agent
-                name_lower = agent_instance.name.lower()
-                if "route" in name_lower or "condition" in name_lower:
-                    rules = agent_instance.overrides.get("rules", [])
-                    agent = ConditionAgent(component, rules=rules)
-                else:
-                    # 根据 component 权限过滤工具
-                    if component.permission and (component.permission.allow or component.permission.deny):
-                        agent_registry = create_filtered_registry(tool_registry, component.permission)
-                    else:
-                        agent_registry = tool_registry
-                    agent = LLMAgent(component=component, tool_registry=agent_registry)
-
-                    # 记录 MCP 声明
-                    if component.mcp:
-                        for mcp in component.mcp:
-                            repl.add_output(
-                                f"  [MCP] {component.name} declares MCP server "
-                                f"'{mcp.server_name}' with tools: {mcp.tools}",
-                                role="system",
-                            )
-
-                agents[agent_instance.name] = agent
-
-            # 创建调度器并执行
-            scheduler = Scheduler(workflow, agents, workflow_input=parsed_input)
-            context = WorkflowContext()
-
-            repl.add_output(f"Executing workflow '{workflow.name}'...", role="system")
-            result = await scheduler.run(context)
-
-            # 保存执行记录
-            try:
-                execution_db.save_execution(result)
-            except Exception:
-                pass
-
-            # 显示结果
-            if result.error:
-                repl.add_output(f"Workflow failed: {result.error}", role="error")
-            else:
-                # 展示各 Agent 的执行结果摘要
-                lines = [f"Workflow '{workflow.name}' completed successfully!"]
-                for agent_name, record in result.agent_records.items():
-                    status = record.status.value if hasattr(record.status, "value") else str(record.status)
-                    dur = f"{record.duration_ms}ms" if record.duration_ms else "N/A"
-                    lines.append(f"  [{status}] {agent_name} ({dur})")
-                    if record.output_data:
-                        summary = str(record.output_data)
-                        if len(summary) > 200:
-                            summary = summary[:200] + "..."
-                        lines.append(f"    -> {summary}")
-                total_dur = f"{result.total_duration_ms}ms" if result.total_duration_ms else "N/A"
-                lines.append(f"Total duration: {total_dur}")
+            # 显示结果摘要
+            if result.success:
+                lines = [f"Workflow '{result.workflow_name}' completed successfully!"]
+                if result.execution_record:
+                    for agent_name, record in result.execution_record.agent_records.items():
+                        status = record.status.value if hasattr(record.status, "value") else str(record.status)
+                        dur = f"{record.duration_ms}ms" if record.duration_ms else "N/A"
+                        lines.append(f"  [{status}] {agent_name} ({dur})")
+                        if record.output_data:
+                            summary = str(record.output_data)
+                            if len(summary) > 200:
+                                summary = summary[:200] + "..."
+                            lines.append(f"    -> {summary}")
+                    total_dur = f"{result.duration_ms}ms" if result.duration_ms else "N/A"
+                    lines.append(f"Total duration: {total_dur}")
                 repl.add_output("\n".join(lines), role="system")
+            else:
+                repl.add_output(
+                    f"Workflow '{result.workflow_name}' failed: {result.error}",
+                    role="error",
+                )
 
         except asyncio.CancelledError:
             repl.add_output("Workflow execution was cancelled.", role="system")
+        except FileNotFoundError as e:
+            repl.add_output(str(e), role="error")
         except Exception as e:
             repl.add_output(f"Workflow execution error: {e}", role="error")
             import traceback
             repl.add_output(traceback.format_exc(), role="error")
         finally:
-            repl._workflow_task = None
+            repl._workflow_runner = None
 
     # 创建异步任务
     if repl.app and repl.app.loop:
@@ -800,13 +716,27 @@ def _cmd_run(repl, args: List[str]) -> None:
 
 def _run_stop(repl) -> None:
     """取消正在运行的工作流"""
-    task = getattr(repl, "_workflow_task", None)
-    if task is None or task.done():
-        repl.add_output("No workflow is currently running.", role="system")
+    runner = getattr(repl, "_workflow_runner", None)
+    if runner and runner.is_running:
+        import asyncio
+
+        async def _stop() -> None:
+            await runner.stop_workflow()
+
+        if repl.app and repl.app.loop:
+            repl.app.loop.create_task(_stop())
+        repl.add_output("Workflow cancellation requested.", role="system")
         return
-    task.cancel()
-    repl._workflow_task = None
-    repl.add_output("Workflow cancelled.", role="system")
+
+    # 回退：检查旧式 _workflow_task
+    task = getattr(repl, "_workflow_task", None)
+    if task and not task.done():
+        task.cancel()
+        repl._workflow_task = None
+        repl.add_output("Workflow cancelled.", role="system")
+        return
+
+    repl.add_output("No workflow is currently running.", role="system")
 
 
 def _run_list_saved(repl) -> None:
