@@ -19,15 +19,19 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from .agent import Agent, AgentConfig
+
+try:
+    from core.models import Component, Workflow
+except ImportError:
+    from .dsl_v2_ast import Component, Workflow
+
 from .dsl_v2_ast import (
     AgentInstance,
-    Component,
     Connection,
     MCPConfig,
     ModelConfig,
     PermissionConfig,
     Port,
-    Workflow,
 )
 
 # ---------------------------------------------------------------------------
