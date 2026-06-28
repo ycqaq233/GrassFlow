@@ -32,7 +32,7 @@ from core.llm_agent import LLMAgent
 from core.storage import workflow_storage, _dataclass_to_dict
 from core.db import execution_db
 from core.monitor import monitor
-from tui.dsl_parser import parse_file
+from tui.dsl_parser import parse_file, parse_file_result
 from tui.display import display, progress_display
 from tui.error_handler import handle_cli_error, ErrorContext
 
@@ -139,7 +139,9 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
         effective_provider = provider or _get_default_provider()
 
         display.print_info(f"Loading workflow from {workflow_file}...")
-        workflow = parse_file(workflow_file)
+        parse_result = parse_file_result(workflow_file)
+        workflow = parse_result.workflows[0]
+        components_dict = {c.name: c for c in parse_result.components}
 
         agent_names = [agent.name for agent in workflow.agents]
         display.print_workflow_info(workflow.name, agent_names, len(workflow.connections))
@@ -149,29 +151,42 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
             display.print_info(f"  Streaming: {'on' if stream else 'off'}")
 
         # 创建 Agent 实例
+        import copy
         agents = {}
         for agent_instance in workflow.agents:
-            # 获取模型名
-            raw_model = agent_instance.overrides.get("model", effective_model)
-            resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
-
-            # 创建 Component
-            component = Component(
-                name=agent_instance.name,
-                system_prompt=agent_instance.inline_system_prompt or "",
-                model=ModelConfig(default=resolved_model),
-                ports=list(agent_instance.inline_ports),
-            )
+            # 解析组件引用
+            if agent_instance.component and agent_instance.component in components_dict:
+                component = copy.deepcopy(components_dict[agent_instance.component])
+                # 应用 overrides
+                for k, v in agent_instance.overrides.items():
+                    if k == "model" and isinstance(v, dict):
+                        for mk, mv in v.items():
+                            setattr(component.model, mk, mv)
+                    elif k == "model":
+                        component.model.default = v
+                    elif hasattr(component, k):
+                        setattr(component, k, v)
+                # 解析模型
+                if component.model.default:
+                    component.model.default = _resolve_model_for_provider(
+                        component.model.default, effective_provider
+                    )
+            else:
+                raw_model = agent_instance.overrides.get("model", effective_model)
+                resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
+                component = Component(
+                    name=agent_instance.name,
+                    system_prompt=agent_instance.inline_system_prompt or "",
+                    model=ModelConfig(default=resolved_model),
+                    ports=list(agent_instance.inline_ports),
+                )
 
             # 判断是否是条件 Agent
-            # 简单启发式：如果 agent 名称包含 "route" 或 "condition"，视为条件 Agent
             if "route" in agent_instance.name.lower() or "condition" in agent_instance.name.lower():
                 rules = agent_instance.overrides.get("rules", [])
                 agent = ConditionAgent(component, rules=rules)
             else:
-                agent = LLMAgent(
-                    component=component,
-                )
+                agent = LLMAgent(component=component)
             agents[agent_instance.name] = agent
 
         # 创建调度器
@@ -542,22 +557,37 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
         effective_provider = _get_default_provider()
 
         display.print_info(f"Loading workflow from {workflow_file}...")
-        workflow = parse_file(workflow_file)
+        parse_result = parse_file_result(workflow_file)
+        workflow = parse_result.workflows[0]
+        components_dict = {c.name: c for c in parse_result.components}
 
         agent_names = [agent.name for agent in workflow.agents]
         display.print_workflow_info(workflow.name, agent_names, len(workflow.connections))
 
         agents = {}
+        import copy
         for agent_instance in workflow.agents:
-            raw_model = agent_instance.overrides.get("model", effective_model)
-            resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
-
-            component = Component(
-                name=agent_instance.name,
-                system_prompt=agent_instance.inline_system_prompt or "",
-                model=ModelConfig(default=resolved_model),
-                ports=list(agent_instance.inline_ports),
-            )
+            # 解析组件引用
+            if agent_instance.component and agent_instance.component in components_dict:
+                component = copy.deepcopy(components_dict[agent_instance.component])
+                # 应用 overrides
+                for k, v in agent_instance.overrides.items():
+                    if k == "model" and isinstance(v, dict):
+                        for mk, mv in v.items():
+                            setattr(component.model, mk, mv)
+                    elif k == "model":
+                        component.model.default = v
+                    elif hasattr(component, k):
+                        setattr(component, k, v)
+            else:
+                raw_model = agent_instance.overrides.get("model", effective_model)
+                resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
+                component = Component(
+                    name=agent_instance.name,
+                    system_prompt=agent_instance.inline_system_prompt or "",
+                    model=ModelConfig(default=resolved_model),
+                    ports=list(agent_instance.inline_ports),
+                )
 
             if "route" in agent_instance.name.lower() or "condition" in agent_instance.name.lower():
                 rules = agent_instance.overrides.get("rules", [])

@@ -5,7 +5,7 @@ GrassFlow DSL 解析器入口
 """
 
 from tui.dsl_parser_v2 import DSLv2Parser, DSLError
-from core.models import Workflow
+from core.models import Workflow, Component, ParseResult
 
 # 兼容旧版名称
 DSLParser = DSLv2Parser
@@ -13,13 +13,31 @@ DSLParser = DSLv2Parser
 
 def parse_file(filepath: str) -> Workflow:
     """
-    解析 .gf / .af 文件为 v2 Workflow
+    解析 .gf / .af 文件为 v2 Workflow（兼容旧接口）
 
     Args:
         filepath: 工作流文件路径
 
     Returns:
         Workflow 对象
+
+    Raises:
+        DSLError: 解析错误
+        FileNotFoundError: 文件不存在
+    """
+    result = parse_file_result(filepath)
+    return result.workflows[0]
+
+
+def parse_file_result(filepath: str) -> ParseResult:
+    """
+    解析 .gf / .af 文件，返回完整 ParseResult（含 components）
+
+    Args:
+        filepath: 工作流文件路径
+
+    Returns:
+        ParseResult 对象（包含 components 和 workflows）
 
     Raises:
         DSLError: 解析错误
@@ -43,7 +61,7 @@ def parse_file(filepath: str) -> Workflow:
     if not result.workflows:
         raise DSLError(f"No workflow found in {filepath}")
 
-    return result.workflows[0]
+    return result
 
 
 def parse_dsl(dsl_text: str) -> Workflow:
@@ -51,7 +69,7 @@ def parse_dsl(dsl_text: str) -> Workflow:
     解析 DSL 文本为 v2 Workflow
 
     Args:
-        dsl_text: DSL 文本内容
+        dsl_text: DSL 文本
 
     Returns:
         Workflow 对象
