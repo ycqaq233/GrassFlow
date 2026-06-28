@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-from core.models import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
 from core.db import ExecutionDatabase, DatabaseError
 
 

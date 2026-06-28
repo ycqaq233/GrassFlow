@@ -11,7 +11,8 @@
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-from core.models import Workflow, AgentConfig, Edge, AgentType, InteractionType, ExecutionStatus
+from core.models import Workflow, AgentConfig, Edge, AgentType, InteractionType
+from core.execution import ExecutionStatus
 from core.context import WorkflowContext
 from core.scheduler import Scheduler, SchedulerError
 

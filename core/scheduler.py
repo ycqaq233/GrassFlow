@@ -12,9 +12,9 @@ import asyncio
 from typing import Dict, Any, Optional, Set
 from datetime import datetime
 from core.models import (
-    Workflow, AgentConfig, Edge, AgentType,
-    InteractionType, ExecutionStatus, ExecutionRecord, AgentExecutionRecord
+    Workflow, AgentConfig, Edge, AgentType, InteractionType
 )
+from core.execution import ExecutionStatus, ExecutionRecord, AgentExecutionRecord
 from core.context import WorkflowContext
 from core.dag import DAG, DAGError
 

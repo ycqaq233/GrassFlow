@@ -11,7 +11,7 @@
 import pytest
 from datetime import datetime
 
-from core.models import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
 from core.monitor import Monitor, MonitorReport, MonitorIssue
 
 

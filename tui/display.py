@@ -25,7 +25,7 @@ except ImportError:
     HAS_RICH = False
 
 try:
-    from core.models import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
+    from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
     HAS_MODELS = True
 except ImportError:
     HAS_MODELS = False
