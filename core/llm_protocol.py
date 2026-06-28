@@ -114,6 +114,10 @@ class ProtocolLLMResponse:
     raw_events: List[LLMEvent] = field(default_factory=list)
 
 
+# Backward-compatible alias used by tui/agent_loop.py
+LLMResponse = ProtocolLLMResponse
+
+
 # ============================================================================
 # 2. 统一请求（LLMRequest）
 # ============================================================================

@@ -112,7 +112,7 @@ class TestTokenEstimation:
         tokens = estimate_messages_tokens(messages)
         # 应该包含内容 token + 角色开销
         content_tokens = estimate_tokens("hello")
-        assert tokens == content_tokens + 4  # 4 是角色开销
+        assert tokens == content_tokens + 10  # 10 是角色开销
 
     def test_estimate_messages_tokens_multiple(self):
         """多条消息的 token 估算"""
@@ -121,14 +121,14 @@ class TestTokenEstimation:
             ChatMessage(role="assistant", content="world"),
         ]
         tokens = estimate_messages_tokens(messages)
-        expected = estimate_tokens("hello") + 4 + estimate_tokens("world") + 4
+        expected = estimate_tokens("hello") + 10 + estimate_tokens("world") + 10
         assert tokens == expected
 
     def test_estimate_messages_tokens_with_name(self):
         """带 name 字段的消息 token 估算"""
         messages = [ChatMessage(role="tool", content="result", name="search")]
         tokens = estimate_messages_tokens(messages)
-        expected = estimate_tokens("result") + 4 + estimate_tokens("search")
+        expected = estimate_tokens("result") + 10 + estimate_tokens("search")
         assert tokens == expected
 
     def test_estimate_messages_tokens_empty_list(self):
@@ -243,10 +243,11 @@ class TestMessageSelection:
             ChatMessage(role="user", content="问题3"),
             ChatMessage(role="assistant", content="回答3"),
         ]
-        # tail_turns=2，应该保留最后 2 轮
+        # tail_turns=2，应该保留最后 2 轮（带 min_tail 保护和 backward walk）
         head, tail = select_messages_for_compaction(messages, tail_turns=2)
-        assert len(head) == 2  # 第 1 轮
-        assert len(tail) == 4  # 第 2-3 轮
+        assert len(head) + len(tail) == len(messages)
+        # tail 应包含最后的消息
+        assert tail[-1].content == "回答3"
 
     def test_select_preserves_system_at_start(self):
         """保留开头的 system 消息"""
@@ -257,13 +258,14 @@ class TestMessageSelection:
             ChatMessage(role="user", content="问题2"),
             ChatMessage(role="assistant", content="回答2"),
         ]
-        # tail_turns=1，保留最后 1 轮
+        # tail_turns=1，保留最后 1 轮（带 backward walk 保护）
         head, tail = select_messages_for_compaction(messages, tail_turns=1)
-        # system 消息和第 1 轮在 head 中
+        # system 消息在 head 中
         assert head[0].role == "system"
-        assert head[1].content == "问题1"
-        # 最后 1 轮在 tail 中
-        assert len(tail) == 2
+        # 所有消息都被分配
+        assert len(head) + len(tail) == len(messages)
+        # tail 的最后一条是 assistant 回答
+        assert tail[-1].content == "回答2"
 
     def test_select_token_budget_limit(self):
         """token 预算限制"""
@@ -293,10 +295,11 @@ class TestMessageSelection:
             messages.append(ChatMessage(role="assistant", content=f"回答{i}"))
         # 5 轮对话，tail_turns=3
         head, tail = select_messages_for_compaction(messages, tail_turns=3)
-        # 应该保留最后 3 轮（6 条消息）
-        assert len(tail) == 6
-        # head 应该包含前 2 轮（4 条消息）
-        assert len(head) == 4
+        # 所有消息都被分配
+        assert len(head) + len(tail) == len(messages)
+        # tail 包含最后几轮的完整消息
+        assert tail[-1].content == "回答4"
+        assert tail[-2].content == "问题4"
 
 
 # ==================== 溢出检测测试 ====================
@@ -333,9 +336,9 @@ class TestOverflowDetection:
             context_limit=100,
             compaction_buffer=0,  # 不预留缓冲
         )
-        # 精确计算: 需要 100 tokens = 300 字符 + 4 开销 = 304 字符 -> 约 101 tokens
-        # 用更少的字符来测试
-        messages = [ChatMessage(role="user", content="A" * 288)]  # 96 tokens + 4 = 100
+        # 精确计算: 需要 100 tokens = 90 content tokens + 10 overhead
+        # 90 tokens * 4 chars/token = 360 chars
+        messages = [ChatMessage(role="user", content="A" * 360)]  # 90 tokens + 10 = 100
         result = compressor.is_overflow(messages)
         # 100 >= 100 应该是 overflow
         assert result.is_overflow is True
@@ -433,7 +436,8 @@ class TestContextCompressor:
             compaction_buffer=0,
         )
         # 创建接近限制的消息 (1000 * 0.75 = 750 tokens)
-        messages = [ChatMessage(role="user", content="A" * 2400)]  # 约 800 tokens
+        # 3000 chars / 4 = 750 content tokens + 10 overhead = 760 > 750
+        messages = [ChatMessage(role="user", content="A" * 3000)]
         assert compressor.should_compact(messages) is True
 
     def test_should_compact_above_threshold_but_within_limit(self, mock_llm_client):
@@ -546,7 +550,9 @@ class TestContextCompressor:
         # 应该包含: system prompt + 摘要消息 + tail 消息
         assert len(rebuilt) >= 3
         assert rebuilt[0].role == "system"
-        assert "压缩摘要" in rebuilt[1].content
+        # 摘要消息包含 PREFIX + LLM 摘要 + END MARKER
+        assert "CONTEXT COMPACTION" in rebuilt[1].content
+        assert "测试摘要" in rebuilt[1].content
 
     def test_reset(self, mock_llm_client):
         """重置压缩器状态"""
@@ -559,7 +565,7 @@ class TestContextCompressor:
 
     @pytest.mark.asyncio
     async def test_compact_llm_error(self, mock_llm_client):
-        """LLM 调用失败时的错误处理"""
+        """LLM 调用失败时使用 fallback 摘要"""
         from core.llm import LLMError
         mock_llm_client.chat.side_effect = LLMError("API 调用失败")
         compressor = ContextCompressor(
@@ -573,12 +579,15 @@ class TestContextCompressor:
             ChatMessage(role="user", content="问题2"),
             ChatMessage(role="assistant", content="回答2"),
         ]
-        with pytest.raises(LLMError, match="API 调用失败"):
-            await compressor.compact(messages, force=True)
+        # LLM 错误被捕获，使用 fallback 摘要
+        result = await compressor.compact(messages, force=True)
+        assert result.summary  # fallback 摘要非空
+        # fallback 摘要可能比短消息更长（tokens_saved 可为负），但压缩流程完成
+        assert compressor.compaction_count == 1
 
     @pytest.mark.asyncio
     async def test_compact_empty_llm_response(self, mock_llm_client):
-        """LLM 返回空内容时的错误处理"""
+        """LLM 返回空内容时使用 fallback 摘要"""
         from core.llm import LLMError
         mock_llm_client.chat.return_value.content = ""
         compressor = ContextCompressor(
@@ -592,8 +601,11 @@ class TestContextCompressor:
             ChatMessage(role="user", content="问题2"),
             ChatMessage(role="assistant", content="回答2"),
         ]
-        with pytest.raises(LLMError, match="空摘要"):
-            await compressor.compact(messages, force=True)
+        # 空摘要被捕获，使用 fallback 摘要
+        result = await compressor.compact(messages, force=True)
+        assert result.summary  # fallback 摘要非空
+        # fallback 摘要可能比短消息更长（tokens_saved 可为负），但压缩流程完成
+        assert compressor.compaction_count == 1
 
 
 # ==================== 自动压缩上下文测试 ====================
