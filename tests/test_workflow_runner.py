@@ -28,7 +28,7 @@ from core.models import (
     ParseResult,
     Workflow,
 )
-from core.scheduler import SchedulerEvent, SchedulerEventType
+from core.scheduler import SchedulerError, SchedulerEvent, SchedulerEventType
 from core.execution import ExecutionRecord, ExecutionStatus
 from core.context import WorkflowContext
 from core.tool_registry import ToolRegistry, reset_default_registry
@@ -104,7 +104,8 @@ workflow parallel_test {
     prompt: "Merge results: {input}"
   }
 
-  (p1, p2) -> merger
+  p1 -> merger
+  p2 -> merger
 }
 """
     gf_file = tmp_path / "parallel.gf"
@@ -589,7 +590,7 @@ class TestWorkflowRunnerRunWorkflow:
             mock_agent.retry_count = 1
             mock_llm_cls.return_value = mock_agent
 
-            with pytest.raises(RuntimeError, match="LLM exploded"):
+            with pytest.raises(SchedulerError, match="LLM exploded"):
                 await runner.run_workflow(sample_gf_file)
 
         assert runner.last_result is not None
