@@ -5,7 +5,8 @@ GrassFlow ConditionAgent
 """
 
 from typing import Dict, Any, List, Optional
-from core.agent import Agent, AgentConfig
+from core.agent import Agent
+from core.dsl_v2_ast import Component, Port
 
 
 class ConditionAgent(Agent):
@@ -31,12 +32,11 @@ class ConditionAgent(Agent):
             rules: 条件规则列表，如 ["urgent", "normal", "info"]
             route_field: 用于路由的字段名，默认为 "route"
         """
-        config = AgentConfig(
+        component = Component(
             name=name,
-            input_schema={},
-            output_schema={"route": "string"},
+            ports=[Port(name="route", direction="output", type="string")],
         )
-        super().__init__(config)
+        super().__init__(component)
         self.rules = rules
         self.route_field = route_field
 
@@ -104,12 +104,11 @@ class SimpleConditionAgent(Agent):
             mapping: 字段值到路由值的映射
             default: 默认路由值（当字段值不在映射中时使用）
         """
-        config = AgentConfig(
+        component = Component(
             name=name,
-            input_schema={},
-            output_schema={"route": "string"},
+            ports=[Port(name="route", direction="output", type="string")],
         )
-        super().__init__(config)
+        super().__init__(component)
         self.field = field
         self.mapping = mapping
         self.default = default

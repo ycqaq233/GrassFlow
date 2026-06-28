@@ -28,8 +28,8 @@ class TestLLMAgent:
         )
 
         assert agent.name == "test"
-        assert agent.config.model == "gpt-4"
-        assert agent.config.prompt == "test prompt"
+        assert agent.component.model.default is not None  # 模型经过 resolve
+        assert agent.component.system_prompt == "test prompt"
 
     def test_format_prompt_simple(self):
         """测试简单 prompt 格式化"""
@@ -105,21 +105,21 @@ class TestLLMAgentFactory:
 
         agent = factory.create("test", model="gpt-4", prompt="test prompt")
         assert agent.name == "test"
-        assert agent.config.model == "gpt-4"
+        assert agent.component.model.default is not None  # 模型经过 resolve
 
-    def test_factory_create_from_config(self):
-        """测试从配置创建"""
-        from core.models import AgentConfig
+    def test_factory_create_from_component(self):
+        """测试从组件创建"""
+        from core.dsl_v2_ast import Component, ModelConfig
 
         manager = LLMManager()
         factory = LLMAgentFactory(llm_manager=manager)
 
-        config = AgentConfig(
+        component = Component(
             name="test",
-            model="gpt-4",
-            prompt="test prompt",
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="test prompt",
         )
 
-        agent = factory.create_from_config(config)
+        agent = factory.create_from_component(component)
         assert agent.name == "test"
-        assert agent.config.model == "gpt-4"
+        assert agent.component.model.default is not None  # 模型经过 resolve
