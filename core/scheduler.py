@@ -6,17 +6,43 @@ GrassFlow 调度器
 - 顺序/并行执行
 - 失败策略（stop/skip/retry）
 - 条件分支
+- 事件回调机制
 
 使用 v2 类型: Workflow, AgentInstance
 """
 
 import asyncio
-from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Callable, Dict, Any, Optional
 from datetime import datetime
 from core.models import Workflow, AgentInstance
 from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
 from core.context import WorkflowContext
 from core.dag import DAG, DAGError
+
+
+class SchedulerEventType(str, Enum):
+    """调度器事件类型"""
+    WORKFLOW_START = "workflow_start"
+    WORKFLOW_COMPLETE = "workflow_complete"
+    WORKFLOW_FAILED = "workflow_failed"
+    GROUP_START = "group_start"
+    GROUP_COMPLETE = "group_complete"
+    AGENT_START = "agent_start"
+    AGENT_COMPLETE = "agent_complete"
+    AGENT_FAIL = "agent_fail"
+    AGENT_RETRY = "agent_retry"
+    AGENT_SKIPPED = "agent_skipped"
+
+
+@dataclass
+class SchedulerEvent:
+    """调度器事件"""
+    event_type: SchedulerEventType
+    agent_name: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.now)
+    data: Optional[Any] = None
 
 
 class SchedulerError(Exception):
@@ -27,19 +53,27 @@ class SchedulerError(Exception):
 class Scheduler:
     """工作流调度器"""
 
-    def __init__(self, workflow: Workflow, agents: Dict[str, Any], workflow_input: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        workflow: Workflow,
+        agents: Dict[str, Any],
+        workflow_input: Optional[Dict[str, Any]] = None,
+        on_event: Optional[Callable[[SchedulerEvent], None]] = None,
+    ):
         """
         初始化调度器
 
         Args:
             workflow: 工作流定义 (v2)
             agents: Agent 实例字典，key 为 Agent 名称，value 为 Agent 实例
+            on_event: 事件回调函数，接收 SchedulerEvent 参数。为 None 时不发射事件（零开销）。
         """
         self.workflow = workflow
         self.agents = agents
         self.dag = DAG(workflow)
         self.execution_record = ExecutionRecord(workflow_name=workflow.name)
         self.workflow_input = workflow_input or {}
+        self._on_event = on_event
 
     def _get_agent_instance(self, agent_name: str) -> Optional[AgentInstance]:
         """从 workflow 中获取 AgentInstance 定义"""
@@ -47,6 +81,20 @@ class Scheduler:
             if ai.name == agent_name:
                 return ai
         return None
+
+    def _emit(self, event: SchedulerEvent) -> None:
+        """
+        发射事件。回调失败不影响调度执行。
+
+        当 on_event 为 None 时直接跳过（零开销）。
+        """
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(event)
+        except Exception:
+            # 回调失败不应影响工作流执行
+            pass
 
     async def run(self, context: WorkflowContext) -> ExecutionRecord:
         """
@@ -59,6 +107,10 @@ class Scheduler:
             执行记录
         """
         self.execution_record.start()
+        self._emit(SchedulerEvent(
+            event_type=SchedulerEventType.WORKFLOW_START,
+            data={"workflow_name": self.workflow.name},
+        ))
 
         try:
             groups = self.dag.get_parallel_groups()
@@ -67,9 +119,17 @@ class Scheduler:
                 await self._execute_group(group, context)
 
             self.execution_record.complete()
+            self._emit(SchedulerEvent(
+                event_type=SchedulerEventType.WORKFLOW_COMPLETE,
+                data={"execution_record": self.execution_record},
+            ))
 
         except Exception as e:
             self.execution_record.fail(str(e))
+            self._emit(SchedulerEvent(
+                event_type=SchedulerEventType.WORKFLOW_FAILED,
+                data={"error": str(e), "execution_record": self.execution_record},
+            ))
             raise SchedulerError(f"Workflow execution failed: {e}")
 
         return self.execution_record
@@ -84,6 +144,11 @@ class Scheduler:
         if not agents_to_execute:
             return
 
+        self._emit(SchedulerEvent(
+            event_type=SchedulerEventType.GROUP_START,
+            data={"agents": agents_to_execute},
+        ))
+
         tasks = []
         for agent_name in agents_to_execute:
             task = asyncio.create_task(
@@ -92,6 +157,11 @@ class Scheduler:
             tasks.append(task)
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        self._emit(SchedulerEvent(
+            event_type=SchedulerEventType.GROUP_COMPLETE,
+            data={"agents": agents_to_execute, "results": results},
+        ))
 
         for agent_name, result in zip(agents_to_execute, results):
             if isinstance(result, Exception):
@@ -109,6 +179,12 @@ class Scheduler:
         record.started_at = datetime.now()
         record.status = ExecutionStatus.RUNNING
         self.execution_record.agent_records[agent_name] = record
+
+        self._emit(SchedulerEvent(
+            event_type=SchedulerEventType.AGENT_START,
+            agent_name=agent_name,
+            timestamp=record.started_at,
+        ))
 
         try:
             input_data = self._prepare_input(agent_name, context)
@@ -128,6 +204,13 @@ class Scheduler:
                     (record.completed_at - record.started_at).total_seconds() * 1000
                 )
 
+            self._emit(SchedulerEvent(
+                event_type=SchedulerEventType.AGENT_COMPLETE,
+                agent_name=agent_name,
+                timestamp=record.completed_at,
+                data={"output": output, "duration_ms": record.duration_ms},
+            ))
+
             return output
 
         except Exception as e:
@@ -138,6 +221,13 @@ class Scheduler:
                 record.duration_ms = int(
                     (record.completed_at - record.started_at).total_seconds() * 1000
                 )
+
+            self._emit(SchedulerEvent(
+                event_type=SchedulerEventType.AGENT_FAIL,
+                agent_name=agent_name,
+                timestamp=record.completed_at,
+                data={"error": str(e), "duration_ms": record.duration_ms},
+            ))
             raise
 
     def _prepare_input(self, agent_name: str, context: WorkflowContext) -> Dict[str, Any]:
@@ -210,9 +300,19 @@ class Scheduler:
 
         elif on_fail == "skip":
             context.set(agent_name, {})
+            self._emit(SchedulerEvent(
+                event_type=SchedulerEventType.AGENT_SKIPPED,
+                agent_name=agent_name,
+                data={"reason": "on_fail=skip"},
+            ))
 
         elif on_fail == "retry":
             for i in range(retry_count):
+                self._emit(SchedulerEvent(
+                    event_type=SchedulerEventType.AGENT_RETRY,
+                    agent_name=agent_name,
+                    data={"attempt": i + 1, "max_retries": retry_count},
+                ))
                 try:
                     agent = self.agents.get(agent_name)
                     input_data = self._prepare_input(agent_name, context)

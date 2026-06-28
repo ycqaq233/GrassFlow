@@ -26,7 +26,7 @@ except ImportError:
 from core.models import Workflow
 from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
 from core.context import WorkflowContext
-from core.scheduler import Scheduler
+from core.scheduler import Scheduler, SchedulerEvent, SchedulerEventType
 
 
 @dataclass
@@ -232,7 +232,11 @@ class MonitorPanel:
 
 
 def execute_with_monitor(scheduler: Scheduler, context: WorkflowContext, workflow: Workflow) -> ExecutionRecord:
-    """带监控面板执行工作流"""
+    """带监控面板执行工作流
+
+    通过 Scheduler 事件回调机制接收实时状态更新，
+    而非猴子补丁替换内部方法。
+    """
     if not HAS_RICH:
         # 如果没有 Rich，直接执行
         return asyncio.run(scheduler.run(context))
@@ -255,26 +259,29 @@ def execute_with_monitor(scheduler: Scheduler, context: WorkflowContext, workflo
 
     # 使用 Live 实时更新
     with Live(panel.create_layout(state), refresh_per_second=4, console=Console()) as live:
-        # 包装调度器以捕获事件
-        original_execute_agent = scheduler._execute_agent
-
-        async def monitored_execute_agent(agent_name: str, context: WorkflowContext):
-            """带监控的执行 Agent"""
-            panel.update_state(state, agent_name, "running")
-            live.update(panel.create_layout(state))
-
-            try:
-                result = await original_execute_agent(agent_name, context)
-                panel.update_state(state, agent_name, "completed", output=result)
+        # 定义事件回调，通过 Scheduler 事件驱动面板更新
+        def on_scheduler_event(event: SchedulerEvent) -> None:
+            """处理调度器事件，更新监控面板"""
+            if event.event_type == SchedulerEventType.AGENT_START:
+                panel.update_state(state, event.agent_name, "running")
                 live.update(panel.create_layout(state))
-                return result
-            except Exception as e:
-                panel.update_state(state, agent_name, "failed", error=str(e))
-                live.update(panel.create_layout(state))
-                raise
 
-        # 替换执行方法
-        scheduler._execute_agent = monitored_execute_agent
+            elif event.event_type == SchedulerEventType.AGENT_COMPLETE:
+                output = event.data.get("output") if event.data else None
+                panel.update_state(state, event.agent_name, "completed", output=output)
+                live.update(panel.create_layout(state))
+
+            elif event.event_type == SchedulerEventType.AGENT_FAIL:
+                error = event.data.get("error", "Unknown error") if event.data else "Unknown error"
+                panel.update_state(state, event.agent_name, "failed", error=error)
+                live.update(panel.create_layout(state))
+
+            elif event.event_type == SchedulerEventType.AGENT_SKIPPED:
+                panel.update_state(state, event.agent_name, "skipped")
+                live.update(panel.create_layout(state))
+
+        # 注册回调
+        scheduler._on_event = on_scheduler_event
 
         # 执行工作流
         result = asyncio.run(scheduler.run(context))

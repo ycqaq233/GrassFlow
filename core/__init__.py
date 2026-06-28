@@ -9,7 +9,7 @@ from .models import (
 )
 from .execution import ExecutionRecord, ExecutionStatus, AgentExecutionRecord
 from .dag import DAG, DAGError, topological_sort, get_parallel_groups, detect_cycle
-from .scheduler import Scheduler, SchedulerError
+from .scheduler import Scheduler, SchedulerError, SchedulerEvent, SchedulerEventType
 from .condition import ConditionAgent, SimpleConditionAgent, make_condition_component
 from .llm import LLMClient, LLMManager, LLMError, LLMResponse, llm_manager
 from .llm_agent import LLMAgent, LLMAgentFactory, llm_agent_factory
@@ -183,6 +183,8 @@ __all__ = [
     # scheduler
     "Scheduler",
     "SchedulerError",
+    "SchedulerEvent",
+    "SchedulerEventType",
     # agents
     "ConditionAgent",
     "SimpleConditionAgent",

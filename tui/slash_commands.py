@@ -323,12 +323,521 @@ def _cmd_provider(repl, args: List[str]) -> None:
     repl.add_output(f"Provider set to: {name}", role="system")
 
 
-def _cmd_run(repl, args: List[str]) -> None:
-    """执行工作流"""
+def _cmd_generate(repl, args: List[str]) -> None:
+    """AI 生成工作流 DSL
+
+    用法:
+        /generate <描述>              — 生成并交互确认后保存
+        /generate preview <描述>      — 只预览不保存
+        /generate save <name> <描述>  — 直接保存为指定名称
+    """
+    import asyncio
+    import os
+
     if not args:
-        repl.add_output("Usage: /run <workflow_file>", role="error")
+        repl.add_output(
+            "Usage:\n"
+            "  /generate <description>              — Generate workflow with interactive confirmation\n"
+            "  /generate preview <description>      — Preview only (no save)\n"
+            "  /generate save <name> <description>   — Save directly with given name",
+            role="error",
+        )
         return
-    repl.add_output(f"Executing workflow: {args[0]}", role="system")
+
+    # 解析子命令
+    mode = "interactive"  # 默认：交互式确认
+    save_name = None
+
+    if args[0] == "preview":
+        mode = "preview"
+        args = args[1:]
+    elif args[0] == "save":
+        mode = "save"
+        if len(args) < 2:
+            repl.add_output("Usage: /generate save <name> <description>", role="error")
+            return
+        save_name = args[1]
+        args = args[2:]
+
+    description = " ".join(args).strip()
+    if not description:
+        repl.add_output("Description cannot be empty.", role="error")
+        return
+
+    repl.add_output("Generating workflow with AI...", role="system")
+
+    async def _do_generate():
+        try:
+            # 创建 LLM 客户端和生成器
+            from core.llm import LLMClient
+            from core.workflow_generator import WorkflowGenerator, WorkflowGeneratorError
+            from tui.config_integration import load_config_readonly
+
+            config = load_config_readonly()
+            provider = config.llm.default_provider
+            model = config.llm.default_model
+
+            # 获取 API key
+            api_key = None
+            base_url = None
+            if provider in config.provider:
+                pc = config.provider[provider]
+                api_key = pc.api_key
+                base_url = pc.base_url
+
+            llm_client = LLMClient(
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+            )
+
+            generator = WorkflowGenerator(llm_client=llm_client)
+
+            # 生成
+            result = await generator.generate_workflow(
+                description=description,
+                workflow_name=save_name,
+            )
+
+            dsl_text = result.dsl
+
+            # 用 v2 解析器验证
+            from tui.dsl_parser_v2 import DSLv2Parser
+            parser = DSLv2Parser()
+            try:
+                parse_result = parser.parse(dsl_text)
+                parse_errors = parse_result.errors
+            except Exception as e:
+                parse_errors = [str(e)]
+
+            # --- Rich 语法高亮预览 ---
+            try:
+                from rich.syntax import Syntax
+                from rich.text import Text
+                from io import StringIO
+
+                # 用 Rich Syntax 做语法高亮（grassflow 没有内置 lexer，用自定义高亮）
+                highlighted_lines = _highlight_dsl(dsl_text)
+                repl.add_output("", role="system")
+                repl.add_output("  Generated DSL Preview:", role="system")
+                repl.add_output("  " + "-" * 50, role="system")
+                for line in highlighted_lines:
+                    repl.add_output(line, role="system")
+                repl.add_output("  " + "-" * 50, role="system")
+            except Exception:
+                # Rich 不可用时回退为纯文本
+                repl.add_output("", role="system")
+                repl.add_output("  Generated DSL Preview:", role="system")
+                repl.add_output("  " + "-" * 50, role="system")
+                for line in dsl_text.splitlines():
+                    repl.add_output(f"  {line}", role="system")
+                repl.add_output("  " + "-" * 50, role="system")
+
+            # 展示元信息
+            meta_lines = [
+                "",
+                f"  Workflow: {result.workflow_name}",
+                f"  Agents: {result.agent_count}",
+                f"  Connections: {result.connection_count}",
+            ]
+            if parse_errors:
+                meta_lines.append("  Parse errors:")
+                for err in parse_errors:
+                    meta_lines.append(f"    - {err}")
+            if result.warnings:
+                meta_lines.append("  Warnings:")
+                for w in result.warnings:
+                    meta_lines.append(f"    - {w}")
+            if result.suggestions:
+                meta_lines.append("  Suggestions:")
+                for s in result.suggestions:
+                    meta_lines.append(f"    - {s}")
+            repl.add_output("\n".join(meta_lines), role="system")
+
+            # 根据模式决定后续行为
+            if mode == "preview":
+                repl.add_output("\n  Preview mode — not saved.", role="system")
+                return
+
+            if mode == "save":
+                # 直接保存
+                saved_path = _save_workflow_dsl(save_name, dsl_text)
+                repl.add_output(f"\n  Saved to: {saved_path}", role="system")
+                return
+
+            # interactive 模式：存储生成结果，提示用户确认
+            repl._pending_generated_dsl = dsl_text
+            repl._pending_generated_name = result.workflow_name
+            repl.add_output(
+                f"\n  Save this workflow? Type 'yes' to save as '{result.workflow_name}', "
+                f"or 'save <name>' to save with a custom name, or 'no' to discard.",
+                role="system",
+            )
+
+        except WorkflowGeneratorError as e:
+            repl.add_output(f"Generation failed: {e}", role="error")
+        except Exception as e:
+            repl.add_output(f"Unexpected error: {e}", role="error")
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_do_generate())
+    except RuntimeError:
+        asyncio.run(_do_generate())
+
+
+def _highlight_dsl(dsl_text: str) -> List[str]:
+    """对 DSL 文本做简单的语法高亮（ANSI 转义码）。
+
+    高亮规则：
+    - workflow / component / agent 关键字：粗体青色
+    - 字符串值 ("...")：绿色
+    - 注释 (# ...)：灰色
+    - 连接符号 (->)：黄色
+    - 其他：默认色
+    """
+    import re
+
+    lines = dsl_text.splitlines()
+    highlighted = []
+
+    # ANSI 颜色码
+    CYAN_BOLD = "\033[1;36m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    GRAY = "\033[90m"
+    RESET = "\033[0m"
+
+    keyword_pattern = re.compile(r'\b(workflow|component|agent|port|mcp|permission)\b')
+    string_pattern = re.compile(r'"([^"]*)"')
+    comment_pattern = re.compile(r'(#.*)$')
+    arrow_pattern = re.compile(r'->')
+
+    for line in lines:
+        # 注释行整行灰色
+        if line.strip().startswith('#'):
+            highlighted.append(f"  {GRAY}{line}{RESET}")
+            continue
+
+        # 逐个替换
+        out = line
+        out = keyword_pattern.sub(f"{CYAN_BOLD}\\1{RESET}", out)
+        out = string_pattern.sub(f'{GREEN}"\\1"{RESET}', out)
+        out = arrow_pattern.sub(f"{YELLOW}->{RESET}", out)
+        highlighted.append(f"  {out}")
+
+    return highlighted
+
+
+def _save_workflow_dsl(name: str, dsl_text: str) -> str:
+    """保存 DSL 到 ~/.Grass/workflows/<name>.gf
+
+    Args:
+        name: 工作流名称
+        dsl_text: DSL 文本
+
+    Returns:
+        保存的文件路径
+    """
+    import os
+    from pathlib import Path
+
+    workflows_dir = Path.home() / ".Grass" / "workflows"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+
+    # 清理文件名
+    safe_name = name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    file_path = workflows_dir / f"{safe_name}.gf"
+
+    # 避免覆盖
+    if file_path.exists():
+        counter = 1
+        while file_path.exists():
+            file_path = workflows_dir / f"{safe_name}_{counter}.gf"
+            counter += 1
+
+    file_path.write_text(dsl_text, encoding="utf-8")
+    return str(file_path)
+
+
+def _cmd_run(repl, args: List[str]) -> None:
+    """执行工作流文件
+
+    用法:
+        /run <workflow_file> [--task "任务描述"] [--input key=value ...]
+        /run stop            — 取消正在运行的工作流
+        /run                 — 列出已保存的工作流
+    """
+    # --- 子命令分发 ---
+    if args and args[0].lower() == "stop":
+        _run_stop(repl)
+        return
+
+    if not args:
+        _run_list_saved(repl)
+        return
+
+    # --- 解析参数 ---
+    workflow_file = None
+    task_desc = None
+    input_pairs: List[str] = []
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--task" and i + 1 < len(args):
+            task_desc = args[i + 1]
+            i += 2
+        elif arg == "--input" and i + 1 < len(args):
+            input_pairs.append(args[i + 1])
+            i += 2
+        elif workflow_file is None:
+            workflow_file = arg
+            i += 1
+        else:
+            i += 1
+
+    if not workflow_file:
+        repl.add_output(
+            "Usage: /run <workflow_file> [--task \"描述\"] [--input key=value ...]\n"
+            "       /run stop   — 取消正在运行的工作流\n"
+            "       /run        — 列出已保存的工作流",
+            role="error",
+        )
+        return
+
+    # 检查是否已有工作流在运行
+    if getattr(repl, "_workflow_task", None) and not repl._workflow_task.done():
+        repl.add_output(
+            "A workflow is already running. Use '/run stop' to cancel it first.",
+            role="error",
+        )
+        return
+
+    # 解析 --input key=value
+    parsed_input: Dict[str, Any] = {}
+    for item in input_pairs:
+        if "=" in item:
+            key, value = item.split("=", 1)
+            try:
+                parsed_input[key] = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                parsed_input[key] = value
+
+    if task_desc:
+        parsed_input["task"] = task_desc
+
+    # 异步执行，不阻塞 REPL
+    import asyncio
+
+    async def _execute_workflow() -> None:
+        """异步执行工作流（在 REPL 事件循环中运行）"""
+        try:
+            from pathlib import Path
+            from core.models import Component, ModelConfig
+            from core.context import WorkflowContext
+            from core.scheduler import Scheduler
+            from core.condition import ConditionAgent
+            from core.llm_agent import LLMAgent
+            from core.tool_registry import register_builtin_tools, get_default_registry, create_filtered_registry
+            from core.db import execution_db
+            from tui.dsl_parser import parse_file_result
+            import copy
+
+            wf_path = Path(workflow_file)
+            if not wf_path.exists():
+                # 尝试在常见目录中查找
+                search_dirs = [
+                    Path.cwd(),
+                    Path.home() / ".Grass" / "workflows",
+                ]
+                found = False
+                for d in search_dirs:
+                    candidate = d / workflow_file
+                    if candidate.exists():
+                        wf_path = candidate
+                        found = True
+                        break
+                if not found:
+                    repl.add_output(f"Workflow file not found: {workflow_file}", role="error")
+                    return
+
+            repl.add_output(f"Loading workflow from {wf_path}...", role="system")
+            parse_result = parse_file_result(str(wf_path))
+
+            if not parse_result.workflows:
+                repl.add_output("No workflow definition found in file.", role="error")
+                return
+
+            workflow = parse_result.workflows[0]
+            components_dict = {c.name: c for c in parse_result.components}
+            agent_names = [a.name for a in workflow.agents]
+
+            repl.add_output(
+                f"Workflow: {workflow.name}\n"
+                f"  Agents: {', '.join(agent_names)}\n"
+                f"  Connections: {len(workflow.connections)}",
+                role="system",
+            )
+
+            # 获取默认模型和 provider
+            default_model = "gpt-4"
+            default_provider = "deepseek"
+            try:
+                from core.config import config_manager
+                config = config_manager.load_config()
+                default_model = config.llm.default_model
+                default_provider = config.llm.default_provider
+            except Exception:
+                pass
+
+            # 注册内置工具
+            tool_registry = get_default_registry()
+            tool_count = register_builtin_tools(tool_registry)
+            if tool_count > 0:
+                repl.add_output(f"  Registered {tool_count} builtin tools", role="system")
+
+            # 创建 Agent 实例
+            agents = {}
+            for agent_instance in workflow.agents:
+                if agent_instance.component and agent_instance.component in components_dict:
+                    component = copy.deepcopy(components_dict[agent_instance.component])
+                    # 应用 overrides
+                    for k, v in agent_instance.overrides.items():
+                        if k == "model" and isinstance(v, dict):
+                            for mk, mv in v.items():
+                                setattr(component.model, mk, mv)
+                        elif k == "model":
+                            component.model.default = v
+                        elif hasattr(component, k):
+                            setattr(component, k, v)
+                    # 解析模型
+                    if component.model.default:
+                        component.model.default = _resolve_model_for_provider(
+                            component.model.default, default_provider
+                        )
+                else:
+                    raw_model = agent_instance.overrides.get("model", default_model)
+                    resolved_model = _resolve_model_for_provider(raw_model, default_provider)
+                    component = Component(
+                        name=agent_instance.name,
+                        system_prompt=agent_instance.inline_system_prompt or "",
+                        model=ModelConfig(default=resolved_model),
+                        ports=list(agent_instance.inline_ports),
+                    )
+
+                # 判断是否是条件 Agent
+                name_lower = agent_instance.name.lower()
+                if "route" in name_lower or "condition" in name_lower:
+                    rules = agent_instance.overrides.get("rules", [])
+                    agent = ConditionAgent(component, rules=rules)
+                else:
+                    # 根据 component 权限过滤工具
+                    if component.permission and (component.permission.allow or component.permission.deny):
+                        agent_registry = create_filtered_registry(tool_registry, component.permission)
+                    else:
+                        agent_registry = tool_registry
+                    agent = LLMAgent(component=component, tool_registry=agent_registry)
+
+                    # 记录 MCP 声明
+                    if component.mcp:
+                        for mcp in component.mcp:
+                            repl.add_output(
+                                f"  [MCP] {component.name} declares MCP server "
+                                f"'{mcp.server_name}' with tools: {mcp.tools}",
+                                role="system",
+                            )
+
+                agents[agent_instance.name] = agent
+
+            # 创建调度器并执行
+            scheduler = Scheduler(workflow, agents, workflow_input=parsed_input)
+            context = WorkflowContext()
+
+            repl.add_output(f"Executing workflow '{workflow.name}'...", role="system")
+            result = await scheduler.run(context)
+
+            # 保存执行记录
+            try:
+                execution_db.save_execution(result)
+            except Exception:
+                pass
+
+            # 显示结果
+            if result.error:
+                repl.add_output(f"Workflow failed: {result.error}", role="error")
+            else:
+                # 展示各 Agent 的执行结果摘要
+                lines = [f"Workflow '{workflow.name}' completed successfully!"]
+                for agent_name, record in result.agent_records.items():
+                    status = record.status.value if hasattr(record.status, "value") else str(record.status)
+                    dur = f"{record.duration_ms}ms" if record.duration_ms else "N/A"
+                    lines.append(f"  [{status}] {agent_name} ({dur})")
+                    if record.output_data:
+                        summary = str(record.output_data)
+                        if len(summary) > 200:
+                            summary = summary[:200] + "..."
+                        lines.append(f"    -> {summary}")
+                total_dur = f"{result.total_duration_ms}ms" if result.total_duration_ms else "N/A"
+                lines.append(f"Total duration: {total_dur}")
+                repl.add_output("\n".join(lines), role="system")
+
+        except asyncio.CancelledError:
+            repl.add_output("Workflow execution was cancelled.", role="system")
+        except Exception as e:
+            repl.add_output(f"Workflow execution error: {e}", role="error")
+            import traceback
+            repl.add_output(traceback.format_exc(), role="error")
+        finally:
+            repl._workflow_task = None
+
+    # 创建异步任务
+    if repl.app and repl.app.loop:
+        repl._workflow_task = repl.app.loop.create_task(_execute_workflow())
+    else:
+        repl.add_output("Cannot start workflow: REPL event loop not available.", role="error")
+
+
+def _run_stop(repl) -> None:
+    """取消正在运行的工作流"""
+    task = getattr(repl, "_workflow_task", None)
+    if task is None or task.done():
+        repl.add_output("No workflow is currently running.", role="system")
+        return
+    task.cancel()
+    repl._workflow_task = None
+    repl.add_output("Workflow cancelled.", role="system")
+
+
+def _run_list_saved(repl) -> None:
+    """列出已保存的工作流"""
+    try:
+        from core.storage import workflow_storage
+        workflows = workflow_storage.list()
+        if not workflows:
+            repl.add_output("No saved workflows found.", role="system")
+            return
+        lines = ["  Saved workflows:"]
+        for wf in sorted(workflows):
+            lines.append(f"    - {wf}")
+        repl.add_output("\n".join(lines), role="system")
+    except Exception as e:
+        repl.add_output(f"Failed to list workflows: {e}", role="error")
+
+
+def _resolve_model_for_provider(model_name: str, provider: str) -> str:
+    """解析模型名称，如果当前 provider 中不存在该模型则回退到默认模型。"""
+    try:
+        from core.config import config_manager
+        config = config_manager.load_config()
+        provider_config = config.provider.get(provider)
+        if provider_config and provider_config.models:
+            bare_name = model_name.split("/")[-1] if "/" in model_name else model_name
+            if bare_name not in provider_config.models:
+                return config.llm.default_model
+    except Exception:
+        pass
+    return model_name
 
 
 def _cmd_list_workflows(repl, args: List[str]) -> None:
@@ -1188,12 +1697,21 @@ COMMAND_REGISTRY: List[CommandDef] = [
 
     # Workflow
     CommandDef(
+        name="generate",
+        description="AI 生成工作流 DSL",
+        category="Workflow",
+        aliases=("gen",),
+        args_hint="[preview|save <name>] <description>",
+        handler_name="_cmd_generate",
+    ),
+    CommandDef(
         name="run",
         description="执行工作流文件",
         category="Workflow",
         aliases=(),
-        args_hint="<workflow_file>",
+        args_hint="<workflow_file> [--task desc] [--input k=v]",
         handler_name="_cmd_run",
+        subcommands=("stop",),
     ),
     CommandDef(
         name="list",
@@ -1392,6 +1910,7 @@ _HANDLER_MAP: Dict[str, Callable] = {
     "_cmd_exit": _cmd_exit,
     "_cmd_theme": _cmd_theme,
     "_cmd_provider": _cmd_provider,
+    "_cmd_generate": _cmd_generate,
     "_cmd_run": _cmd_run,
     "_cmd_list_workflows": _cmd_list_workflows,
     "_cmd_history": _cmd_history,
@@ -1510,6 +2029,8 @@ class SlashCommandCompleter(Completer):
         "think": ["on", "off", "low", "medium", "high", "xhigh", "show", "full", "collapsed", "display"],
         "theme": ["default", "dark", "light", "cyber", "ocean"],
         "mcp": [],
+        "generate": ["preview", "save"],
+        "gen": ["preview", "save"],
         "models": ["--api", "--config"],
         "skills": ["list", "view", "search", "install"],
         "yolo": ["on", "off", "status"],

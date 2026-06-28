@@ -90,6 +90,8 @@ class GrassFlowREPL:
         self._retry_last: bool = False
         self._tool_verbose: bool = False  # False=compact tool display, True=full output
         self._permission_mode: str = "ask"  # default permission mode: ask/allow/deny
+        self._pending_generated_dsl: str = ""  # /generate interactive mode pending DSL
+        self._pending_generated_name: str = ""  # /generate interactive mode pending name
         self._session_approvals: set = set()  # session-level tool approvals (tool names)
 
         # Context compressor (lazy init)
@@ -576,6 +578,37 @@ class GrassFlowREPL:
             self.add_output(f"! {shell_cmd}", role="user")
             self._execute_shell(shell_cmd)
             return
+
+        # Handle /generate interactive confirmation
+        if self._pending_generated_dsl:
+            from tui.slash_commands import _save_workflow_dsl
+            response = text.strip().lower()
+            dsl_text = self._pending_generated_dsl
+            wf_name = self._pending_generated_name
+            # Clear pending state first
+            self._pending_generated_dsl = ""
+            self._pending_generated_name = ""
+
+            if response in ("yes", "y"):
+                saved = _save_workflow_dsl(wf_name, dsl_text)
+                self.add_output(f"  Saved to: {saved}", role="system")
+                return
+            elif response in ("no", "n"):
+                self.add_output("  Discarded.", role="system")
+                return
+            elif response.startswith("save "):
+                custom_name = text.strip()[5:].strip()
+                if custom_name:
+                    saved = _save_workflow_dsl(custom_name, dsl_text)
+                    self.add_output(f"  Saved to: {saved}", role="system")
+                else:
+                    self.add_output("  Usage: save <name>", role="error")
+                return
+            else:
+                # Not a generate confirmation — restore state and fall through
+                self._pending_generated_dsl = dsl_text
+                self._pending_generated_name = wf_name
+
         # Consume _retry_last flag — replay the last user message
         if self._retry_last:
             self._retry_last = False
