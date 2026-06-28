@@ -495,6 +495,8 @@ class TestWorkflowRunnerRunWorkflow:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(return_value={"result": "done"})
             mock_agent.execute = AsyncMock(return_value={"result": "done"})
+            mock_agent.on_fail = "stop"
+            mock_agent.retry_count = 1
             mock_llm_cls.return_value = mock_agent
 
             result = await runner.run_workflow(
@@ -548,6 +550,8 @@ class TestWorkflowRunnerRunWorkflow:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(return_value={"result": "ok"})
             mock_agent.execute = AsyncMock(return_value={"result": "ok"})
+            mock_agent.on_fail = "stop"
+            mock_agent.retry_count = 1
             mock_llm_cls.return_value = mock_agent
 
             # Patch Scheduler.run to capture the input
@@ -659,6 +663,8 @@ class TestWorkflowRunnerBackground:
             mock_agent = MagicMock()
             mock_agent.run = AsyncMock(return_value={"result": "ok"})
             mock_agent.execute = AsyncMock(return_value={"result": "ok"})
+            mock_agent.on_fail = "stop"
+            mock_agent.retry_count = 1
             mock_llm_cls.return_value = mock_agent
 
             callback_results = []
@@ -760,6 +766,8 @@ class TestParallelWorkflow:
 
         def make_agent(name):
             agent = MagicMock()
+            agent.on_fail = "stop"
+            agent.retry_count = 1
 
             async def run_fn(input_data):
                 call_log.append(name)
