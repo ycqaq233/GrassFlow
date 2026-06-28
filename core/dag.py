@@ -6,11 +6,12 @@ GrassFlow DAG 引擎
 - 依赖解析
 - 环检测
 - 并行分组
+
+支持 v1 (Workflow+Edge) 和 v2 (Workflow+Connection) 两种类型系统。
 """
 
-from typing import List, Set, Dict, Optional
+from typing import List, Set, Dict, Optional, Any
 from collections import defaultdict, deque
-from core.models import Workflow, Edge, InteractionType
 
 
 class DAGError(Exception):
@@ -18,29 +19,59 @@ class DAGError(Exception):
     pass
 
 
+def _is_v2_workflow(workflow: Any) -> bool:
+    """判断是否为 v2 Workflow（使用 connections 属性）"""
+    return hasattr(workflow, 'connections') and not hasattr(workflow, 'edges')
+
+
+def _get_nodes(workflow: Any) -> Set[str]:
+    """获取工作流中的所有节点名称（兼容 v1/v2）"""
+    if _is_v2_workflow(workflow):
+        # v2: agents 是 AgentInstance 列表
+        return {agent.name for agent in workflow.agents}
+    else:
+        # v1: agents 是 AgentConfig 列表
+        return {agent.name for agent in workflow.agents}
+
+
+def _build_adjacency(workflow: Any):
+    """从工作流构建邻接表（兼容 v1/v2）"""
+    adjacency: Dict[str, List[str]] = defaultdict(list)
+    reverse_adjacency: Dict[str, List[str]] = defaultdict(list)
+    edges_map: Dict[str, List[Any]] = defaultdict(list)
+
+    if _is_v2_workflow(workflow):
+        # v2: connections
+        for conn in workflow.connections:
+            for target in conn.target_agents:
+                adjacency[conn.source_agent].append(target)
+                reverse_adjacency[target].append(conn.source_agent)
+                edges_map[conn.source_agent].append(conn)
+    else:
+        # v1: edges
+        for edge in workflow.edges:
+            adjacency[edge.source].append(edge.target)
+            reverse_adjacency[edge.target].append(edge.source)
+            edges_map[edge.source].append(edge)
+
+    return adjacency, reverse_adjacency, edges_map
+
+
 class DAG:
     """有向无环图（DAG）引擎"""
 
-    def __init__(self, workflow: Workflow):
+    def __init__(self, workflow: Any):
         """
         初始化 DAG
 
         Args:
-            workflow: 工作流定义
+            workflow: 工作流定义（v1 Workflow 或 v2 Workflow）
 
         Raises:
             DAGError: 如果检测到环
         """
         self.workflow = workflow
-        self._adjacency: Dict[str, List[str]] = defaultdict(list)  # 邻接表
-        self._reverse_adjacency: Dict[str, List[str]] = defaultdict(list)  # 反向邻接表
-        self._edges: Dict[str, List[Edge]] = defaultdict(list)  # 边的详细信息
-
-        # 构建邻接表
-        for edge in workflow.edges:
-            self._adjacency[edge.source].append(edge.target)
-            self._reverse_adjacency[edge.target].append(edge.source)
-            self._edges[edge.source].append(edge)
+        self._adjacency, self._reverse_adjacency, self._edges = _build_adjacency(workflow)
 
         # 检测环
         if self._has_cycle():
@@ -53,8 +84,7 @@ class DAG:
         Returns:
             如果有环返回 True，否则返回 False
         """
-        # 获取所有节点
-        nodes = {agent.name for agent in self.workflow.agents}
+        nodes = _get_nodes(self.workflow)
 
         visited: Set[str] = set()
         rec_stack: Set[str] = set()
@@ -92,8 +122,7 @@ class DAG:
         Raises:
             DAGError: 如果有环
         """
-        # 获取所有节点
-        nodes = {agent.name for agent in self.workflow.agents}
+        nodes = _get_nodes(self.workflow)
 
         if not nodes:
             return []
@@ -132,7 +161,7 @@ class DAG:
         Returns:
             并行执行组列表，每组包含可以并行执行的节点
         """
-        nodes = {agent.name for agent in self.workflow.agents}
+        nodes = _get_nodes(self.workflow)
 
         if not nodes:
             return []
@@ -200,7 +229,7 @@ class DAG:
         dependencies = self.get_dependencies(node)
         return all(dep in completed for dep in dependencies)
 
-    def get_condition_edges(self, node: str) -> List[Edge]:
+    def get_condition_edges(self, node: str) -> List[Any]:
         """
         获取节点的条件分支边
 
@@ -208,12 +237,22 @@ class DAG:
             node: 节点名称
 
         Returns:
-            条件分支边列表
+            条件分支边列表（v1 Edge 或 v2 Connection）
         """
-        return [
-            edge for edge in self._edges.get(node, [])
-            if edge.interaction_type == InteractionType.CONDITION
-        ]
+        edges = self._edges.get(node, [])
+        if _is_v2_workflow(self.workflow):
+            # v2: 条件分支通过 source_port 判断（如 "[urgent]"）
+            return [
+                edge for edge in edges
+                if edge.source_port and edge.source_port.startswith("[")
+            ]
+        else:
+            # v1: 通过 interaction_type 判断
+            from core.models import InteractionType
+            return [
+                edge for edge in edges
+                if edge.interaction_type == InteractionType.CONDITION
+            ]
 
     def get_roots(self) -> List[str]:
         """
@@ -222,7 +261,7 @@ class DAG:
         Returns:
             根节点列表
         """
-        nodes = {agent.name for agent in self.workflow.agents}
+        nodes = _get_nodes(self.workflow)
         return [node for node in nodes if not self._reverse_adjacency.get(node)]
 
     def get_leaves(self) -> List[str]:
@@ -232,10 +271,10 @@ class DAG:
         Returns:
             叶子节点列表
         """
-        nodes = {agent.name for agent in self.workflow.agents}
+        nodes = _get_nodes(self.workflow)
         return [node for node in nodes if not self._adjacency.get(node)]
 
-    def get_edges(self, node: str) -> List[Edge]:
+    def get_edges(self, node: str) -> List[Any]:
         """
         获取节点的所有出边
 
@@ -247,7 +286,7 @@ class DAG:
         """
         return self._edges.get(node, [])
 
-    def get_incoming_edges(self, node: str) -> List[Edge]:
+    def get_incoming_edges(self, node: str) -> List[Any]:
         """
         获取节点的所有入边
 
@@ -258,20 +297,25 @@ class DAG:
             入边列表
         """
         result = []
-        for edge in self.workflow.edges:
-            if edge.target == node:
-                result.append(edge)
+        if _is_v2_workflow(self.workflow):
+            for conn in self.workflow.connections:
+                if node in conn.target_agents:
+                    result.append(conn)
+        else:
+            for edge in self.workflow.edges:
+                if edge.target == node:
+                    result.append(edge)
         return result
 
 
 # 辅助函数
 
-def topological_sort(workflow: Workflow) -> List[str]:
+def topological_sort(workflow: Any) -> List[str]:
     """
     对工作流进行拓扑排序
 
     Args:
-        workflow: 工作流定义
+        workflow: 工作流定义（v1 或 v2）
 
     Returns:
         排序后的节点列表
@@ -283,12 +327,12 @@ def topological_sort(workflow: Workflow) -> List[str]:
     return dag.topological_sort()
 
 
-def get_parallel_groups(workflow: Workflow) -> List[List[str]]:
+def get_parallel_groups(workflow: Any) -> List[List[str]]:
     """
     获取工作流的并行执行组
 
     Args:
-        workflow: 工作流定义
+        workflow: 工作流定义（v1 或 v2）
 
     Returns:
         并行执行组列表
@@ -300,12 +344,12 @@ def get_parallel_groups(workflow: Workflow) -> List[List[str]]:
     return dag.get_parallel_groups()
 
 
-def detect_cycle(workflow: Workflow) -> bool:
+def detect_cycle(workflow: Any) -> bool:
     """
     检测工作流是否有环
 
     Args:
-        workflow: 工作流定义
+        workflow: 工作流定义（v1 或 v2）
 
     Returns:
         如果有环返回 True，否则返回 False

@@ -3,7 +3,8 @@
 
 from .agent import Agent
 from .context import WorkflowContext
-from .models import Workflow, AgentConfig, ExecutionRecord
+from .models import Workflow, AgentConfig
+from .execution import ExecutionRecord, ExecutionStatus, AgentExecutionRecord
 from .dag import DAG, DAGError, topological_sort, get_parallel_groups, detect_cycle
 from .scheduler import Scheduler, SchedulerError
 from .condition import ConditionAgent, SimpleConditionAgent
@@ -157,6 +158,8 @@ __all__ = [
     "Workflow",
     "AgentConfig",
     "ExecutionRecord",
+    "ExecutionStatus",
+    "AgentExecutionRecord",
     "DAG",
     "DAGError",
     "topological_sort",
