@@ -89,6 +89,9 @@ class Agent(ABC):
         schema = self.input_schema
         if not schema:
             return True
+        # 如果没有输入数据，跳过校验（根节点可能没有输入）
+        if not data:
+            return True
         try:
             jsonschema.validate(instance=data, schema=schema)
             return True
