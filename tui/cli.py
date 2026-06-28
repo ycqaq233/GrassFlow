@@ -114,8 +114,9 @@ def main():
 @click.option("--api-key", "-k", help="API key for LLM")
 @click.option("--stream/--no-stream", default=True, help="启用/禁用流式输出（默认启用）")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.option("--input", "-i", "workflow_input", multiple=True, help="工作流输入 (key=value)，可多次指定")
 def run(workflow_file: str, model: Optional[str], provider: Optional[str],
-        api_key: Optional[str], stream: bool, verbose: bool):
+        api_key: Optional[str], stream: bool, verbose: bool, workflow_input: tuple):
     """执行工作流"""
     workflow_path = Path(workflow_file)
     if not workflow_path.exists():
@@ -189,8 +190,20 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
                 agent = LLMAgent(component=component)
             agents[agent_instance.name] = agent
 
+        # 解析工作流输入
+        parsed_input = {}
+        for item in workflow_input:
+            if "=" in item:
+                key, value = item.split("=", 1)
+                # 尝试解析 JSON 值
+                try:
+                    import json
+                    parsed_input[key] = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    parsed_input[key] = value
+
         # 创建调度器
-        scheduler = Scheduler(workflow, agents)
+        scheduler = Scheduler(workflow, agents, workflow_input=parsed_input)
 
         # 执行工作流
         display.print_execution_start(workflow.name)
@@ -546,7 +559,8 @@ def _generate_dsl(workflow: Workflow) -> str:
 @click.argument("workflow_file")
 @click.option("--model", "-m", default=None, help="使用的模型")
 @click.option("--watch", "-w", is_flag=True, help="Watch execution in real-time")
-def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
+@click.option("--input", "-i", "workflow_input", multiple=True, help="工作流输入 (key=value)，可多次指定")
+def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool, workflow_input: tuple):
     """执行工作流并实时监控"""
     if not Path(workflow_file).exists():
         display.print_error(f"Workflow file not found: {workflow_file}")
@@ -596,7 +610,18 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
                 agent = LLMAgent(component=component)
             agents[agent_instance.name] = agent
 
-        scheduler = Scheduler(workflow, agents)
+        # 解析工作流输入
+        parsed_input = {}
+        for item in workflow_input:
+            if "=" in item:
+                key, value = item.split("=", 1)
+                try:
+                    import json
+                    parsed_input[key] = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    parsed_input[key] = value
+
+        scheduler = Scheduler(workflow, agents, workflow_input=parsed_input)
 
         display.print_execution_start(workflow.name)
         context = WorkflowContext()

@@ -27,7 +27,7 @@ class SchedulerError(Exception):
 class Scheduler:
     """工作流调度器"""
 
-    def __init__(self, workflow: Workflow, agents: Dict[str, Any]):
+    def __init__(self, workflow: Workflow, agents: Dict[str, Any], workflow_input: Optional[Dict[str, Any]] = None):
         """
         初始化调度器
 
@@ -39,6 +39,7 @@ class Scheduler:
         self.agents = agents
         self.dag = DAG(workflow)
         self.execution_record = ExecutionRecord(workflow_name=workflow.name)
+        self.workflow_input = workflow_input or {}
 
     def _get_agent_instance(self, agent_name: str) -> Optional[AgentInstance]:
         """从 workflow 中获取 AgentInstance 定义"""
@@ -145,6 +146,12 @@ class Scheduler:
         deps = {}
         for dep_name in dependencies:
             deps[dep_name] = context.get(dep_name)
+
+        # 根节点（无依赖）使用工作流输入
+        if not dependencies and self.workflow_input:
+            result = dict(self.workflow_input)
+            result["_deps"] = deps
+            return result
 
         return {"_deps": deps}
 
