@@ -21,6 +21,7 @@ from tui.slash_commands import (
     CommandDef,
     CommandRegistry,
     _cmd_generate,
+    _cmd_run,
     _highlight_dsl,
     _save_workflow_dsl,
     command_registry,
@@ -536,3 +537,193 @@ class TestGenerateEdgeCases:
 
             assert mock_repl._pending_generated_dsl == ""
             # preview 模式不应设置 pending
+
+
+# ── /run 命令注册测试 ─────────────────────────────────────────────────────────
+
+
+class TestRunCommandRegistration:
+    """测试 /run 命令注册"""
+
+    def test_run_registered(self):
+        """测试 /run 命令已注册"""
+        cmd = command_registry.get("run")
+        assert cmd is not None
+        assert cmd.name == "run"
+        assert cmd.category == "Workflow"
+        assert cmd.handler_name == "_cmd_run"
+
+    def test_run_visible(self):
+        """测试 /run 命令可见"""
+        cmd = command_registry.get("run")
+        assert cmd.visible is True
+
+    def test_run_no_aliases(self):
+        """测试 /run 没有别名"""
+        cmd = command_registry.get("run")
+        assert cmd.aliases == ()
+
+    def test_run_has_subcommands(self):
+        """测试 /run 有 stop 子命令"""
+        cmd = command_registry.get("run")
+        assert "stop" in cmd.subcommands
+
+    def test_run_handler_exists(self):
+        """测试 handler 已注册"""
+        cmd = command_registry.get("run")
+        handler = command_registry._handlers.get(cmd.handler_name)
+        assert handler is not None
+        assert handler is _cmd_run
+
+    def test_run_args_hint(self):
+        """测试 /run 参数提示"""
+        cmd = command_registry.get("run")
+        assert "--task" in cmd.args_hint
+        assert "--input" in cmd.args_hint
+
+
+# ── /run 参数解析测试 ─────────────────────────────────────────────────────────
+
+
+class TestRunArgumentParsing:
+    """测试 /run 参数解析"""
+
+    def _setup_async_repl(self, mock_repl):
+        """为 _cmd_run 设置异步事件循环 mock
+
+        _cmd_run 内部使用 repl.app.loop.create_task 调度异步执行，
+        需要 mock 这个调用链以便异步任务能被正确执行。
+        """
+
+        def _immediate_create_task(coro):
+            """在当前事件循环中调度协程"""
+            return asyncio.ensure_future(coro)
+
+        mock_app = MagicMock()
+        mock_app.loop.create_task = _immediate_create_task
+        mock_repl.app = mock_app
+        return mock_repl
+
+    def test_no_args_lists_saved(self, mock_repl):
+        """无参数时列出已保存的工作流"""
+        with patch("tui.slash_commands._run_list_saved") as mock_list:
+            _cmd_run(mock_repl, [])
+            mock_list.assert_called_once_with(mock_repl)
+
+    def test_stop_subcommand(self, mock_repl):
+        """/run stop 调用 _run_stop"""
+        with patch("tui.slash_commands._run_stop") as mock_stop:
+            _cmd_run(mock_repl, ["stop"])
+            mock_stop.assert_called_once_with(mock_repl)
+
+    def test_stop_case_insensitive(self, mock_repl):
+        """/run STOP 大小写不敏感"""
+        with patch("tui.slash_commands._run_stop") as mock_stop:
+            _cmd_run(mock_repl, ["STOP"])
+            mock_stop.assert_called_once_with(mock_repl)
+
+    @pytest.mark.asyncio
+    async def test_file_not_found_shows_error(self, mock_repl):
+        """工作流文件不存在时显示错误"""
+        self._setup_async_repl(mock_repl)
+        _cmd_run(mock_repl, ["nonexistent_workflow.gf"])
+        await asyncio.sleep(0.05)
+        assert mock_repl.add_output.call_count > 0
+        output_texts = [call[0][0] for call in mock_repl.add_output.call_args_list]
+        assert any("not found" in t.lower() for t in output_texts)
+
+    def test_already_running_shows_error(self, mock_repl):
+        """已有工作流运行时显示错误"""
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mock_repl._workflow_task = mock_task
+
+        _cmd_run(mock_repl, ["some_workflow.gf"])
+        mock_repl.add_output.assert_called()
+        call_args = mock_repl.add_output.call_args[0][0]
+        assert "already running" in call_args
+
+    @pytest.mark.asyncio
+    async def test_already_running_but_done_allows(self, mock_repl):
+        """已有工作流但已结束时允许运行"""
+        mock_task = MagicMock()
+        mock_task.done.return_value = True
+        mock_repl._workflow_task = mock_task
+
+        self._setup_async_repl(mock_repl)
+        _cmd_run(mock_repl, ["nonexistent.gf"])
+        await asyncio.sleep(0.05)
+        output_texts = [call[0][0] for call in mock_repl.add_output.call_args_list]
+        assert not any("already running" in t for t in output_texts)
+
+    def test_parse_task_arg(self, mock_repl):
+        """解析 --task 参数"""
+        with patch("tui.slash_commands._run_list_saved") as mock_list:
+            # --task without workflow file should show usage
+            _cmd_run(mock_repl, ["--task", "do something"])
+            mock_repl.add_output.assert_called()
+            call_args = mock_repl.add_output.call_args[0][0]
+            assert "Usage" in call_args
+
+    @pytest.mark.asyncio
+    async def test_parse_input_arg(self, mock_repl):
+        """解析 --input 参数"""
+        self._setup_async_repl(mock_repl)
+        _cmd_run(mock_repl, ["test.gf", "--input", "key=value"])
+        await asyncio.sleep(0.05)
+        assert mock_repl.add_output.call_count > 0
+
+    @pytest.mark.asyncio
+    async def test_multiple_input_args(self, mock_repl):
+        """解析多个 --input 参数"""
+        self._setup_async_repl(mock_repl)
+        _cmd_run(mock_repl, ["test.gf", "--input", "a=1", "--input", "b=2"])
+        await asyncio.sleep(0.05)
+        assert mock_repl.add_output.call_count > 0
+
+    @pytest.mark.asyncio
+    async def test_task_and_input_combined(self, mock_repl):
+        """组合 --task 和 --input 参数"""
+        self._setup_async_repl(mock_repl)
+        _cmd_run(mock_repl, ["test.gf", "--task", "my task", "--input", "key=val"])
+        await asyncio.sleep(0.05)
+        assert mock_repl.add_output.call_count > 0
+
+    @pytest.mark.asyncio
+    async def test_input_json_value(self, mock_repl):
+        """--input 支持 JSON 值"""
+        self._setup_async_repl(mock_repl)
+        _cmd_run(mock_repl, ["test.gf", "--input", 'data={"nested": true}'])
+        await asyncio.sleep(0.05)
+        assert mock_repl.add_output.call_count > 0
+
+    @pytest.mark.asyncio
+    async def test_input_no_equals_stored_as_is(self, mock_repl):
+        """--input 无等号时按原样存储"""
+        self._setup_async_repl(mock_repl)
+        _cmd_run(mock_repl, ["test.gf", "--input", "plain_value"])
+        await asyncio.sleep(0.05)
+        assert mock_repl.add_output.call_count > 0
+
+
+# ── /run 补全测试 ─────────────────────────────────────────────────────────────
+
+
+class TestRunCompletion:
+    """测试 /run 命令补全"""
+
+    def test_run_in_arg_completions(self):
+        """测试 run 的参数补全包含 stop"""
+        from tui.slash_commands import SlashCommandCompleter
+        completer = SlashCommandCompleter()
+        completions = completer._get_argument_completions("run", "")
+        texts = [c.text for c in completions]
+        assert "stop" in texts
+
+    def test_run_partial_stop_completion(self):
+        """测试部分输入补全 stop"""
+        from tui.slash_commands import SlashCommandCompleter
+        completer = SlashCommandCompleter()
+        completions = completer._get_argument_completions("run", "st")
+        texts = [c.text for c in completions]
+        assert "stop" in texts

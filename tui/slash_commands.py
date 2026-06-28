@@ -2038,6 +2038,7 @@ class SlashCommandCompleter(Completer):
         "perm": ["ask", "approve"],
         "permission": ["ask", "approve"],
         "connect": ["openai", "anthropic", "deepseek", "ollama"],
+        "run": ["stop"],
     }
 
     def __init__(self):
