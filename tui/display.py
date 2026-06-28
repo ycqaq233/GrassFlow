@@ -147,6 +147,15 @@ class Display:
                 print("\nAgent Results:")
                 for name, agent_record in record.agent_records.items():
                     print(f"  {name}: {agent_record.status.value}")
+                # 显示每个 Agent 的输出内容
+                for name, agent_record in record.agent_records.items():
+                    if agent_record.output_data:
+                        import json as _json
+                        output_str = _json.dumps(agent_record.output_data, indent=2, ensure_ascii=False)
+                        if len(output_str) > 1000:
+                            output_str = output_str[:1000] + "\n... (truncated)"
+                        print(f"\n[{name} Output]")
+                        print(output_str)
             return
 
         self.console.print()
@@ -188,6 +197,26 @@ class Display:
                 )
 
             self.console.print(agent_table)
+
+            # 打印每个 Agent 的输出内容
+            has_output = any(
+                agent_record.output_data
+                for agent_record in record.agent_records.values()
+            )
+            if has_output:
+                self.console.print()
+                import json as _json
+                for name, agent_record in record.agent_records.items():
+                    if agent_record.output_data:
+                        output_str = _json.dumps(agent_record.output_data, indent=2, ensure_ascii=False)
+                        # 截断过长的输出
+                        if len(output_str) > 1000:
+                            output_str = output_str[:1000] + "\n... (truncated)"
+                        self.console.print(Panel(
+                            output_str,
+                            title=f"[bold]{name}[/bold] Output",
+                            border_style="blue",
+                        ))
 
     def print_error(self, error: str) -> None:
         """
