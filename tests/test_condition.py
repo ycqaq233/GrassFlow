@@ -5,15 +5,14 @@ ConditionAgent 测试
 - 条件分支判断
 - 路由值验证
 - 错误处理
+
+使用 v2 类型: Component
 """
 
 import pytest
 import asyncio
-try:
-    from core.models import Component, ModelConfig, Port
-except ImportError:
-    from core.dsl_v2_ast import Component, ModelConfig, Port
-from core.condition import ConditionAgent, SimpleConditionAgent
+from core.models import Component, ModelConfig, Port
+from core.condition import ConditionAgent, SimpleConditionAgent, make_condition_component
 
 
 class TestConditionAgent:
@@ -22,18 +21,18 @@ class TestConditionAgent:
     @pytest.mark.asyncio
     async def test_condition_agent_basic(self):
         """测试基本条件判断"""
-        agent = ConditionAgent(name="route", rules=["urgent", "normal", "info"])
+        comp = make_condition_component("route", rules=["urgent", "normal", "info"])
+        agent = ConditionAgent(comp, rules=["urgent", "normal", "info"])
 
-        # 输入包含 route 字段
         result = await agent.run({"route": "urgent"})
         assert result == {"route": "urgent"}
 
     @pytest.mark.asyncio
     async def test_condition_agent_from_deps(self):
         """测试从依赖数据中获取路由值"""
-        agent = ConditionAgent(name="route", rules=["urgent", "normal"])
+        comp = make_condition_component("route", rules=["urgent", "normal"])
+        agent = ConditionAgent(comp, rules=["urgent", "normal"])
 
-        # 输入数据在 _deps 中
         input_data = {
             "_deps": {
                 "classifier": {"route": "urgent"}
@@ -45,7 +44,8 @@ class TestConditionAgent:
     @pytest.mark.asyncio
     async def test_condition_agent_invalid_route(self):
         """测试无效路由值"""
-        agent = ConditionAgent(name="route", rules=["urgent", "normal"])
+        comp = make_condition_component("route", rules=["urgent", "normal"])
+        agent = ConditionAgent(comp, rules=["urgent", "normal"])
 
         with pytest.raises(ValueError, match="not in rules"):
             await agent.run({"route": "invalid"})
@@ -53,7 +53,8 @@ class TestConditionAgent:
     @pytest.mark.asyncio
     async def test_condition_agent_missing_route(self):
         """测试缺少路由字段"""
-        agent = ConditionAgent(name="route", rules=["urgent", "normal"])
+        comp = make_condition_component("route", rules=["urgent", "normal"])
+        agent = ConditionAgent(comp, rules=["urgent", "normal"])
 
         with pytest.raises(ValueError, match="not found in input"):
             await agent.run({})
@@ -61,11 +62,8 @@ class TestConditionAgent:
     @pytest.mark.asyncio
     async def test_condition_agent_custom_field(self):
         """测试自定义路由字段"""
-        agent = ConditionAgent(
-            name="route",
-            rules=["high", "low"],
-            route_field="priority"
-        )
+        comp = make_condition_component("route", rules=["high", "low"])
+        agent = ConditionAgent(comp, rules=["high", "low"], route_field="priority")
 
         result = await agent.run({"priority": "high"})
         assert result == {"priority": "high"}
@@ -77,8 +75,9 @@ class TestSimpleConditionAgent:
     @pytest.mark.asyncio
     async def test_simple_condition_agent_basic(self):
         """测试基本条件映射"""
+        comp = make_condition_component("route")
         agent = SimpleConditionAgent(
-            name="route",
+            comp,
             field="priority",
             mapping={"high": "urgent", "low": "normal"}
         )
@@ -89,8 +88,9 @@ class TestSimpleConditionAgent:
     @pytest.mark.asyncio
     async def test_simple_condition_agent_from_deps(self):
         """测试从依赖数据中获取字段值"""
+        comp = make_condition_component("route")
         agent = SimpleConditionAgent(
-            name="route",
+            comp,
             field="priority",
             mapping={"high": "urgent", "low": "normal"}
         )
@@ -106,8 +106,9 @@ class TestSimpleConditionAgent:
     @pytest.mark.asyncio
     async def test_simple_condition_agent_default(self):
         """测试默认路由值"""
+        comp = make_condition_component("route")
         agent = SimpleConditionAgent(
-            name="route",
+            comp,
             field="priority",
             mapping={"high": "urgent"},
             default="normal"
@@ -119,8 +120,9 @@ class TestSimpleConditionAgent:
     @pytest.mark.asyncio
     async def test_simple_condition_agent_no_mapping_no_default(self):
         """测试无映射无默认值"""
+        comp = make_condition_component("route")
         agent = SimpleConditionAgent(
-            name="route",
+            comp,
             field="priority",
             mapping={"high": "urgent"}
         )
@@ -131,8 +133,9 @@ class TestSimpleConditionAgent:
     @pytest.mark.asyncio
     async def test_simple_condition_agent_missing_field(self):
         """测试缺少字段"""
+        comp = make_condition_component("route")
         agent = SimpleConditionAgent(
-            name="route",
+            comp,
             field="priority",
             mapping={"high": "urgent"},
             default="normal"
@@ -159,7 +162,6 @@ class TestConditionFromComponent:
             system_prompt="根据工单 {ticket} 判断优先级",
         )
 
-        # Component 描述了条件路由的元信息
         assert comp.name == "ticket-router"
         assert len(comp.ports) == 3
         input_ports = [p for p in comp.ports if p.direction == "input"]
@@ -167,7 +169,6 @@ class TestConditionFromComponent:
         assert len(input_ports) == 1
         assert len(output_ports) == 2
 
-        # 可以从 Component 的 ports 推断路由规则
         route_rules = [p.name for p in output_ports]
         assert "urgent" in route_rules
         assert "normal" in route_rules
@@ -185,9 +186,8 @@ class TestConditionFromComponent:
             ],
         )
 
-        # 从 Component 的输出端口提取规则
         rules = [p.name for p in comp.ports if p.direction == "output"]
-        agent = ConditionAgent(name=comp.name, rules=rules)
+        agent = ConditionAgent(comp, rules=rules)
 
         result = await agent.run({"route": "urgent"})
         assert result == {"route": "urgent"}

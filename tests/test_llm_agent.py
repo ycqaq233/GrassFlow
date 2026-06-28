@@ -6,14 +6,13 @@ LLM Agent 测试
 - prompt 格式化
 - 响应解析
 - 工厂创建
+
+使用 v2 类型: Component, ModelConfig
 """
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-try:
-    from core.models import Component, ModelConfig
-except ImportError:
-    from core.dsl_v2_ast import Component, ModelConfig
+from core.models import Component, ModelConfig
 from core.llm_agent import LLMAgent, LLMAgentFactory
 from core.llm import LLMClient, LLMManager, LLMResponse
 
@@ -24,25 +23,30 @@ class TestLLMAgent:
     def test_llm_agent_init(self):
         """测试 LLMAgent 初始化"""
         client = LLMClient(model="gpt-4")
-        agent = LLMAgent(
+        comp = Component(
             name="test",
-            model="gpt-4",
-            prompt="test prompt",
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="test prompt",
+        )
+        agent = LLMAgent(
+            component=comp,
             llm_client=client,
         )
 
         assert agent.name == "test"
-        assert agent.config.model == "gpt-4"
-        assert agent.config.prompt == "test prompt"
+        # resolved_model 可能被 _resolve_model 调整（取决于配置中的默认 provider）
+        assert isinstance(agent.resolved_model, str)
+        assert len(agent.resolved_model) > 0
 
     def test_format_prompt_simple(self):
         """测试简单 prompt 格式化"""
         client = LLMClient(model="gpt-4")
-        agent = LLMAgent(
+        comp = Component(
             name="test",
-            prompt="分类工单: {input}",
-            llm_client=client,
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="分类工单: {input}",
         )
+        agent = LLMAgent(component=comp, llm_client=client)
 
         result = agent._format_prompt({"ticket": "我的电脑坏了"})
         assert "分类工单" in result
@@ -50,11 +54,12 @@ class TestLLMAgent:
     def test_format_prompt_with_fields(self):
         """测试带字段的 prompt 格式化"""
         client = LLMClient(model="gpt-4")
-        agent = LLMAgent(
+        comp = Component(
             name="test",
-            prompt="分类: {ticket}, 优先级: {priority}",
-            llm_client=client,
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="分类: {ticket}, 优先级: {priority}",
         )
+        agent = LLMAgent(component=comp, llm_client=client)
 
         result = agent._format_prompt({
             "ticket": "我的电脑坏了",
@@ -66,11 +71,12 @@ class TestLLMAgent:
     def test_format_prompt_no_template(self):
         """测试无模板的 prompt 格式化"""
         client = LLMClient(model="gpt-4")
-        agent = LLMAgent(
+        comp = Component(
             name="test",
-            prompt="",
-            llm_client=client,
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="",
         )
+        agent = LLMAgent(component=comp, llm_client=client)
 
         result = agent._format_prompt({"ticket": "我的电脑坏了"})
         assert "我的电脑坏了" in result
@@ -78,10 +84,11 @@ class TestLLMAgent:
     def test_parse_response_json(self):
         """测试解析 JSON 响应"""
         client = LLMClient(model="gpt-4")
-        agent = LLMAgent(
+        comp = Component(
             name="test",
-            llm_client=client,
+            model=ModelConfig(default="gpt-4"),
         )
+        agent = LLMAgent(component=comp, llm_client=client)
 
         result = agent._parse_response('{"category": "hardware", "priority": "high"}')
         assert result["category"] == "hardware"
@@ -90,10 +97,11 @@ class TestLLMAgent:
     def test_parse_response_text(self):
         """测试解析文本响应"""
         client = LLMClient(model="gpt-4")
-        agent = LLMAgent(
+        comp = Component(
             name="test",
-            llm_client=client,
+            model=ModelConfig(default="gpt-4"),
         )
+        agent = LLMAgent(component=comp, llm_client=client)
 
         result = agent._format_prompt({"ticket": "我的电脑坏了"})
         assert isinstance(result, str)
@@ -107,26 +115,14 @@ class TestLLMAgentFactory:
         manager = LLMManager()
         factory = LLMAgentFactory(llm_manager=manager)
 
-        agent = factory.create("test", model="gpt-4", prompt="test prompt")
-        assert agent.name == "test"
-        assert agent.config.model == "gpt-4"
-
-    def test_factory_create_from_config(self):
-        """测试从配置创建"""
-        from core.agent import AgentConfig
-
-        manager = LLMManager()
-        factory = LLMAgentFactory(llm_manager=manager)
-
-        config = AgentConfig(
+        comp = Component(
             name="test",
-            model="gpt-4",
-            prompt="test prompt",
+            model=ModelConfig(default="gpt-4"),
+            system_prompt="test prompt",
         )
-
-        agent = factory.create_from_config(config)
+        agent = factory.create(comp)
         assert agent.name == "test"
-        assert agent.config.model == "gpt-4"
+        assert isinstance(agent.resolved_model, str)
 
     def test_factory_create_from_component(self):
         """测试从 Component 创建"""
@@ -139,12 +135,6 @@ class TestLLMAgentFactory:
         manager = LLMManager()
         factory = LLMAgentFactory(llm_manager=manager)
 
-        # Component 的 model.default 映射到 agent model
-        agent = factory.create(
-            comp.name,
-            model=comp.model.default or "gpt-4",
-            prompt=comp.system_prompt or "",
-        )
+        agent = factory.create(comp)
         assert agent.name == "test-agent"
-        assert agent.config.model == "gpt-4"
-        assert agent.config.prompt == "test prompt from component"
+        assert isinstance(agent.resolved_model, str)

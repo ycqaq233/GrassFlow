@@ -20,8 +20,7 @@ from typing import Optional, List, Dict, Any
 from pathlib import Path
 
 from core.models import (
-    Workflow, AgentConfig, Edge,
-    AgentType, InteractionType
+    Workflow, AgentInstance, Connection, Component, Port, ModelConfig,
 )
 from core.dag import DAG, DAGError
 
@@ -34,7 +33,7 @@ class AgentEditor(Screen):
         Binding("enter", "submit", "Submit"),
     ]
 
-    def __init__(self, agent: Optional[AgentConfig] = None, **kwargs):
+    def __init__(self, agent: Optional[AgentInstance] = None, **kwargs):
         super().__init__(**kwargs)
         self.agent = agent
         self.result = None
@@ -50,23 +49,23 @@ class AgentEditor(Screen):
                 id="agent-name"
             )
 
-            yield Label("Type:")
-            yield Select(
-                [(t.value, t.value) for t in AgentType],
-                value=self.agent.type.value if self.agent else "llm",
-                id="agent-type"
+            yield Label("Component (use):")
+            yield Input(
+                value=self.agent.component if self.agent and self.agent.component else "",
+                placeholder="component_name (optional)",
+                id="agent-component"
             )
 
             yield Label("Model:")
             yield Input(
-                value=self.agent.model if self.agent else "gpt-4",
+                value=self.agent.overrides.get("model", "gpt-4") if self.agent else "gpt-4",
                 placeholder="gpt-4",
                 id="agent-model"
             )
 
-            yield Label("Prompt:")
+            yield Label("System Prompt:")
             yield Input(
-                value=self.agent.prompt if self.agent else "",
+                value=self.agent.inline_system_prompt if self.agent and self.agent.inline_system_prompt else "",
                 placeholder="处理输入: {input}",
                 id="agent-prompt"
             )
@@ -74,7 +73,7 @@ class AgentEditor(Screen):
             yield Label("On Fail:")
             yield Select(
                 [("stop", "stop"), ("skip", "skip"), ("retry", "retry")],
-                value=self.agent.on_fail if self.agent else "stop",
+                value=self.agent.overrides.get("on_fail", "stop") if self.agent else "stop",
                 id="agent-on-fail"
             )
 
@@ -85,7 +84,7 @@ class AgentEditor(Screen):
     def action_submit(self):
         """提交表单"""
         name = self.query_one("#agent-name").value
-        agent_type = self.query_one("#agent-type").value
+        component = self.query_one("#agent-component").value
         model = self.query_one("#agent-model").value
         prompt = self.query_one("#agent-prompt").value
         on_fail = self.query_one("#agent-on-fail").value
@@ -96,9 +95,9 @@ class AgentEditor(Screen):
 
         self.result = {
             "name": name,
-            "type": agent_type,
+            "component": component if component else None,
             "model": model,
-            "prompt": prompt,
+            "system_prompt": prompt,
             "on_fail": on_fail,
         }
         self.dismiss(self.result)
@@ -116,50 +115,50 @@ class AgentEditor(Screen):
         self.action_cancel()
 
 
-class EdgeEditor(Screen):
-    """边编辑对话框"""
+class ConnectionEditor(Screen):
+    """连接编辑对话框"""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
         Binding("enter", "submit", "Submit"),
     ]
 
-    def __init__(self, agents: List[str], edge: Optional[Edge] = None, **kwargs):
+    def __init__(self, agents: List[str], connection: Optional[Connection] = None, **kwargs):
         super().__init__(**kwargs)
         self.agents = agents
-        self.edge = edge
+        self.connection = connection
         self.result = None
 
     def compose(self) -> ComposeResult:
         with Container(id="edge-dialog"):
-            yield Label("Edge Editor", id="dialog-title")
+            yield Label("Connection Editor", id="dialog-title")
 
             yield Label("Source:")
             yield Select(
                 [(a, a) for a in self.agents],
-                value=self.edge.source if self.edge else self.agents[0] if self.agents else "",
-                id="edge-source"
+                value=self.connection.source_agent if self.connection else self.agents[0] if self.agents else "",
+                id="conn-source"
             )
 
-            yield Label("Target:")
-            yield Select(
-                [(a, a) for a in self.agents],
-                value=self.edge.target if self.edge else self.agents[0] if self.agents else "",
-                id="edge-target"
-            )
-
-            yield Label("Type:")
-            yield Select(
-                [(t.value, t.value) for t in InteractionType],
-                value=self.edge.interaction_type.value if self.edge else "sequence",
-                id="edge-type"
-            )
-
-            yield Label("Condition (for condition edges):")
+            yield Label("Source Port:")
             yield Input(
-                value=self.edge.condition if self.edge and self.edge.condition else "",
-                placeholder="urgent",
-                id="edge-condition"
+                value=self.connection.source_port if self.connection and self.connection.source_port else "",
+                placeholder="default port",
+                id="conn-source-port"
+            )
+
+            yield Label("Target (comma-separated for broadcast):")
+            yield Input(
+                value=", ".join(self.connection.target_agents) if self.connection else "",
+                placeholder="target_agent",
+                id="conn-targets"
+            )
+
+            yield Label("Routing Rules (JSON, e.g. {\"urgent\": [\"A\"], \"normal\": [\"B\"]}):")
+            yield Input(
+                value=str(self.connection.routing_rules) if self.connection and self.connection.routing_rules else "",
+                placeholder="{}",
+                id="conn-routing"
             )
 
             with Horizontal():
@@ -168,20 +167,32 @@ class EdgeEditor(Screen):
 
     def action_submit(self):
         """提交表单"""
-        source = self.query_one("#edge-source").value
-        target = self.query_one("#edge-target").value
-        edge_type = self.query_one("#edge-type").value
-        condition = self.query_one("#edge-condition").value
+        import json
 
-        if source == target:
-            self.notify("Source and target must be different!", severity="error")
+        source = self.query_one("#conn-source").value
+        source_port = self.query_one("#conn-source-port").value
+        targets_str = self.query_one("#conn-targets").value
+        routing_str = self.query_one("#conn-routing").value
+
+        targets = [t.strip() for t in targets_str.split(",") if t.strip()]
+
+        if not targets:
+            self.notify("At least one target is required!", severity="error")
             return
 
+        routing_rules = {}
+        if routing_str:
+            try:
+                routing_rules = json.loads(routing_str)
+            except json.JSONDecodeError:
+                self.notify("Invalid JSON in routing rules!", severity="error")
+                return
+
         self.result = {
-            "source": source,
-            "target": target,
-            "interaction_type": edge_type,
-            "condition": condition if condition else None,
+            "source_agent": source,
+            "source_port": source_port if source_port else None,
+            "target_agents": targets,
+            "routing_rules": routing_rules,
         }
         self.dismiss(self.result)
 
@@ -209,8 +220,8 @@ class WorkflowEditor(App):
         Binding("a", "add_agent", "Add Agent"),
         Binding("e", "edit_agent", "Edit Agent"),
         Binding("d", "delete_agent", "Delete Agent"),
-        Binding("c", "add_edge", "Add Connection"),
-        Binding("x", "delete_edge", "Delete Connection"),
+        Binding("c", "add_connection", "Add Connection"),
+        Binding("x", "delete_connection", "Delete Connection"),
         Binding("s", "save", "Save"),
         Binding("l", "load", "Load"),
         Binding("v", "validate", "Validate"),
@@ -287,7 +298,7 @@ class WorkflowEditor(App):
 
     workflow = reactive(None)
     selected_agent = reactive(None)
-    selected_edge = reactive(None)
+    selected_connection = reactive(None)
 
     def __init__(self, workflow_file: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
@@ -298,15 +309,13 @@ class WorkflowEditor(App):
         yield Header()
 
         with Horizontal(id="main-container"):
-            # 左侧：Agent 和 Edge 列表
             with Vertical(id="sidebar"):
-                yield Label("📋 Agents", id="agents-title")
+                yield Label("Agents", id="agents-title")
                 yield DataTable(id="agents-table")
 
-                yield Label("🔗 Connections", id="edges-title")
+                yield Label("Connections", id="edges-title")
                 yield DataTable(id="edges-table")
 
-            # 右侧：详细信息
             with Vertical(id="content"):
                 yield Static(id="info-panel")
 
@@ -315,17 +324,14 @@ class WorkflowEditor(App):
 
     def on_mount(self) -> None:
         """初始化"""
-        # 初始化 Agents 表格
         agents_table = self.query_one("#agents-table")
-        agents_table.add_columns("Name", "Type", "Model")
+        agents_table.add_columns("Name", "Component", "Model")
         agents_table.cursor_type = "row"
 
-        # 初始化 Edges 表格
         edges_table = self.query_one("#edges-table")
-        edges_table.add_columns("Source", "Target", "Type", "Condition")
+        edges_table.add_columns("Source", "Targets", "Routing")
         edges_table.cursor_type = "row"
 
-        # 加载工作流
         if self.workflow_file:
             self.load_workflow(self.workflow_file)
         else:
@@ -352,21 +358,22 @@ class WorkflowEditor(App):
         agents_table = self.query_one("#agents-table")
         agents_table.clear()
         for agent in self.workflow.agents:
+            model = agent.overrides.get("model", "-")
             agents_table.add_row(
                 agent.name,
-                agent.type.value,
-                agent.model or "-"
+                agent.component or "-",
+                model,
             )
 
-        # 刷新 Edges 表格
+        # 刷新 Connections 表格
         edges_table = self.query_one("#edges-table")
         edges_table.clear()
-        for edge in self.workflow.edges:
+        for conn in self.workflow.connections:
+            routing = str(conn.routing_rules) if conn.routing_rules else "-"
             edges_table.add_row(
-                edge.source,
-                edge.target,
-                edge.interaction_type.value,
-                edge.condition or "-"
+                conn.source_agent,
+                ", ".join(conn.target_agents),
+                routing,
             )
 
         # 刷新信息面板
@@ -380,13 +387,11 @@ class WorkflowEditor(App):
             info.update("No workflow loaded")
             return
 
-        # 构建信息文本
         lines = [
             f"# Workflow: {self.workflow.name}",
             "",
-            f"**Description:** {self.workflow.description or 'N/A'}",
             f"**Agents:** {len(self.workflow.agents)}",
-            f"**Connections:** {len(self.workflow.edges)}",
+            f"**Connections:** {len(self.workflow.connections)}",
             "",
             "## Shortcuts",
             "",
@@ -405,18 +410,20 @@ class WorkflowEditor(App):
             "| Q | Quit |",
         ]
 
-        # 显示选中的 Agent 信息
         if self.selected_agent:
-            agent = self.workflow.get_agent(self.selected_agent)
+            agent = next(
+                (a for a in self.workflow.agents if a.name == self.selected_agent),
+                None
+            )
             if agent:
                 lines.extend([
                     "",
                     f"## Selected Agent: {agent.name}",
                     "",
-                    f"- **Type:** {agent.type.value}",
-                    f"- **Model:** {agent.model}",
-                    f"- **Prompt:** {agent.prompt or 'N/A'}",
-                    f"- **On Fail:** {agent.on_fail}",
+                    f"- **Component:** {agent.component or 'inline'}",
+                    f"- **Model:** {agent.overrides.get('model', 'N/A')}",
+                    f"- **System Prompt:** {agent.inline_system_prompt or 'N/A'}",
+                    f"- **On Fail:** {agent.overrides.get('on_fail', 'stop')}",
                 ])
 
         info.update("\n".join(lines))
@@ -437,15 +444,15 @@ class WorkflowEditor(App):
                 self.refresh_info_panel()
 
     @on(DataTable.RowSelected, "#edges-table")
-    def on_edge_selected(self, event: DataTable.RowSelected) -> None:
-        """Edge 选中"""
+    def on_connection_selected(self, event: DataTable.RowSelected) -> None:
+        """Connection 选中"""
         if event.row_key:
             table = self.query_one("#edges-table")
             row = table.get_row(event.row_key)
             if row:
-                self.selected_edge = {
+                self.selected_connection = {
                     "source": row[0],
-                    "target": row[1],
+                    "targets": row[1],
                 }
 
     def action_add_agent(self) -> None:
@@ -453,15 +460,19 @@ class WorkflowEditor(App):
         def callback(result):
             if result:
                 try:
-                    agent_type = AgentType(result["type"])
-                    agent = AgentConfig(
+                    overrides = {}
+                    if result["model"]:
+                        overrides["model"] = result["model"]
+                    if result["on_fail"]:
+                        overrides["on_fail"] = result["on_fail"]
+
+                    agent = AgentInstance(
                         name=result["name"],
-                        type=agent_type,
-                        model=result["model"],
-                        prompt=result["prompt"],
-                        on_fail=result["on_fail"],
+                        component=result.get("component"),
+                        overrides=overrides,
+                        inline_system_prompt=result.get("system_prompt"),
                     )
-                    self.workflow.add_agent(agent)
+                    self.workflow.agents.append(agent)
                     self.refresh_ui()
                     self.update_status(f"Added agent: {agent.name}")
                 except Exception as e:
@@ -475,18 +486,20 @@ class WorkflowEditor(App):
             self.notify("Select an agent first!", severity="warning")
             return
 
-        agent = self.workflow.get_agent(self.selected_agent)
+        agent = next(
+            (a for a in self.workflow.agents if a.name == self.selected_agent),
+            None
+        )
         if not agent:
             return
 
         def callback(result):
             if result:
                 try:
-                    # 更新 Agent
-                    agent.type = AgentType(result["type"])
-                    agent.model = result["model"]
-                    agent.prompt = result["prompt"]
-                    agent.on_fail = result["on_fail"]
+                    agent.component = result.get("component")
+                    agent.overrides["model"] = result["model"]
+                    agent.overrides["on_fail"] = result["on_fail"]
+                    agent.inline_system_prompt = result.get("system_prompt")
                     self.refresh_ui()
                     self.update_status(f"Updated agent: {agent.name}")
                 except Exception as e:
@@ -500,10 +513,11 @@ class WorkflowEditor(App):
             self.notify("Select an agent first!", severity="warning")
             return
 
-        # 删除相关的边
-        self.workflow.edges = [
-            e for e in self.workflow.edges
-            if e.source != self.selected_agent and e.target != self.selected_agent
+        # 删除相关的连接
+        self.workflow.connections = [
+            c for c in self.workflow.connections
+            if c.source_agent != self.selected_agent and
+            self.selected_agent not in c.target_agents
         ]
 
         # 删除 Agent
@@ -514,10 +528,10 @@ class WorkflowEditor(App):
 
         self.selected_agent = None
         self.refresh_ui()
-        self.update_status(f"Deleted agent")
+        self.update_status("Deleted agent")
 
-    def action_add_edge(self) -> None:
-        """添加边"""
+    def action_add_connection(self) -> None:
+        """添加连接"""
         if len(self.workflow.agents) < 2:
             self.notify("Need at least 2 agents!", severity="warning")
             return
@@ -527,36 +541,35 @@ class WorkflowEditor(App):
         def callback(result):
             if result:
                 try:
-                    interaction_type = InteractionType(result["interaction_type"])
-                    edge = Edge(
-                        source=result["source"],
-                        target=result["target"],
-                        interaction_type=interaction_type,
-                        condition=result["condition"],
+                    conn = Connection(
+                        source_agent=result["source_agent"],
+                        source_port=result.get("source_port"),
+                        target_agents=result["target_agents"],
+                        routing_rules=result.get("routing_rules", {}),
                     )
-                    self.workflow.add_edge(edge)
+                    self.workflow.connections.append(conn)
                     self.refresh_ui()
-                    self.update_status(f"Added edge: {edge.source} -> {edge.target}")
+                    self.update_status(f"Added connection: {conn.source_agent} -> {', '.join(conn.target_agents)}")
                 except Exception as e:
                     self.notify(f"Error: {e}", severity="error")
 
-        self.push_screen(EdgeEditor(agents=agent_names), callback)
+        self.push_screen(ConnectionEditor(agents=agent_names), callback)
 
-    def action_delete_edge(self) -> None:
-        """删除边"""
-        if not self.selected_edge:
-            self.notify("Select an edge first!", severity="warning")
+    def action_delete_connection(self) -> None:
+        """删除连接"""
+        if not self.selected_connection:
+            self.notify("Select a connection first!", severity="warning")
             return
 
-        self.workflow.edges = [
-            e for e in self.workflow.edges
-            if not (e.source == self.selected_edge["source"] and
-                   e.target == self.selected_edge["target"])
+        self.workflow.connections = [
+            c for c in self.workflow.connections
+            if not (c.source_agent == self.selected_connection["source"] and
+                    ", ".join(c.target_agents) == self.selected_connection["targets"])
         ]
 
-        self.selected_edge = None
+        self.selected_connection = None
         self.refresh_ui()
-        self.update_status("Deleted edge")
+        self.update_status("Deleted connection")
 
     def action_save(self) -> None:
         """保存工作流"""
@@ -569,10 +582,8 @@ class WorkflowEditor(App):
             else:
                 file_path = f"{self.workflow.name}.af"
 
-            # 生成 DSL
             dsl = self.generate_dsl()
 
-            # 写入文件
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(dsl)
 
@@ -584,13 +595,11 @@ class WorkflowEditor(App):
 
     def action_load(self) -> None:
         """加载工作流"""
-        # 简单实现：加载默认示例
         try:
-            from tui.storage import workflow_storage
+            from core.storage import workflow_storage
             workflows = workflow_storage.list()
 
             if workflows:
-                # 加载第一个
                 self.load_workflow(workflows[0])
             else:
                 self.notify("No saved workflows found", severity="warning")
@@ -616,7 +625,6 @@ class WorkflowEditor(App):
 
         dsl = self.generate_dsl()
 
-        # 更新信息面板显示 DSL
         info = self.query_one("#info-panel")
         info.update(f"# DSL Preview\n\n```\n{dsl}\n```")
 
@@ -625,7 +633,7 @@ class WorkflowEditor(App):
         self.workflow = Workflow(name="new_workflow")
         self.workflow_file = None
         self.selected_agent = None
-        self.selected_edge = None
+        self.selected_connection = None
         self.refresh_ui()
         self.update_status("New workflow created")
 
@@ -646,7 +654,7 @@ class WorkflowEditor(App):
 | A | Add Agent |
 | E | Edit selected Agent |
 | D | Delete selected Agent |
-| C | Add Connection (Edge) |
+| C | Add Connection |
 | X | Delete selected Connection |
 | S | Save workflow |
 | L | Load workflow |
@@ -656,26 +664,13 @@ class WorkflowEditor(App):
 | Q | Quit |
 
 ## Workflow Structure
-1. **Agents** - Processing units (LLM, Condition, Manual, etc.)
+1. **Agents** - Processing units
 2. **Connections** - Data flow between agents
-3. **Conditions** - Branching logic based on output
-
-## Agent Types
-- **LLM** - Language model agent
-- **Condition** - Conditional routing
-- **Manual** - Human intervention
-- **Input** - Workflow input
-- **Output** - Workflow output
-
-## Connection Types
-- **Sequence** - A -> B (A completes before B starts)
-- **Parallel** - (A, B) -> C (A and B run together)
-- **Immediate** - A | B (B starts immediately)
-- **Condition** - A -> [x] B (B runs if condition x)
+3. **Routing Rules** - Conditional branching based on output
 """)
 
     def generate_dsl(self) -> str:
-        """生成 DSL（使用共享的 _generate_dsl 函数，消除代码重复）"""
+        """生成 DSL（使用共享的 _generate_dsl 函数）"""
         from tui.cli import _generate_dsl
         return _generate_dsl(self.workflow)
 

@@ -2,17 +2,14 @@
 GrassFlow ConditionAgent
 
 条件分支 Agent，根据输出选择路由
+
+使用 v2 类型: Component (从 Component 构造)
 """
 
 from typing import Dict, Any, List, Optional
 
-try:
-    from core.agent import Agent
-    from core.models import Component
-except ImportError:
-    from core.dsl_v2_ast import Component
-
-from core.agent import AgentConfig
+from core.agent import Agent
+from core.models import Component, ModelConfig
 
 
 class ConditionAgent(Agent):
@@ -21,9 +18,9 @@ class ConditionAgent(Agent):
 
     根据输入数据的某个字段值来决定路由。
 
-    使用方式：
-    1. 在 DSL 中定义：agent route { type: "condition", rules: ["urgent", "normal"] }
-    2. 在执行流中使用：route -> [urgent] A, [normal] B
+    从 Component 构造:
+        comp = Component(name="route", ...)
+        agent = ConditionAgent(comp, rules=["urgent", "normal"])
 
     ConditionAgent 的输出包含一个 "route" 字段，值为匹配的规则。
     调度器根据这个字段值来决定执行哪个分支。
@@ -38,15 +35,7 @@ class ConditionAgent(Agent):
             rules: 条件规则列表，如 ["urgent", "normal", "info"]
             route_field: 用于路由的字段名，默认为 "route"
         """
-        config = AgentConfig(
-            name=component.name,
-            model=component.model.default or "gpt-4",
-            input_schema={},
-            output_schema={"route": "string"},
-            on_fail=component.on_fail,
-            retry_count=component.retry_count,
-        )
-        super().__init__(config)
+        super().__init__(component)
         self.rules = rules
         self.route_field = route_field
 
@@ -60,10 +49,8 @@ class ConditionAgent(Agent):
         Returns:
             包含 route 字段的输出数据
         """
-        # 从输入数据中获取路由值
         route_value = input_data.get(self.route_field)
 
-        # 如果输入数据在 _deps 中，尝试从依赖数据中获取
         if route_value is None:
             deps = input_data.get("_deps", {})
             for dep_name, dep_data in deps.items():
@@ -72,7 +59,6 @@ class ConditionAgent(Agent):
                     if route_value is not None:
                         break
 
-        # 验证路由值是否在规则列表中
         if route_value is None:
             raise ValueError(
                 f"ConditionAgent '{self.name}': route field '{self.route_field}' not found in input"
@@ -92,10 +78,9 @@ class SimpleConditionAgent(Agent):
 
     根据输入数据的某个字段值和预定义的映射来决定路由。
 
-    使用方式：
-    1. 定义映射：{"high": "urgent", "low": "normal"}
-    2. 输入数据包含字段值
-    3. 输出包含映射后的路由值
+    从 Component 构造:
+        comp = Component(name="route", ...)
+        agent = SimpleConditionAgent(comp, field="priority", mapping={"high": "urgent"})
     """
 
     def __init__(
@@ -114,15 +99,7 @@ class SimpleConditionAgent(Agent):
             mapping: 字段值到路由值的映射
             default: 默认路由值（当字段值不在映射中时使用）
         """
-        config = AgentConfig(
-            name=component.name,
-            model=component.model.default or "gpt-4",
-            input_schema={},
-            output_schema={"route": "string"},
-            on_fail=component.on_fail,
-            retry_count=component.retry_count,
-        )
-        super().__init__(config)
+        super().__init__(component)
         self.field = field
         self.mapping = mapping
         self.default = default
@@ -137,10 +114,8 @@ class SimpleConditionAgent(Agent):
         Returns:
             包含 route 字段的输出数据
         """
-        # 从输入数据中获取字段值
         field_value = input_data.get(self.field)
 
-        # 如果输入数据在 _deps 中，尝试从依赖数据中获取
         if field_value is None:
             deps = input_data.get("_deps", {})
             for dep_name, dep_data in deps.items():
@@ -149,7 +124,6 @@ class SimpleConditionAgent(Agent):
                     if field_value is not None:
                         break
 
-        # 映射到路由值
         route_value = self.mapping.get(str(field_value), self.default)
 
         if route_value is None:
@@ -159,3 +133,19 @@ class SimpleConditionAgent(Agent):
             )
 
         return {"route": route_value}
+
+
+def make_condition_component(
+    name: str,
+    rules: Optional[List[str]] = None,
+    model: str = "gpt-4",
+    on_fail: str = "stop",
+    retry_count: int = 3,
+) -> Component:
+    """辅助函数：从规则列表创建条件路由 Component"""
+    return Component(
+        name=name,
+        model=ModelConfig(default=model),
+        on_fail=on_fail,
+        retry_count=retry_count,
+    )

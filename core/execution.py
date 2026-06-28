@@ -39,6 +39,7 @@ class ExecutionRecord(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
+    total_duration_ms: Optional[int] = None
     agent_records: Dict[str, AgentExecutionRecord] = Field(default_factory=dict)
     error: Optional[str] = None
 
@@ -52,9 +53,9 @@ class ExecutionRecord(BaseModel):
         self.status = ExecutionStatus.COMPLETED
         self.completed_at = datetime.now()
         if self.started_at:
-            self.duration_ms = int(
-                (self.completed_at - self.started_at).total_seconds() * 1000
-            )
+            ms = int((self.completed_at - self.started_at).total_seconds() * 1000)
+            self.duration_ms = ms
+            self.total_duration_ms = ms
 
     def fail(self, error: str):
         """标记执行失败"""
@@ -62,6 +63,6 @@ class ExecutionRecord(BaseModel):
         self.error = error
         self.completed_at = datetime.now()
         if self.started_at:
-            self.duration_ms = int(
-                (self.completed_at - self.started_at).total_seconds() * 1000
-            )
+            ms = int((self.completed_at - self.started_at).total_seconds() * 1000)
+            self.duration_ms = ms
+            self.total_duration_ms = ms

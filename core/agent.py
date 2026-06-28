@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import jsonschema
 
-from .dsl_v2_ast import Component, Port, ModelConfig
+from .models import Component, Port, ModelConfig
 
 
 # ---------------------------------------------------------------------------

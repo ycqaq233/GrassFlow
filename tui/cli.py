@@ -8,10 +8,10 @@ GrassFlow CLI 命令入口
 - grassflow history - 查看执行历史
 - grassflow template - 工作流模板
 - grassflow edit - 交互式编辑工作流
-- grassflow init - 初始化项目（参考 opencode /init）
-- grassflow doctor - 系统健康检查（参考 hermes 检查机制）
-- grassflow models - 列出可用模型（参考 opencode /models）
-- grassflow plugin - 插件管理（参考 opencode 插件系统）
+- grassflow init - 初始化项目
+- grassflow doctor - 系统健康检查
+- grassflow models - 列出可用模型
+- grassflow plugin - 插件管理
 - grassflow config - 配置管理（增强版）
 - grassflow repl - 交互式 REPL
 """
@@ -24,12 +24,12 @@ from typing import Optional
 
 import click
 
-from core.models import WorkflowV1 as Workflow
+from core.models import Workflow, AgentInstance, Component, ModelConfig
 from core.context import WorkflowContext
 from core.scheduler import Scheduler
-from core.condition import ConditionAgent
+from core.condition import ConditionAgent, make_condition_component
 from core.llm_agent import LLMAgent
-from core.storage import workflow_storage
+from core.storage import workflow_storage, _dataclass_to_dict
 from core.db import execution_db
 from core.monitor import monitor
 from tui.dsl_parser import parse_file
@@ -58,16 +58,12 @@ def _get_default_provider() -> str:
 
 
 def _resolve_model_for_provider(model_name: str, provider: str) -> str:
-    """解析模型名称，如果当前 provider 中不存在该模型则回退到默认模型。
-
-    解决工作流文件硬编码 'gpt-4' 但系统使用 DeepSeek 时的模型不匹配问题。
-    """
+    """解析模型名称，如果当前 provider 中不存在该模型则回退到默认模型。"""
     try:
         from core.config import config_manager
         config = config_manager.load_config()
         provider_config = config.provider.get(provider)
         if provider_config and provider_config.models:
-            # 去掉 provider/ 前缀进行比较
             bare_name = model_name.split("/")[-1] if "/" in model_name else model_name
             if bare_name not in provider_config.models:
                 fallback = config.llm.default_model
@@ -120,14 +116,10 @@ def main():
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def run(workflow_file: str, model: Optional[str], provider: Optional[str],
         api_key: Optional[str], stream: bool, verbose: bool):
-    """执行工作流
-
-    使用配置中的默认模型，支持 --model 和 --provider 选项覆盖。
-    """
-    # Validate the workflow file argument
+    """执行工作流"""
     workflow_path = Path(workflow_file)
     if not workflow_path.exists():
-        if not workflow_path.suffix or workflow_path.suffix not in (".af", ".json"):
+        if not workflow_path.suffix or workflow_path.suffix not in (".af", ".json", ".gf"):
             display.print_error(
                 f"'{workflow_file}' is not a workflow file.\n"
                 f"\n"
@@ -142,18 +134,15 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
             sys.exit(1)
 
     try:
-        # 从配置获取默认值
         default_model = _get_default_model()
         effective_model = model or default_model
         effective_provider = provider or _get_default_provider()
 
-        # 解析工作流文件
         display.print_info(f"Loading workflow from {workflow_file}...")
         workflow = parse_file(workflow_file)
 
-        # 打印工作流信息
         agent_names = [agent.name for agent in workflow.agents]
-        display.print_workflow_info(workflow.name, agent_names, len(workflow.edges))
+        display.print_workflow_info(workflow.name, agent_names, len(workflow.connections))
 
         if verbose:
             display.print_info(f"  Model: {effective_provider}/{effective_model}")
@@ -161,25 +150,29 @@ def run(workflow_file: str, model: Optional[str], provider: Optional[str],
 
         # 创建 Agent 实例
         agents = {}
-        for agent_config in workflow.agents:
-            if agent_config.type.value == "condition":
-                rules = getattr(agent_config, 'rules', [])
-                agent = ConditionAgent(
-                    name=agent_config.name,
-                    rules=rules,
-                )
+        for agent_instance in workflow.agents:
+            # 获取模型名
+            raw_model = agent_instance.overrides.get("model", effective_model)
+            resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
+
+            # 创建 Component
+            component = Component(
+                name=agent_instance.name,
+                system_prompt=agent_instance.inline_system_prompt or "",
+                model=ModelConfig(default=resolved_model),
+                ports=list(agent_instance.inline_ports),
+            )
+
+            # 判断是否是条件 Agent
+            # 简单启发式：如果 agent 名称包含 "route" 或 "condition"，视为条件 Agent
+            if "route" in agent_instance.name.lower() or "condition" in agent_instance.name.lower():
+                rules = agent_instance.overrides.get("rules", [])
+                agent = ConditionAgent(component, rules=rules)
             else:
-                # 解析模型名称：如果工作流指定的模型在当前 provider 中不存在，回退到默认模型
-                raw_model = agent_config.model or effective_model
-                resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
                 agent = LLMAgent(
-                    name=agent_config.name,
-                    model=resolved_model,
-                    prompt=agent_config.prompt,
-                    input_schema=agent_config.input_schema,
-                    output_schema=agent_config.output_schema,
+                    component=component,
                 )
-            agents[agent_config.name] = agent
+            agents[agent_instance.name] = agent
 
         # 创建调度器
         scheduler = Scheduler(workflow, agents)
@@ -226,7 +219,7 @@ def save(workflow_file: str, output: Optional[str]):
             output_path = Path(output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(workflow.model_dump(), f, indent=2, ensure_ascii=False)
+                json.dump(_dataclass_to_dict(workflow), f, indent=2, ensure_ascii=False)
             display.print_success(f"Workflow saved to {output_path}")
         else:
             filepath = workflow_storage.save(workflow)
@@ -274,9 +267,8 @@ def validate(workflow_file: str):
 
         display.print_success(f"Workflow: {workflow.name}")
         display.print_info(f"  Agents: {len(workflow.agents)}")
-        display.print_info(f"  Edges: {len(workflow.edges)}")
+        display.print_info(f"  Connections: {len(workflow.connections)}")
 
-        # 检查 DAG
         from core.dag import DAG, DAGError
         try:
             dag = DAG(workflow)
@@ -468,7 +460,6 @@ def create(template_name: str, output: Optional[str]):
         else:
             output_path = Path(f"{workflow.name}.af")
 
-        # 使用共享的 DSL 生成函数
         dsl_content = _generate_dsl(workflow)
 
         with open(output_path, "w", encoding="utf-8") as f:
@@ -483,81 +474,50 @@ def create(template_name: str, output: Optional[str]):
 
 def _generate_dsl(workflow: Workflow) -> str:
     """
-    生成 DSL 内容（共享函数，cli.py 和 editor.py 均可使用）
-
-    修复 bug：正确处理边缘/重复边情况，正确输出并行和条件边。
+    生成 DSL 内容（v2 格式）
     """
     lines = []
     lines.append(f"# {workflow.name}")
-    if workflow.description:
-        lines.append(f"# {workflow.description}")
     lines.append("")
     lines.append(f"workflow {workflow.name} {{")
 
     # Agent 声明
     for agent in workflow.agents:
         lines.append(f"  agent {agent.name} {{")
-        if agent.type.value != "llm":
-            lines.append(f'    type: "{agent.type.value}"')
-        if agent.model:
-            lines.append(f'    model: "{agent.model}"')
-        if agent.prompt:
-            # 转义双引号
-            escaped_prompt = agent.prompt.replace('"', '\\"')
-            lines.append(f'    prompt: "{escaped_prompt}"')
-        if agent.input_schema:
-            import json
-            schema_str = json.dumps(agent.input_schema)
-            lines.append(f'    input_schema: {schema_str}')
-        if agent.output_schema:
-            import json
-            schema_str = json.dumps(agent.output_schema)
-            lines.append(f'    output_schema: {schema_str}')
-        if hasattr(agent, 'on_fail') and agent.on_fail and agent.on_fail != "stop":
-            lines.append(f'    on_fail: "{agent.on_fail}"')
+        model = agent.overrides.get("model")
+        if model:
+            lines.append(f'    model: "{model}"')
+        if agent.inline_system_prompt:
+            escaped = agent.inline_system_prompt.replace('"', '\\"')
+            lines.append(f'    system_prompt: "{escaped}"')
+        for port in agent.inline_ports:
+            desc = f' "{port.description}"' if port.description else ""
+            lines.append(f"    port {port.direction} {port.name}: {port.type}{desc}")
         lines.append("  }")
         lines.append("")
 
-    # 执行流
-    lines.append("  # 执行流")
+    # 连接
+    if workflow.connections:
+        lines.append("  # 连接")
+        for conn in workflow.connections:
+            source = conn.source_agent
+            if conn.source_port:
+                source = f"{source}.{conn.source_port}"
 
-    edges = workflow.edges
-    if edges:
-        from core.models import InteractionType
-
-        # 按源节点分组
-        source_groups: dict = {}
-        for edge in edges:
-            if edge.source not in source_groups:
-                source_groups[edge.source] = []
-            source_groups[edge.source].append(edge)
-
-        for source, edge_list in source_groups.items():
-            if len(edge_list) == 1:
-                edge = edge_list[0]
-                if edge.interaction_type == InteractionType.CONDITION and edge.condition:
-                    lines.append(f"  {source} -> [{edge.condition}] {edge.target}")
-                elif edge.interaction_type == InteractionType.IMMEDIATE:
-                    lines.append(f"  {source} | {edge.target}")
-                else:
-                    lines.append(f"  {source} -> {edge.target}")
+            if len(conn.target_agents) == 1:
+                target = conn.target_agents[0]
+                if conn.target_ports:
+                    target = f"{target}.{conn.target_ports[0]}"
+                lines.append(f"  {source} -> {target}")
             else:
-                # 多个目标：检查类型
                 targets = []
-                for edge in edge_list:
-                    if edge.interaction_type == InteractionType.CONDITION and edge.condition:
-                        targets.append(f"[{edge.condition}] {edge.target}")
+                for i, tgt in enumerate(conn.target_agents):
+                    port = conn.target_ports[i] if i < len(conn.target_ports) else None
+                    if port:
+                        targets.append(f"{tgt}.{port}")
                     else:
-                        targets.append(edge.target)
-
-                if any(edge.interaction_type == InteractionType.CONDITION for edge in edge_list):
-                    # 条件分支
-                    parts = ", ".join(targets)
-                    lines.append(f"  {source} -> {parts}")
-                else:
-                    # 广播/并行
-                    targets_str = ", ".join(targets)
-                    lines.append(f"  {source} -> ({targets_str})")
+                        targets.append(tgt)
+                lines.append(f"  {source} -> ({', '.join(targets)})")
 
     lines.append("}")
     lines.append("")
@@ -585,25 +545,26 @@ def monitor_cmd(workflow_file: str, model: Optional[str], watch: bool):
         workflow = parse_file(workflow_file)
 
         agent_names = [agent.name for agent in workflow.agents]
-        display.print_workflow_info(workflow.name, agent_names, len(workflow.edges))
+        display.print_workflow_info(workflow.name, agent_names, len(workflow.connections))
 
         agents = {}
-        for agent_config in workflow.agents:
-            if agent_config.type.value == "condition":
-                rules = getattr(agent_config, 'rules', [])
-                agent = ConditionAgent(name=agent_config.name, rules=rules)
+        for agent_instance in workflow.agents:
+            raw_model = agent_instance.overrides.get("model", effective_model)
+            resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
+
+            component = Component(
+                name=agent_instance.name,
+                system_prompt=agent_instance.inline_system_prompt or "",
+                model=ModelConfig(default=resolved_model),
+                ports=list(agent_instance.inline_ports),
+            )
+
+            if "route" in agent_instance.name.lower() or "condition" in agent_instance.name.lower():
+                rules = agent_instance.overrides.get("rules", [])
+                agent = ConditionAgent(component, rules=rules)
             else:
-                # 解析模型名称：如果工作流指定的模型在当前 provider 中不存在，回退到默认模型
-                raw_model = agent_config.model or effective_model
-                resolved_model = _resolve_model_for_provider(raw_model, effective_provider)
-                agent = LLMAgent(
-                    name=agent_config.name,
-                    model=resolved_model,
-                    prompt=agent_config.prompt,
-                    input_schema=agent_config.input_schema,
-                    output_schema=agent_config.output_schema,
-                )
-            agents[agent_config.name] = agent
+                agent = LLMAgent(component=component)
+            agents[agent_instance.name] = agent
 
         scheduler = Scheduler(workflow, agents)
 
@@ -661,16 +622,7 @@ def edit(workflow_file: Optional[str]):
 @click.option("--output", "-o", default=None, help="生成 AGENTS.md 规则文件（例如 --output AGENTS.md）")
 @click.option("--force", "-f", is_flag=True, help="强制覆盖已有文件")
 def init(output: Optional[str], force: bool):
-    """初始化 GrassFlow 项目
-
-    在当前目录创建 .grass/ 目录结构：
-    - .grass/config.json（项目配置）
-    - .grass/workflows/（工作流目录）
-
-    使用 --output AGENTS.md 可分析项目并生成规则文件。
-
-    参考 opencode /init 命令。
-    """
+    """初始化 GrassFlow 项目"""
     from tui.commands.init_cmd import init_command
     init_command(output=output, force=force)
 
@@ -679,18 +631,7 @@ def init(output: Optional[str], force: bool):
 
 @main.command()
 def doctor():
-    """系统健康检查
-
-    检查 GrassFlow 运行环境：
-    - Python 版本（>= 3.10）
-    - 核心依赖安装状态
-    - 配置文件存在性
-    - API Keys 配置状态
-    - 数据库连接
-    - 可用工具
-
-    参考 hermes 的检查机制。
-    """
+    """系统健康检查"""
     from tui.commands.doctor_cmd import doctor_command
     doctor_command()
 
@@ -700,14 +641,7 @@ def doctor():
 @main.command()
 @click.argument("provider", required=False)
 def models(provider: Optional[str] = None):
-    """列出可用的 AI 模型
-
-    显示所有已配置 provider 的模型列表，包括模型 ID、显示名称和上下文窗口大小。
-
-    使用 grassflow config api-key <provider> <key> 先配置 API key。
-
-    参考 opencode /models 命令。
-    """
+    """列出可用的 AI 模型"""
     from tui.commands.model_cmd import model_command
     model_command(provider=provider)
 
@@ -716,16 +650,7 @@ def models(provider: Optional[str] = None):
 
 @main.group()
 def plugin():
-    """管理 GrassFlow 插件
-
-    参考 opencode 插件系统，支持安装、卸载和列出插件。
-
-    \b
-    子命令：
-      list        列出已安装插件
-      install     安装插件
-      uninstall   卸载插件
-    """
+    """管理 GrassFlow 插件"""
     pass
 
 
@@ -741,12 +666,7 @@ def plugin_list_cmd():
 @click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
               help="安装范围（全局或当前项目）")
 def plugin_install_cmd(name: str, scope: str):
-    """安装插件
-
-    NAME 可以是：
-    - PyPI 包名（自动加 grassflow-plugin- 前缀尝试 pip 安装）
-    - 本地路径
-    """
+    """安装插件"""
     from tui.commands.plugin_cmd import plugin_install
     plugin_install(name, scope=scope)
 
@@ -766,21 +686,7 @@ def plugin_uninstall_cmd(name: str, scope: str, force: bool):
 
 @main.group()
 def config():
-    """管理 GrassFlow 配置
-
-    \b
-    子命令：
-      get         获取配置值
-      set         设置配置值
-      list        列出所有配置
-      edit        在编辑器中打开配置文件
-      validate    验证配置文件
-      providers   列出配置的 providers
-      api-key     设置 API Key
-      show-key    显示 API Key（脱敏）
-      reset       重置配置
-      path        显示配置文件路径
-    """
+    """管理 GrassFlow 配置"""
     pass
 
 
@@ -789,10 +695,7 @@ def config():
 @click.option("--scope", "-s", type=click.Choice(["global", "project", "merged"]), default="merged",
               help="配置作用域")
 def config_get(key: str, scope: str):
-    """获取配置值
-
-    支持点号分隔的嵌套键，例如：llm.default_model
-    """
+    """获取配置值"""
     try:
         from core.config import config_manager
 
@@ -821,10 +724,7 @@ def config_get(key: str, scope: str):
 @click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
               help="配置作用域")
 def config_set(key: str, value: str, scope: str):
-    """设置配置值
-
-    支持点号分隔的嵌套键，例如：llm.default_model gpt-4
-    """
+    """设置配置值"""
     try:
         from core.config import config_manager
         import json
@@ -945,10 +845,7 @@ def _get_nested_attr(data: dict, key: str):
 @click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
               help="编辑哪个作用域的配置")
 def config_edit(scope: str):
-    """在默认编辑器中打开配置文件
-
-    使用 $EDITOR 环境变量或系统默认编辑器。
-    """
+    """在默认编辑器中打开配置文件"""
     try:
         from core.config import config_manager
 
@@ -957,13 +854,10 @@ def config_edit(scope: str):
         else:
             config_file = config_manager.project_config_file
 
-        # 确保目录和文件存在
         config_file.parent.mkdir(parents=True, exist_ok=True)
         if not config_file.exists():
-            # 创建默认配置
             config_manager.load_global_config() if scope == "global" else config_manager.load_project_config()
 
-        # 确定编辑器
         editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
         if not editor:
             if sys.platform == "win32":
@@ -991,7 +885,6 @@ def config_validate():
         issues = []
         configs_ok = True
 
-        # 验证全局配置
         global_file = config_manager.global_config_file
         if global_file.exists():
             try:
@@ -1008,7 +901,6 @@ def config_validate():
         else:
             display.print_info(f"Global config: not found ({global_file})")
 
-        # 验证项目配置
         project_file = config_manager.project_config_file
         if project_file.exists():
             try:
@@ -1075,7 +967,6 @@ def config_providers():
 
             console.print(table)
 
-            # 显示默认 provider
             default_provider = config.llm.default_provider
             console.print(f"\n[dim]Default provider: {default_provider}[/dim]")
 
@@ -1134,10 +1025,7 @@ def config_reset(scope: str, force: bool):
 @click.option("--scope", "-s", type=click.Choice(["global", "project"]), default="global",
               help="配置作用域")
 def config_api_key(provider: str, key: str, scope: str):
-    """设置 API Key
-
-    例如：grassflow config api-key openai sk-xxx
-    """
+    """设置 API Key"""
     try:
         from core.config import config_manager
 
@@ -1179,17 +1067,7 @@ def config_show_key(provider: str):
 @click.option("--provider", "-p", default=None, help="LLM 提供商（覆盖配置默认值）")
 @click.option("--no-tools", is_flag=True, default=False, help="禁用工具调用")
 def ask(prompt: str, model: Optional[str], provider: Optional[str], no_tools: bool):
-    """执行单次 prompt 并输出结果
-
-    创建临时会话，发送 prompt 到 Agent，流式输出响应到 stdout。
-    支持工具调用、MCP 和 Skills。
-
-    \b
-    示例：
-      grassflow ask "What is the capital of France?"
-      grassflow ask "List files in current dir" --no-tools
-      grassflow ask "Analyze this code" --model gpt-4
-    """
+    """执行单次 prompt 并输出结果"""
     from tui.run_session import run_prompt_sync
 
     exit_code = run_prompt_sync(
@@ -1208,15 +1086,11 @@ def ask(prompt: str, model: Optional[str], provider: Optional[str], no_tools: bo
 @click.option("--provider", "-p", default=None, help="LLM 提供商")
 @click.option("--session", "-s", default=None, help="恢复指定会话 ID")
 def repl(model: Optional[str], provider: Optional[str], session: Optional[str]):
-    """启动交互式 REPL 会话
-
-    支持 --model、--provider 和 --session 选项。
-    """
+    """启动交互式 REPL 会话"""
     from tui.repl import run_repl
 
     if session:
         display.print_info(f"Resuming session: {session}")
-        # TODO: 实现会话恢复
     if model:
         display.print_info(f"Using model: {model}")
     if provider:

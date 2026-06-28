@@ -5,12 +5,12 @@
 import asyncio
 import pytest
 from core.agent import Agent
-from core.dsl_v2_ast import Component, Port, ModelConfig
+from core.models import Component, Port, ModelConfig
 from core.context import WorkflowContext
 try:
     from core.models import Workflow, AgentInstance, Connection
 except ImportError:
-    from core.dsl_v2_ast import Workflow, AgentInstance, Connection
+    from core.models import Workflow, AgentInstance, Connection
 
 
 # 测试用的 Agent 实现

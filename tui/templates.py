@@ -2,10 +2,14 @@
 GrassFlow 工作流模板
 
 提供常用工作流模板，快速创建
+
+使用 v2 类型: Workflow, AgentInstance, Connection, Component
 """
 
 from typing import Dict, Any, List, Optional
-from core.models import WorkflowV1 as Workflow, AgentConfig, Edge, AgentType, InteractionType
+from core.models import (
+    Workflow, AgentInstance, Connection, Component, Port, ModelConfig
+)
 
 
 # 模板定义
@@ -15,48 +19,62 @@ TEMPLATES = {
         "description": "工单处理工作流：分类 -> 优先级判断 -> 条件路由",
         "workflow": {
             "name": "ticket_processing",
-            "description": "工单处理工作流",
             "agents": [
                 {
                     "name": "classify",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "分类工单: {input}",
-                    "input_schema": {"ticket": "string"},
-                    "output_schema": {"category": "string"},
+                    "system_prompt": "分类工单: {input}",
+                    "ports": [
+                        {"name": "ticket", "direction": "input", "type": "string"},
+                        {"name": "category", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "priority",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "判断优先级: {input}",
-                    "input_schema": {"ticket": "string"},
-                    "output_schema": {"priority": "string"},
+                    "system_prompt": "判断优先级: {input}",
+                    "ports": [
+                        {"name": "ticket", "direction": "input", "type": "string"},
+                        {"name": "priority", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "route",
-                    "type": "condition",
-                    "rules": ["urgent", "normal", "info"],
+                    "model": "gpt-4",
+                    "system_prompt": "根据分类和优先级决定路由",
+                    "ports": [
+                        {"name": "category", "direction": "input", "type": "string"},
+                        {"name": "priority", "direction": "input", "type": "string"},
+                    ],
+                    "overrides": {"rules": ["urgent", "normal", "info"]},
                 },
                 {
                     "name": "human",
-                    "type": "manual",
-                    "prompt": "人工处理工单",
+                    "model": "gpt-4",
+                    "system_prompt": "人工处理工单",
                 },
                 {
                     "name": "bot",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "自动回复: {input}",
-                    "input_schema": {"ticket": "string", "category": "string"},
-                    "output_schema": {"response": "string"},
+                    "system_prompt": "自动回复: {input}",
+                    "ports": [
+                        {"name": "ticket", "direction": "input", "type": "string"},
+                        {"name": "category", "direction": "input", "type": "string"},
+                        {"name": "response", "direction": "output", "type": "string"},
+                    ],
                 },
             ],
-            "edges": [
-                {"source": "classify", "target": "route", "interaction_type": "sequence"},
-                {"source": "priority", "target": "route", "interaction_type": "sequence"},
-                {"source": "route", "target": "human", "interaction_type": "condition", "condition": "urgent"},
-                {"source": "route", "target": "bot", "interaction_type": "condition", "condition": "normal"},
+            "connections": [
+                {"source_agent": "classify", "target_agents": ["route"]},
+                {"source_agent": "priority", "target_agents": ["route"]},
+                {
+                    "source_agent": "route",
+                    "target_agents": ["human", "bot"],
+                    "routing_rules": {
+                        "urgent": ["human"],
+                        "normal": ["bot"],
+                    },
+                },
             ],
         },
     },
@@ -65,54 +83,60 @@ TEMPLATES = {
         "description": "竞品分析工作流：并行搜索 -> 分析 -> 报告",
         "workflow": {
             "name": "competitor_analysis",
-            "description": "竞品分析工作流",
             "agents": [
                 {
                     "name": "search_a",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "搜索竞品A的信息: {input}",
-                    "input_schema": {"company": "string"},
-                    "output_schema": {"info": "string"},
+                    "system_prompt": "搜索竞品A的信息: {input}",
+                    "ports": [
+                        {"name": "company", "direction": "input", "type": "string"},
+                        {"name": "info", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "search_b",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "搜索竞品B的信息: {input}",
-                    "input_schema": {"company": "string"},
-                    "output_schema": {"info": "string"},
+                    "system_prompt": "搜索竞品B的信息: {input}",
+                    "ports": [
+                        {"name": "company", "direction": "input", "type": "string"},
+                        {"name": "info", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "search_c",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "搜索竞品C的信息: {input}",
-                    "input_schema": {"company": "string"},
-                    "output_schema": {"info": "string"},
+                    "system_prompt": "搜索竞品C的信息: {input}",
+                    "ports": [
+                        {"name": "company", "direction": "input", "type": "string"},
+                        {"name": "info", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "analyze",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "分析竞品信息并生成报告",
-                    "input_schema": {"competitor_a": "object", "competitor_b": "object", "competitor_c": "object"},
-                    "output_schema": {"report": "string"},
+                    "system_prompt": "分析竞品信息并生成报告",
+                    "ports": [
+                        {"name": "competitor_a", "direction": "input", "type": "object"},
+                        {"name": "competitor_b", "direction": "input", "type": "object"},
+                        {"name": "competitor_c", "direction": "input", "type": "object"},
+                        {"name": "report", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "report",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "生成最终报告: {input}",
-                    "input_schema": {"analysis": "object"},
-                    "output_schema": {"final_report": "string"},
+                    "system_prompt": "生成最终报告: {input}",
+                    "ports": [
+                        {"name": "analysis", "direction": "input", "type": "object"},
+                        {"name": "final_report", "direction": "output", "type": "string"},
+                    ],
                 },
             ],
-            "edges": [
-                {"source": "search_a", "target": "analyze", "interaction_type": "parallel"},
-                {"source": "search_b", "target": "analyze", "interaction_type": "parallel"},
-                {"source": "search_c", "target": "analyze", "interaction_type": "parallel"},
-                {"source": "analyze", "target": "report", "interaction_type": "sequence"},
+            "connections": [
+                {"source_agent": "search_a", "target_agents": ["analyze"]},
+                {"source_agent": "search_b", "target_agents": ["analyze"]},
+                {"source_agent": "search_c", "target_agents": ["analyze"]},
+                {"source_agent": "analyze", "target_agents": ["report"]},
             ],
         },
     },
@@ -121,63 +145,76 @@ TEMPLATES = {
         "description": "代码审查工作流：并行审查 -> 汇总 -> 报告",
         "workflow": {
             "name": "code_review",
-            "description": "代码审查工作流",
             "agents": [
                 {
                     "name": "security_check",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "检查代码安全性: {input}",
-                    "input_schema": {"code": "string"},
-                    "output_schema": {"security_issues": "array"},
+                    "system_prompt": "检查代码安全性: {input}",
+                    "ports": [
+                        {"name": "code", "direction": "input", "type": "string"},
+                        {"name": "security_issues", "direction": "output", "type": "array"},
+                    ],
                 },
                 {
                     "name": "style_check",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "检查代码风格: {input}",
-                    "input_schema": {"code": "string"},
-                    "output_schema": {"style_issues": "array"},
+                    "system_prompt": "检查代码风格: {input}",
+                    "ports": [
+                        {"name": "code", "direction": "input", "type": "string"},
+                        {"name": "style_issues", "direction": "output", "type": "array"},
+                    ],
                 },
                 {
                     "name": "logic_check",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "检查代码逻辑: {input}",
-                    "input_schema": {"code": "string"},
-                    "output_schema": {"logic_issues": "array"},
+                    "system_prompt": "检查代码逻辑: {input}",
+                    "ports": [
+                        {"name": "code", "direction": "input", "type": "string"},
+                        {"name": "logic_issues", "direction": "output", "type": "array"},
+                    ],
                 },
                 {
                     "name": "summarize",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "汇总审查结果: {input}",
-                    "input_schema": {"security_issues": "array", "style_issues": "array", "logic_issues": "array"},
-                    "output_schema": {"summary": "string", "severity": "string"},
+                    "system_prompt": "汇总审查结果: {input}",
+                    "ports": [
+                        {"name": "security_issues", "direction": "input", "type": "array"},
+                        {"name": "style_issues", "direction": "input", "type": "array"},
+                        {"name": "logic_issues", "direction": "input", "type": "array"},
+                        {"name": "summary", "direction": "output", "type": "string"},
+                        {"name": "severity", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "route",
-                    "type": "condition",
-                    "rules": ["critical", "normal", "minor"],
+                    "model": "gpt-4",
+                    "system_prompt": "根据严重程度路由",
+                    "overrides": {"rules": ["critical", "normal", "minor"]},
                 },
                 {
                     "name": "block_merge",
-                    "type": "manual",
-                    "prompt": "阻止合并，需要人工处理",
+                    "model": "gpt-4",
+                    "system_prompt": "阻止合并，需要人工处理",
                 },
                 {
                     "name": "approve",
-                    "type": "manual",
-                    "prompt": "批准合并",
+                    "model": "gpt-4",
+                    "system_prompt": "批准合并",
                 },
             ],
-            "edges": [
-                {"source": "security_check", "target": "summarize", "interaction_type": "parallel"},
-                {"source": "style_check", "target": "summarize", "interaction_type": "parallel"},
-                {"source": "logic_check", "target": "summarize", "interaction_type": "parallel"},
-                {"source": "summarize", "target": "route", "interaction_type": "sequence"},
-                {"source": "route", "target": "block_merge", "interaction_type": "condition", "condition": "critical"},
-                {"source": "route", "target": "approve", "interaction_type": "condition", "condition": "normal"},
+            "connections": [
+                {"source_agent": "security_check", "target_agents": ["summarize"]},
+                {"source_agent": "style_check", "target_agents": ["summarize"]},
+                {"source_agent": "logic_check", "target_agents": ["summarize"]},
+                {"source_agent": "summarize", "target_agents": ["route"]},
+                {
+                    "source_agent": "route",
+                    "target_agents": ["block_merge", "approve"],
+                    "routing_rules": {
+                        "critical": ["block_merge"],
+                        "normal": ["approve"],
+                    },
+                },
             ],
         },
     },
@@ -186,60 +223,73 @@ TEMPLATES = {
         "description": "数据处理管道：提取 -> 转换 -> 加载",
         "workflow": {
             "name": "data_pipeline",
-            "description": "数据处理管道",
             "agents": [
                 {
                     "name": "extract",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "从数据源提取数据: {input}",
-                    "input_schema": {"source": "string"},
-                    "output_schema": {"raw_data": "object"},
+                    "system_prompt": "从数据源提取数据: {input}",
+                    "ports": [
+                        {"name": "source", "direction": "input", "type": "string"},
+                        {"name": "raw_data", "direction": "output", "type": "object"},
+                    ],
                 },
                 {
                     "name": "validate",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "验证数据质量: {input}",
-                    "input_schema": {"raw_data": "object"},
-                    "output_schema": {"is_valid": "boolean", "issues": "array"},
+                    "system_prompt": "验证数据质量: {input}",
+                    "ports": [
+                        {"name": "raw_data", "direction": "input", "type": "object"},
+                        {"name": "is_valid", "direction": "output", "type": "boolean"},
+                        {"name": "issues", "direction": "output", "type": "array"},
+                    ],
                 },
                 {
                     "name": "route",
-                    "type": "condition",
-                    "rules": ["valid", "invalid"],
+                    "model": "gpt-4",
+                    "system_prompt": "根据验证结果路由",
+                    "overrides": {"rules": ["valid", "invalid"]},
                 },
                 {
                     "name": "transform",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "转换数据格式: {input}",
-                    "input_schema": {"raw_data": "object"},
-                    "output_schema": {"transformed_data": "object"},
+                    "system_prompt": "转换数据格式: {input}",
+                    "ports": [
+                        {"name": "raw_data", "direction": "input", "type": "object"},
+                        {"name": "transformed_data", "direction": "output", "type": "object"},
+                    ],
                 },
                 {
                     "name": "load",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "加载数据到目标: {input}",
-                    "input_schema": {"transformed_data": "object"},
-                    "output_schema": {"status": "string", "count": "integer"},
+                    "system_prompt": "加载数据到目标: {input}",
+                    "ports": [
+                        {"name": "transformed_data", "direction": "input", "type": "object"},
+                        {"name": "status", "direction": "output", "type": "string"},
+                        {"name": "count", "direction": "output", "type": "number"},
+                    ],
                 },
                 {
                     "name": "error_handler",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "处理数据错误: {input}",
-                    "input_schema": {"issues": "array"},
-                    "output_schema": {"error_report": "string"},
+                    "system_prompt": "处理数据错误: {input}",
+                    "ports": [
+                        {"name": "issues", "direction": "input", "type": "array"},
+                        {"name": "error_report", "direction": "output", "type": "string"},
+                    ],
                 },
             ],
-            "edges": [
-                {"source": "extract", "target": "validate", "interaction_type": "sequence"},
-                {"source": "validate", "target": "route", "interaction_type": "sequence"},
-                {"source": "route", "target": "transform", "interaction_type": "condition", "condition": "valid"},
-                {"source": "route", "target": "error_handler", "interaction_type": "condition", "condition": "invalid"},
-                {"source": "transform", "target": "load", "interaction_type": "sequence"},
+            "connections": [
+                {"source_agent": "extract", "target_agents": ["validate"]},
+                {"source_agent": "validate", "target_agents": ["route"]},
+                {
+                    "source_agent": "route",
+                    "target_agents": ["transform", "error_handler"],
+                    "routing_rules": {
+                        "valid": ["transform"],
+                        "invalid": ["error_handler"],
+                    },
+                },
+                {"source_agent": "transform", "target_agents": ["load"]},
             ],
         },
     },
@@ -248,61 +298,78 @@ TEMPLATES = {
         "description": "聊天机器人：意图识别 -> 条件路由 -> 响应生成",
         "workflow": {
             "name": "chatbot",
-            "description": "聊天机器人工作流",
             "agents": [
                 {
                     "name": "intent",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "识别用户意图: {input}",
-                    "input_schema": {"message": "string"},
-                    "output_schema": {"intent": "string", "confidence": "number"},
+                    "system_prompt": "识别用户意图: {input}",
+                    "ports": [
+                        {"name": "message", "direction": "input", "type": "string"},
+                        {"name": "intent", "direction": "output", "type": "string"},
+                        {"name": "confidence", "direction": "output", "type": "number"},
+                    ],
                 },
                 {
                     "name": "route",
-                    "type": "condition",
-                    "rules": ["question", "complaint", "greeting", "other"],
+                    "model": "gpt-4",
+                    "system_prompt": "根据意图路由",
+                    "overrides": {"rules": ["question", "complaint", "greeting", "other"]},
                 },
                 {
                     "name": "answer",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "回答用户问题: {input}",
-                    "input_schema": {"message": "string", "context": "string"},
-                    "output_schema": {"answer": "string"},
+                    "system_prompt": "回答用户问题: {input}",
+                    "ports": [
+                        {"name": "message", "direction": "input", "type": "string"},
+                        {"name": "context", "direction": "input", "type": "string"},
+                        {"name": "answer", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "escalate",
-                    "type": "manual",
-                    "prompt": "升级到人工客服",
+                    "model": "gpt-4",
+                    "system_prompt": "升级到人工客服",
                 },
                 {
                     "name": "greet",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "生成问候语: {input}",
-                    "input_schema": {"message": "string"},
-                    "output_schema": {"greeting": "string"},
+                    "system_prompt": "生成问候语: {input}",
+                    "ports": [
+                        {"name": "message", "direction": "input", "type": "string"},
+                        {"name": "greeting", "direction": "output", "type": "string"},
+                    ],
                 },
                 {
                     "name": "fallback",
-                    "type": "llm",
                     "model": "gpt-4",
-                    "prompt": "生成默认回复: {input}",
-                    "input_schema": {"message": "string"},
-                    "output_schema": {"response": "string"},
+                    "system_prompt": "生成默认回复: {input}",
+                    "ports": [
+                        {"name": "message", "direction": "input", "type": "string"},
+                        {"name": "response", "direction": "output", "type": "string"},
+                    ],
                 },
             ],
-            "edges": [
-                {"source": "intent", "target": "route", "interaction_type": "sequence"},
-                {"source": "route", "target": "answer", "interaction_type": "condition", "condition": "question"},
-                {"source": "route", "target": "escalate", "interaction_type": "condition", "condition": "complaint"},
-                {"source": "route", "target": "greet", "interaction_type": "condition", "condition": "greeting"},
-                {"source": "route", "target": "fallback", "interaction_type": "condition", "condition": "other"},
+            "connections": [
+                {"source_agent": "intent", "target_agents": ["route"]},
+                {
+                    "source_agent": "route",
+                    "target_agents": ["answer", "escalate", "greet", "fallback"],
+                    "routing_rules": {
+                        "question": ["answer"],
+                        "complaint": ["escalate"],
+                        "greeting": ["greet"],
+                        "other": ["fallback"],
+                    },
+                },
             ],
         },
     },
 }
+
+
+def _parse_ports(port_list: List[Dict[str, str]]) -> List[Port]:
+    """将端口字典列表转换为 Port 对象列表"""
+    return [Port(**p) for p in port_list]
 
 
 def get_templates() -> List[Dict[str, Any]]:
@@ -323,37 +390,35 @@ def get_template(name: str) -> Optional[Dict[str, Any]]:
 
 
 def create_from_template(template: Dict[str, Any]) -> Workflow:
-    """从模板创建工作流"""
+    """从模板创建工作流 (v2)"""
     workflow_data = template["workflow"]
 
-    # 创建工作流
-    workflow = Workflow(
-        name=workflow_data["name"],
-        description=workflow_data.get("description", ""),
-    )
-
-    # 添加 Agent
+    agents = []
     for agent_data in workflow_data["agents"]:
-        agent_type = AgentType(agent_data.get("type", "llm"))
-        agent_config = AgentConfig(
+        overrides = agent_data.get("overrides", {})
+        if "model" in agent_data:
+            overrides["model"] = agent_data["model"]
+
+        agent = AgentInstance(
             name=agent_data["name"],
-            type=agent_type,
-            model=agent_data.get("model", "gpt-4"),
-            prompt=agent_data.get("prompt", ""),
-            input_schema=agent_data.get("input_schema", {}),
-            output_schema=agent_data.get("output_schema", {}),
+            overrides=overrides,
+            inline_ports=_parse_ports(agent_data.get("ports", [])),
+            inline_system_prompt=agent_data.get("system_prompt"),
         )
-        workflow.add_agent(agent_config)
+        agents.append(agent)
 
-    # 添加边
-    for edge_data in workflow_data["edges"]:
-        interaction_type = InteractionType(edge_data.get("interaction_type", "sequence"))
-        edge = Edge(
-            source=edge_data["source"],
-            target=edge_data["target"],
-            interaction_type=interaction_type,
-            condition=edge_data.get("condition"),
+    connections = []
+    for conn_data in workflow_data.get("connections", []):
+        conn = Connection(
+            source_agent=conn_data["source_agent"],
+            target_agents=conn_data.get("target_agents", []),
+            target_ports=conn_data.get("target_ports", []),
+            routing_rules=conn_data.get("routing_rules", {}),
         )
-        workflow.add_edge(edge)
+        connections.append(conn)
 
-    return workflow
+    return Workflow(
+        name=workflow_data["name"],
+        agents=agents,
+        connections=connections,
+    )

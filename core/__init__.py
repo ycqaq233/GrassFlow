@@ -3,11 +3,14 @@
 
 from .agent import Agent
 from .context import WorkflowContext
-from .models import Workflow, AgentConfig
+from .models import (
+    Component, Workflow, AgentInstance, Connection,
+    Port, ModelConfig, MCPConfig, PermissionConfig, ParseResult,
+)
 from .execution import ExecutionRecord, ExecutionStatus, AgentExecutionRecord
 from .dag import DAG, DAGError, topological_sort, get_parallel_groups, detect_cycle
 from .scheduler import Scheduler, SchedulerError
-from .condition import ConditionAgent, SimpleConditionAgent
+from .condition import ConditionAgent, SimpleConditionAgent, make_condition_component
 from .llm import LLMClient, LLMManager, LLMError, LLMResponse, llm_manager
 from .llm_agent import LLMAgent, LLMAgentFactory, llm_agent_factory
 from .storage import WorkflowStorage, StorageError, workflow_storage
@@ -155,20 +158,33 @@ from .model_discovery import (
 __all__ = [
     "Agent",
     "WorkflowContext",
+    # v2 types
+    "Component",
     "Workflow",
-    "AgentConfig",
+    "AgentInstance",
+    "Connection",
+    "Port",
+    "ModelConfig",
+    "MCPConfig",
+    "PermissionConfig",
+    "ParseResult",
+    # execution
     "ExecutionRecord",
     "ExecutionStatus",
     "AgentExecutionRecord",
+    # dag
     "DAG",
     "DAGError",
     "topological_sort",
     "get_parallel_groups",
     "detect_cycle",
+    # scheduler
     "Scheduler",
     "SchedulerError",
+    # agents
     "ConditionAgent",
     "SimpleConditionAgent",
+    "make_condition_component",
     "LLMClient",
     "LLMManager",
     "LLMError",
@@ -177,12 +193,15 @@ __all__ = [
     "LLMAgent",
     "LLMAgentFactory",
     "llm_agent_factory",
+    # storage
     "WorkflowStorage",
     "StorageError",
     "workflow_storage",
+    # db
     "ExecutionDatabase",
     "DatabaseError",
     "execution_db",
+    # monitor
     "Monitor",
     "MonitorReport",
     "MonitorIssue",

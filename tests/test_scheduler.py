@@ -6,58 +6,38 @@
 - 并行执行
 - 失败策略
 - 条件分支
+
+使用 v2 类型: Workflow, AgentInstance, Connection
 """
 
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-try:
-    from core.models import (
-        Component, Workflow, AgentInstance, Connection, Port, ModelConfig,
-        WorkflowV1, AgentConfig, Edge, AgentType, InteractionType, ExecutionStatus,
-    )
-except ImportError:
-    from core.dsl_v2_ast import Component, Workflow, AgentInstance, Connection, Port, ModelConfig
-    from core.models import WorkflowV1, AgentConfig, Edge, AgentType, InteractionType, ExecutionStatus
+from core.models import Workflow, AgentInstance, Connection, Component, ModelConfig
 from core.context import WorkflowContext
 from core.scheduler import Scheduler, SchedulerError
+from core.execution import ExecutionStatus
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def make_v1_workflow(
-    agents: list[tuple[str, str]] | None = None,
-    edges: list[tuple[str, str, str | None, str | None]] | None = None,
+def make_workflow(
+    agent_names: list[str] | None = None,
+    connections: list[tuple[str, list[str]]] | None = None,
+    routing: dict | None = None,
     name: str = "test",
-) -> WorkflowV1:
-    """Build a v1 Workflow from concise specs."""
-    type_map = {
-        "llm": AgentType.LLM,
-        "condition": AgentType.CONDITION,
-        "manual": AgentType.MANUAL,
-        "input": AgentType.INPUT,
-        "output": AgentType.OUTPUT,
-    }
-    interaction_map = {
-        "sequence": InteractionType.SEQUENCE,
-        "parallel": InteractionType.PARALLEL,
-        "immediate": InteractionType.IMMEDIATE,
-        "condition": InteractionType.CONDITION,
-        None: InteractionType.SEQUENCE,
-    }
-    wf = WorkflowV1(name=name)
-    for agent_name, agent_type in (agents or []):
-        wf.add_agent(AgentConfig(name=agent_name, type=type_map.get(agent_type, AgentType.LLM)))
-    for src, tgt, itype, cond in (edges or []):
-        wf.add_edge(Edge(
-            source=src, target=tgt,
-            interaction_type=interaction_map.get(itype, InteractionType.SEQUENCE),
-            condition=cond,
-        ))
-    return wf
+) -> Workflow:
+    """Build a v2 Workflow from concise specs."""
+    agents = [AgentInstance(name=n) for n in (agent_names or [])]
+    conns = [
+        Connection(source_agent=src, target_agents=tgts)
+        for src, tgts in (connections or [])
+    ]
+    if routing:
+        for src, rules in routing.items():
+            # 找到对应的 connection 并添加 routing_rules
+            for conn in conns:
+                if conn.source_agent == src:
+                    conn.routing_rules = rules
+    return Workflow(name=name, agents=agents, connections=conns)
 
 
 class MockAgent:
@@ -69,6 +49,8 @@ class MockAgent:
         self.delay = delay
         self.executed = False
         self.input_data = None
+        self.on_fail = "stop"
+        self.retry_count = 3
 
     async def run(self, input_data: dict) -> dict:
         """模拟执行"""
@@ -89,22 +71,22 @@ class TestScheduler:
 
     @pytest.fixture
     def workflow(self):
-        """创建测试工作流"""
-        return make_v1_workflow(
-            agents=[("A", "llm"), ("B", "llm"), ("C", "llm")],
+        return make_workflow(
+            agent_names=["A", "B", "C"],
             name="test",
         )
 
     @pytest.fixture
     def context(self):
-        """创建测试上下文"""
         return WorkflowContext()
 
     @pytest.mark.asyncio
     async def test_simple_sequence(self, workflow, context):
         """测试简单顺序执行：A -> B -> C"""
-        workflow.add_edge(Edge(source="A", target="B"))
-        workflow.add_edge(Edge(source="B", target="C"))
+        workflow.connections = [
+            Connection(source_agent="A", target_agents=["B"]),
+            Connection(source_agent="B", target_agents=["C"]),
+        ]
 
         agent_a = MockAgent("A")
         agent_b = MockAgent("B")
@@ -115,19 +97,18 @@ class TestScheduler:
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证执行顺序
         assert agent_a.executed
         assert agent_b.executed
         assert agent_c.executed
-
-        # 验证状态
         assert result.status == ExecutionStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_parallel_execution(self, workflow, context):
         """测试并行执行：(A, B) -> C"""
-        workflow.add_edge(Edge(source="A", target="C", interaction_type=InteractionType.PARALLEL))
-        workflow.add_edge(Edge(source="B", target="C", interaction_type=InteractionType.PARALLEL))
+        workflow.connections = [
+            Connection(source_agent="A", target_agents=["C"]),
+            Connection(source_agent="B", target_agents=["C"]),
+        ]
 
         agent_a = MockAgent("A", delay=0.1)
         agent_b = MockAgent("B", delay=0.1)
@@ -138,19 +119,18 @@ class TestScheduler:
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证所有 Agent 都被执行
         assert agent_a.executed
         assert agent_b.executed
         assert agent_c.executed
-
-        # 验证状态
         assert result.status == ExecutionStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_failure_stop(self, workflow, context):
         """测试失败策略：stop（默认）"""
-        workflow.add_edge(Edge(source="A", target="B"))
-        workflow.add_edge(Edge(source="B", target="C"))
+        workflow.connections = [
+            Connection(source_agent="A", target_agents=["B"]),
+            Connection(source_agent="B", target_agents=["C"]),
+        ]
 
         agent_a = MockAgent("A")
         agent_b = MockAgent("B", fail=True)
@@ -160,11 +140,9 @@ class TestScheduler:
 
         scheduler = Scheduler(workflow, agents)
 
-        # 应该抛出 SchedulerError
         with pytest.raises(SchedulerError):
             await scheduler.run(context)
 
-        # 验证 A 执行成功，B 失败，C 未执行
         assert agent_a.executed
         assert agent_b.executed
         assert not agent_c.executed
@@ -172,14 +150,14 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_failure_skip(self, workflow, context):
         """测试失败策略：skip"""
-        workflow.add_edge(Edge(source="A", target="B"))
-        workflow.add_edge(Edge(source="B", target="C"))
+        workflow.connections = [
+            Connection(source_agent="A", target_agents=["B"]),
+            Connection(source_agent="B", target_agents=["C"]),
+        ]
 
         agent_a = MockAgent("A")
         agent_b = MockAgent("B", fail=True)
-        agent_b_config = workflow.get_agent("B")
-        agent_b_config.on_fail = "skip"
-
+        agent_b.on_fail = "skip"
         agent_c = MockAgent("C")
 
         agents = {"A": agent_a, "B": agent_b, "C": agent_c}
@@ -187,24 +165,20 @@ class TestScheduler:
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证 A 执行成功，B 失败但被跳过，C 继续执行
         assert agent_a.executed
         assert agent_b.executed
         assert agent_c.executed
-
-        # 验证状态
         assert result.status == ExecutionStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_failure_retry(self, context):
         """测试失败策略：retry"""
-        workflow = make_v1_workflow(
-            agents=[("A", "llm"), ("B", "llm")],
-            edges=[("A", "B", None, None)],
+        workflow = make_workflow(
+            agent_names=["A", "B"],
+            connections=[("A", ["B"])],
             name="test_retry",
         )
 
-        # 创建一个会失败两次然后成功的 Agent
         call_count = 0
 
         class RetryAgent(MockAgent):
@@ -219,34 +193,41 @@ class TestScheduler:
 
         agent_a = MockAgent("A")
         agent_b = RetryAgent("B")
-        agent_b_config = workflow.get_agent("B")
-        agent_b_config.on_fail = "retry"
-        agent_b_config.retry_count = 3
+        agent_b.on_fail = "retry"
+        agent_b.retry_count = 3
 
         agents = {"A": agent_a, "B": agent_b}
 
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证 A 执行成功，B 重试后成功
         assert agent_a.executed
         assert agent_b.executed
-        assert call_count == 3  # 失败两次，第三次成功
-
-        # 验证状态
+        assert call_count == 3
         assert result.status == ExecutionStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_condition_branch(self, context):
         """测试条件分支"""
-        workflow = make_v1_workflow(
-            agents=[("A", "llm"), ("route", "condition"), ("output1", "output"), ("output2", "output")],
-            edges=[
-                ("A", "route", None, None),
-                ("route", "output1", "condition", "urgent"),
-                ("route", "output2", "condition", "normal"),
-            ],
+        workflow = Workflow(
             name="test_condition",
+            agents=[
+                AgentInstance(name="A"),
+                AgentInstance(name="route"),
+                AgentInstance(name="output1"),
+                AgentInstance(name="output2"),
+            ],
+            connections=[
+                Connection(source_agent="A", target_agents=["route"]),
+                Connection(
+                    source_agent="route",
+                    target_agents=["output1", "output2"],
+                    routing_rules={
+                        "urgent": ["output1"],
+                        "normal": ["output2"],
+                    },
+                ),
+            ],
         )
 
         agent_a = MockAgent("A")
@@ -271,33 +252,27 @@ class TestScheduler:
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证 A 和 route 执行
         assert agent_a.executed
         assert agent_route.executed
-
-        # 验证只有 output1 被执行（条件为 urgent）
         assert agent_output1.executed
         assert not agent_output2.executed
-
-        # 验证状态
         assert result.status == ExecutionStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_empty_workflow(self, context):
         """测试空工作流"""
-        workflow = WorkflowV1(name="test_empty")
+        workflow = Workflow(name="test_empty")
         agents = {}
 
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证状态
         assert result.status == ExecutionStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_single_agent(self, context):
         """测试单个 Agent"""
-        workflow = make_v1_workflow(agents=[("A", "llm")], name="test_single")
+        workflow = make_workflow(agent_names=["A"], name="test_single")
 
         agent_a = MockAgent("A")
         agents = {"A": agent_a}
@@ -305,18 +280,15 @@ class TestScheduler:
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证 A 被执行
         assert agent_a.executed
-
-        # 验证状态
         assert result.status == ExecutionStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_context_data_passing(self, context):
         """测试数据传递"""
-        workflow = make_v1_workflow(
-            agents=[("A", "llm"), ("B", "llm")],
-            edges=[("A", "B", None, None)],
+        workflow = make_workflow(
+            agent_names=["A", "B"],
+            connections=[("A", ["B"])],
             name="test_data",
         )
 
@@ -328,7 +300,6 @@ class TestScheduler:
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证 B 收到了 A 的输出
         assert agent_b.input_data is not None
         assert "_deps" in agent_b.input_data
         assert "A" in agent_b.input_data["_deps"]
@@ -336,9 +307,9 @@ class TestScheduler:
     @pytest.mark.asyncio
     async def test_execution_record(self, context):
         """测试执行记录"""
-        workflow = make_v1_workflow(
-            agents=[("A", "llm"), ("B", "llm")],
-            edges=[("A", "B", None, None)],
+        workflow = make_workflow(
+            agent_names=["A", "B"],
+            connections=[("A", ["B"])],
             name="test_record",
         )
 
@@ -350,7 +321,6 @@ class TestScheduler:
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证执行记录
         assert result.workflow_name == "test_record"
         assert "A" in result.agent_records
         assert "B" in result.agent_records
@@ -359,10 +329,10 @@ class TestScheduler:
 
     @pytest.mark.asyncio
     async def test_immediate_execution(self, context):
-        """测试立即执行：A | B"""
-        workflow = make_v1_workflow(
-            agents=[("A", "llm"), ("B", "llm")],
-            edges=[("A", "B", "immediate", None)],
+        """测试立即执行：A | B (both start immediately)"""
+        workflow = make_workflow(
+            agent_names=["A", "B"],
+            connections=[("A", ["B"])],
             name="test_immediate",
         )
 
@@ -374,9 +344,6 @@ class TestScheduler:
         scheduler = Scheduler(workflow, agents)
         result = await scheduler.run(context)
 
-        # 验证 A 和 B 都被执行
         assert agent_a.executed
         assert agent_b.executed
-
-        # 验证状态
         assert result.status == ExecutionStatus.COMPLETED

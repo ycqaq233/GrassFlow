@@ -26,7 +26,7 @@ from core.agent_component import (
 try:
     from core.models import Component, Workflow, AgentInstance, Connection, Port, ModelConfig, MCPConfig, PermissionConfig
 except ImportError:
-    from core.dsl_v2_ast import Component, Workflow, AgentInstance, Connection, Port, ModelConfig, MCPConfig, PermissionConfig
+    from core.models import Component, Workflow, AgentInstance, Connection, Port, ModelConfig, MCPConfig, PermissionConfig
 
 
 # ---------------------------------------------------------------------------
