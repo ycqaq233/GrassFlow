@@ -7,6 +7,7 @@ GrassFlow 调度器
 - 失败策略（stop/skip/retry）
 - 条件分支
 - 事件回调机制
+- Stream 模式（逐项触发）
 
 使用 v2 类型: Workflow, AgentInstance
 """
@@ -14,7 +15,7 @@ GrassFlow 调度器
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, List, Optional
 from datetime import datetime
 from core.models import Workflow, AgentInstance
 from core.execution import ExecutionRecord, AgentExecutionRecord, ExecutionStatus
@@ -82,6 +83,40 @@ class Scheduler:
                 return ai
         return None
 
+    def _get_agent_mode(self, agent_name: str) -> str:
+        """获取 Agent 的执行模式：优先 AgentInstance，其次 Agent._component，最后默认 batch"""
+        agent_instance = self._get_agent_instance(agent_name)
+        if agent_instance and agent_instance.mode != "batch":
+            return agent_instance.mode
+        agent = self.agents.get(agent_name)
+        if agent and hasattr(agent, '_component') and hasattr(agent._component, 'mode'):
+            return agent._component.mode
+        return "batch"
+
+    def _get_agent_context_strategy(self, agent_name: str) -> str:
+        """获取 Agent 的上下文策略：优先 AgentInstance，其次 Agent._component，最后默认 shared"""
+        agent_instance = self._get_agent_instance(agent_name)
+        if agent_instance and agent_instance.context != "shared":
+            return agent_instance.context
+        agent = self.agents.get(agent_name)
+        if agent and hasattr(agent, '_component') and hasattr(agent._component, 'context'):
+            return agent._component.context
+        return "shared"
+
+    @staticmethod
+    def _get_stream_items(upstream_outputs: Dict[str, Any]) -> List[Any]:
+        """从上游输出中提取可迭代的数组值。
+
+        遍历所有上游 agent 的输出，收集其中类型为 list 的值。
+        """
+        items: List[Any] = []
+        for output in upstream_outputs.values():
+            if isinstance(output, dict):
+                for value in output.values():
+                    if isinstance(value, list):
+                        items.extend(value)
+        return items
+
     def _emit(self, event: SchedulerEvent) -> None:
         """
         发射事件。回调失败不影响调度执行。
@@ -135,7 +170,12 @@ class Scheduler:
         return self.execution_record
 
     async def _execute_group(self, group: list, context: WorkflowContext) -> None:
-        """执行一组可以并行执行的 Agent"""
+        """执行一组可以并行执行的 Agent
+
+        将组内 agent 分为 batch 和 stream 两类：
+        - batch agent：并行 gather（保持原有行为）
+        - stream agent：逐项触发，每个上游输出项执行一次
+        """
         agents_to_execute = []
         for agent_name in group:
             if self._should_execute(agent_name, context):
@@ -144,30 +184,49 @@ class Scheduler:
         if not agents_to_execute:
             return
 
+        # 分离 batch 和 stream agents
+        batch_agents: List[str] = []
+        stream_agents: List[str] = []
+        for agent_name in agents_to_execute:
+            if self._get_agent_mode(agent_name) == "stream":
+                stream_agents.append(agent_name)
+            else:
+                batch_agents.append(agent_name)
+
         self._emit(SchedulerEvent(
             event_type=SchedulerEventType.GROUP_START,
             data={"agents": agents_to_execute},
         ))
 
-        tasks = []
-        for agent_name in agents_to_execute:
-            task = asyncio.create_task(
-                self._execute_agent(agent_name, context)
-            )
-            tasks.append(task)
+        # 执行 batch agents（并行 gather，保持原有行为）
+        if batch_agents:
+            tasks = []
+            for agent_name in batch_agents:
+                task = asyncio.create_task(
+                    self._execute_agent(agent_name, context)
+                )
+                tasks.append(task)
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for agent_name, result in zip(batch_agents, results):
+                if isinstance(result, Exception):
+                    await self._handle_failure(agent_name, result, context)
+                else:
+                    context.set(agent_name, result)
+
+        # 执行 stream agents（逐项触发）
+        for agent_name in stream_agents:
+            try:
+                results = await self._execute_stream_agent(agent_name, context)
+                context.set(agent_name, results)
+            except Exception as e:
+                await self._handle_failure(agent_name, e, context)
 
         self._emit(SchedulerEvent(
             event_type=SchedulerEventType.GROUP_COMPLETE,
-            data={"agents": agents_to_execute, "results": results},
+            data={"agents": agents_to_execute},
         ))
-
-        for agent_name, result in zip(agents_to_execute, results):
-            if isinstance(result, Exception):
-                await self._handle_failure(agent_name, result, context)
-            else:
-                context.set(agent_name, result)
 
     async def _execute_agent(self, agent_name: str, context: WorkflowContext) -> Dict[str, Any]:
         """执行单个 Agent"""
@@ -229,6 +288,115 @@ class Scheduler:
                 data={"error": str(e), "duration_ms": record.duration_ms},
             ))
             raise
+
+    async def _execute_stream_agent(self, agent_name: str, context: WorkflowContext) -> List[Dict[str, Any]]:
+        """执行 Stream 模式的 Agent
+
+        从上游输出中提取数组项，每个项触发一次 agent 执行。
+        - shared 模式：复用同一个 agent 实例（累积上下文）
+        - independent 模式：每次创建新实例（无状态）
+
+        Returns:
+            所有触发结果的列表
+        """
+        agent = self.agents.get(agent_name)
+        if not agent:
+            raise SchedulerError(f"Agent '{agent_name}' not found")
+
+        # 收集上游输出
+        dependencies = self.dag.get_dependencies(agent_name)
+        upstream_outputs: Dict[str, Any] = {}
+        for dep_name in dependencies:
+            upstream_outputs[dep_name] = context.get(dep_name)
+
+        # 提取可迭代项
+        items = self._get_stream_items(upstream_outputs)
+        if not items:
+            # 无可迭代项，回退到单次 batch 执行
+            result = await self._execute_agent(agent_name, context)
+            return [result]
+
+        context_strategy = self._get_agent_context_strategy(agent_name)
+        all_results: List[Dict[str, Any]] = []
+
+        for item in items:
+            # 构造输入：原始依赖数据 + 当前项
+            input_data: Dict[str, Any] = {"_deps": dict(upstream_outputs), "_stream_item": item}
+
+            record = AgentExecutionRecord(agent_name=f"{agent_name}[stream]")
+            record.started_at = datetime.now()
+            record.status = ExecutionStatus.RUNNING
+            record.input_data = input_data
+
+            self._emit(SchedulerEvent(
+                event_type=SchedulerEventType.AGENT_START,
+                agent_name=agent_name,
+                timestamp=record.started_at,
+                data={"stream_item": item},
+            ))
+
+            try:
+                if context_strategy == "independent":
+                    # 每次创建新实例
+                    from copy import deepcopy
+                    fresh = deepcopy(agent)
+                    if hasattr(fresh, 'execute'):
+                        output = await fresh.execute(input_data)
+                    else:
+                        output = await fresh.run(input_data)
+                else:
+                    # shared 模式：复用同一实例
+                    if hasattr(agent, 'execute'):
+                        output = await agent.execute(input_data)
+                    else:
+                        output = await agent.run(input_data)
+
+                record.status = ExecutionStatus.COMPLETED
+                record.output_data = output
+                record.completed_at = datetime.now()
+                if record.started_at:
+                    record.duration_ms = int(
+                        (record.completed_at - record.started_at).total_seconds() * 1000
+                    )
+
+                self._emit(SchedulerEvent(
+                    event_type=SchedulerEventType.AGENT_COMPLETE,
+                    agent_name=agent_name,
+                    timestamp=record.completed_at,
+                    data={"output": output, "duration_ms": record.duration_ms, "stream_item": item},
+                ))
+
+                all_results.append(output)
+
+            except Exception as e:
+                record.status = ExecutionStatus.FAILED
+                record.error = str(e)
+                record.completed_at = datetime.now()
+                if record.started_at:
+                    record.duration_ms = int(
+                        (record.completed_at - record.started_at).total_seconds() * 1000
+                    )
+
+                self._emit(SchedulerEvent(
+                    event_type=SchedulerEventType.AGENT_FAIL,
+                    agent_name=agent_name,
+                    timestamp=record.completed_at,
+                    data={"error": str(e), "duration_ms": record.duration_ms, "stream_item": item},
+                ))
+
+                # stream 模式：单次失败不中断后续触发
+                on_fail = "stop"
+                if agent and hasattr(agent, 'on_fail'):
+                    on_fail = agent.on_fail
+                agent_instance = self._get_agent_instance(agent_name)
+                if agent_instance and "on_fail" in agent_instance.overrides:
+                    on_fail = agent_instance.overrides["on_fail"]
+
+                if on_fail == "stop":
+                    raise
+                # skip/retry：记录错误但继续下一个 item
+
+        return all_results
 
     def _prepare_input(self, agent_name: str, context: WorkflowContext) -> Dict[str, Any]:
         """准备 Agent 输入数据"""

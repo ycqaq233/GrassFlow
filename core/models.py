@@ -68,6 +68,8 @@ class AgentInstance:
     overrides: Dict[str, Any] = field(default_factory=dict)
     inline_ports: List[Port] = field(default_factory=list)
     inline_system_prompt: Optional[str] = None
+    mode: str = "batch"      # "batch" | "stream"
+    context: str = "shared"  # "shared" | "independent"
 
 
 @dataclass
