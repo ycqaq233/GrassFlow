@@ -1,7 +1,7 @@
 # GrassFlow DSL v2 语言规范
 
-> 版本：2.0.0
-> 最后更新：2026-06-25
+> 版本：2.1.0
+> 最后更新：2026-06-28
 
 ---
 
@@ -110,9 +110,9 @@ component code-reviewer {
     model max_tokens: 4096
 
     # === 权限 ===
-    permission allow: [github.add_comment]
-    permission deny: [github.delete_repo]
-    permission ask: [github.merge_pr]
+    permission allow: [read, glob, grep]
+    permission deny: [write, shell]
+    permission ask: [commit_changes]
 
     # === 执行模式 ===
     mode: "batch"          # batch | stream
@@ -245,24 +245,28 @@ model max_tokens: 4096        # 最大 token 数
 
 #### 3.3.7 permission（权限）
 
-控制 Agent 对 MCP 工具的调用权限。
+控制 Agent 可用的内置工具集。权限声明中的工具 ID 对应 `ToolRegistry` 中注册的内置工具名称。
 
 ```
-permission allow: [github.add_comment, github.create_issue]   # 允许
-permission deny:  [github.delete_repo]                         # 禁止
-permission ask:   [github.merge_pr]                            # 每次调用前询问用户
+permission allow: [read, glob, grep]        # 允许读取类工具
+permission deny:  [write, shell]            # 禁止写入和执行
+permission ask:   [commit_changes]          # 每次调用前询问用户
 ```
 
 **优先级规则**：`deny` > `ask` > `allow`
 
 **继承规则**：权限是组件的固有属性，实例化时**不可覆盖**（安全策略不可放宽）。
 
+**工具过滤机制**：运行时，`create_filtered_registry()` 根据组件的 `permission` 声明从全局 `ToolRegistry` 中创建一个独立的过滤注册表，该 Agent 只能访问声明允许的工具。参见第 11 章。
+
 #### 3.3.8 mode（执行模式）
 
 ```
 mode: "batch"     # 批处理：等待所有输入就绪后执行一次（默认）
-mode: "stream"    # 流处理：每次收到输入就执行一次
+mode: "stream"    # 流处理：规划中，未完整实现
 ```
+
+> **注意**：`stream` 模式已定义在数据模型中，但当前调度器仅实现了 `batch` 模式的调度逻辑。`stream` 模式的完整支持（包括异步端口触发、共享上下文累积等）在后续版本中实现。
 
 #### 3.3.9 context（上下文策略）
 
@@ -361,6 +365,42 @@ workflow my-pipeline {
 ```grassflow
 agent.final_result -> workflow_output_name
 ```
+
+### 4.3.1 工作流输入（workflow_input）
+
+执行工作流时，可通过 `--task` 和 `--input` 参数向工作流注入外部输入：
+
+```bash
+/run my_workflow.gf --task "审查 examples/code_review_pipeline.gf 的代码质量" --input debug=true
+```
+
+**输入注入规则**：
+
+1. `--task "描述"` 将 `task` 键注入到输入参数
+2. `--input key=value` 注入键值对（支持 JSON 值，否则作为字符串）
+3. **根 Agent**（DAG 中无依赖的 Agent）自动接收 `workflow_input` 作为输入数据
+4. 非根 Agent 的输入通过 `_deps` 字段获取上游 Agent 的输出
+
+**输入数据结构**：
+
+```python
+# 根 Agent（无依赖）收到：
+{
+    "task": "审查 examples/code_review_pipeline.gf 的代码质量",
+    "debug": True,
+    "_deps": {}  # 空，因为没有上游依赖
+}
+
+# 非根 Agent 收到：
+{
+    "_deps": {
+        "reader": {"code_content": "...", "structure": {...}, "metrics": {...}},
+        "complexity": {"complexity_report": {...}, "score": 85}
+    }
+}
+```
+
+**实现位置**：`core/scheduler.py` — `Scheduler._prepare_input()`
 
 ### 4.4 Agent 实例化
 
@@ -477,80 +517,127 @@ D 的默认输入端口收到的数据为：
 
 ## 5. 条件分支
 
-条件分支通过命名输出端口实现。路由组件为每个可能的分支定义一个输出端口。
+条件分支通过 `Connection` 的 `routing_rules` 字段实现。路由 Agent 的输出中包含 `route` 字段，调度器根据该字段值决定将数据路由到哪个下游 Agent。
 
-### 5.1 定义路由组件
+### 5.1 数据模型
+
+条件路由的核心在 `Connection` 数据模型中：
+
+```python
+@dataclass
+class Connection:
+    source_agent: str
+    source_port: Optional[str] = None
+    target_agents: List[str] = field(default_factory=list)
+    target_ports: List[str] = field(default_factory=list)
+    routing_rules: Dict[str, List[str]] = field(default_factory=dict)
+    # routing_rules 格式: {condition_value: [target_agent_name, ...]}
+```
+
+### 5.2 路由判断逻辑
+
+调度器通过 `Scheduler._should_execute()` 判断 Agent 是否应执行：
+
+1. 收集该 Agent 的所有入边（`Connection`）
+2. 如果入边有 `routing_rules`，读取源 Agent 输出中的 `route` 字段
+3. `route` 值匹配到 `routing_rules` 中的 key，且当前 Agent 在对应的 target 列表中，则执行
+4. 有 `routing_rules` 但未匹配到，不执行
+
+```python
+# 伪代码
+source_output = context.get(conn.source_agent)
+route_value = source_output.get("route")  # 例如 "urgent"
+if route_value in conn.routing_rules:
+    if agent_name in conn.routing_rules[route_value]:
+        return True  # 执行该 Agent
+return False  # 跳过该 Agent
+```
+
+### 5.3 ConditionAgent
+
+路由 Agent 使用 `ConditionAgent` 类，通过 `rules` 参数定义路由规则：
+
+```python
+from core.condition import ConditionAgent
+
+agent = ConditionAgent(component, rules=["urgent", "normal", "info"])
+```
+
+在 DSL 中，通过 Agent 名称或 overrides 中的 `rules` 字段声明：
 
 ```grassflow
-component ticket-router {
-    port input ticket: object
-
-    # 每个分支是一个输出端口
-    port output urgent: object
-    port output normal: object
-    port output info: object
-
-    system_prompt: """
-        根据工单内容判断优先级。
-        输出 JSON: {"route": "urgent|normal|info", "ticket": ...}
-    """
+agent route {
+    type: "condition"
+    rules: ["urgent", "normal", "info"]
 }
 ```
 
-### 5.2 在 workflow 中使用
+### 5.4 在 workflow 中使用
 
 ```grassflow
 workflow ticket-processing {
     port input ticket: object
     port output result: object
 
-    agent router use ticket-router
-    agent urgent-handler {
-        model: "gpt-4"
-        system_prompt: "紧急处理: {urgent}"
-        port input urgent: object
-        port output result: object
+    agent classify { model: "gpt-4", system_prompt: "分类工单: {ticket}" }
+    agent route {
+        type: "condition"
+        rules: ["urgent", "normal", "info"]
     }
-    agent normal-handler {
-        model: "gpt-4"
-        system_prompt: "常规处理: {normal}"
-        port input normal: object
-        port output result: object
-    }
-    agent info-handler {
-        model: "gpt-4"
-        system_prompt: "信息记录: {info}"
-        port input info: object
-        port output result: object
-    }
+    agent human { type: "manual" }
+    agent bot { model: "gpt-4", system_prompt: "自动回复: {ticket}" }
 
-    # 条件连接：每个分支端口连接到对应处理器
-    router.urgent -> urgent-handler.urgent
-    router.normal -> normal-handler.normal
-    router.info -> info-handler.info
+    classify -> route
 
-    # 聚合结果（运行时只有一个分支会执行）
-    (urgent-handler, normal-handler, info-handler) -> result
+    # 条件连接：route 的输出根据 route 字段分发
+    route -> [urgent] human
+    route -> [normal] bot
 }
 ```
+
+**DSL 语法说明**：
+
+- `route -> [urgent] human` 表示：当 `route` 输出的 `route` 字段值为 `"urgent"` 时，执行 `human`
+- 方括号内为条件值，对应 `routing_rules` 中的 key
+- 同一条件可连接多个目标：`route -> [urgent] (human, alert)`
+
+### 5.5 实现细节
+
+`Connection.routing_rules` 在 DSL 解析器中生成。对于上述示例，解析结果为：
+
+```python
+Connection(
+    source_agent="route",
+    target_agents=["human"],
+    routing_rules={"urgent": ["human"]}
+)
+Connection(
+    source_agent="route",
+    target_agents=["bot"],
+    routing_rules={"normal": ["bot"]}
+)
+```
+
+调度器在执行每个并行组时，先调用 `_should_execute()` 过滤，只有匹配条件路由的 Agent 才会实际执行。
 
 ---
 
 ## 6. 组件组合
 
-### 6.1 use 关键字
+### 6.1 use 关键字（workflow 内）
 
-`use` 将一个组件的定义引入到当前组件或 workflow 中：
+`use` 将一个已定义的组件引入到 workflow 中的 Agent 实例：
 
 ```grassflow
-component my-agent {
-    use github-tools        # 引入 MCP 配置
-    use base-reviewer       # 引入端口、提示词等
-
-    # 可以覆盖非安全相关的配置
-    system_prompt: "我的自定义提示词..."
+workflow my-pipeline {
+    agent reviewer use code-reviewer          # 引入组件定义
+    agent reviewer2 use code-reviewer {
+        model temperature: 0.5                # 覆盖运行时参数
+    }
 }
 ```
+
+> **注意**：`use` 关键字目前仅在 workflow 内的 `agent` 实例化中实现。组件内部不支持 `use` 引入其他组件（即 `component A { use B }` 未实现）。不支持 `extends` 继承。
 
 ### 6.2 引入规则
 
@@ -561,44 +648,25 @@ component my-agent {
 - 权限：合并（取并集）
 - MCP：合并（同名 server 的 tools 取并集）
 
-### 6.3 细粒度拆分
+### 6.3 覆盖参数
 
-当只需要部分能力时，将能力拆分为独立组件：
+在 workflow 内使用组件时，可覆盖以下运行时参数：
 
 ```grassflow
-# MCP 配置独立组件
-component github-tools {
-    mcp github {
-        tools: [add_comment, create_issue]
-    }
-}
-
-component sonarqube-tools {
-    mcp sonarqube {
-        tools: [analyze_code]
-    }
-}
-
-# 组合
-component reviewer {
-    use github-tools
-    use sonarqube-tools
-    system_prompt: "你是一个代码审查专家..."
-    port input code: string
-    port output issues: array
+agent reviewer use code-reviewer {
+    model: "gpt-4o"                   # 覆盖模型名
+    model temperature: 0.5            # 覆盖温度
+    model max_tokens: 8192            # 覆盖最大 token
+    on_fail: "retry"                  # 覆盖失败策略
+    retry_count: 5                    # 覆盖重试次数
 }
 ```
 
-### 6.4 路径引用
-
-可以使用文件路径显式引用组件：
-
-```grassflow
-component my-agent {
-    use "./components/github-tools.gf"
-    use "~/.Grass/components/base-reviewer.gf"
-}
-```
+**不允许覆盖的参数**（要修改请定义新组件）：
+- `port`（端口定义）
+- `system_prompt`（提示词）
+- `mcp`（MCP 配置）
+- `permission`（权限）
 
 ---
 
@@ -663,7 +731,7 @@ port output issues: array
 # C.in = {"A": <A的输出>, "B": <B的输出>}
 ```
 
-### 8.3 stream 模式数据流
+### 8.3 stream 模式数据流（规划中，未完整实现）
 
 ```grassflow
 component counter {
@@ -768,8 +836,8 @@ component code-reviewer {
         tools: [add_comment, create_issue]
     }
 
-    permission allow: [github.add_comment]
-    permission ask: [github.create_issue]
+    permission allow: [read, glob, grep]
+    permission ask: [write]
 }
 
 component report-generator {
@@ -804,7 +872,9 @@ workflow code-review {
 }
 ```
 
-### 9.3 流式数据处理
+### 9.3 流式数据处理（规划中）
+
+> **注意**：`stream` 模式已定义在数据模型中，但当前调度器仅实现了 `batch` 模式。以下为设计示例，尚未完整实现。
 
 ```grassflow
 component data-fetcher {
@@ -853,16 +923,240 @@ workflow stream-pipeline {
 
 ---
 
-## 10. 语法规则速查表
+## 10. 调度器事件回调
 
-### 10.1 关键字
+### 10.1 事件类型
+
+调度器通过 `SchedulerEventType` 枚举定义 10 种事件：
+
+```python
+class SchedulerEventType(str, Enum):
+    WORKFLOW_START   = "workflow_start"    # 工作流开始
+    WORKFLOW_COMPLETE = "workflow_complete" # 工作流完成
+    WORKFLOW_FAILED  = "workflow_failed"   # 工作流失败
+    GROUP_START      = "group_start"       # 并行组开始
+    GROUP_COMPLETE   = "group_complete"    # 并行组完成
+    AGENT_START      = "agent_start"       # Agent 开始执行
+    AGENT_COMPLETE   = "agent_complete"    # Agent 执行完成
+    AGENT_FAIL       = "agent_fail"        # Agent 执行失败
+    AGENT_RETRY      = "agent_retry"       # Agent 重试
+    AGENT_SKIPPED    = "agent_skipped"     # Agent 被跳过
+```
+
+### 10.2 事件数据结构
+
+```python
+@dataclass
+class SchedulerEvent:
+    event_type: SchedulerEventType
+    agent_name: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.now)
+    data: Optional[Any] = None
+```
+
+`data` 字段因事件类型而异：
+
+| 事件 | data 内容 |
+|------|----------|
+| `WORKFLOW_START` | `{"workflow_name": str}` |
+| `WORKFLOW_COMPLETE` | `{"execution_record": ExecutionRecord}` |
+| `WORKFLOW_FAILED` | `{"error": str, "execution_record": ExecutionRecord}` |
+| `GROUP_START` | `{"agents": [str, ...]}` |
+| `GROUP_COMPLETE` | `{"agents": [str, ...], "results": [...]}` |
+| `AGENT_START` | `None` |
+| `AGENT_COMPLETE` | `{"output": dict, "duration_ms": int}` |
+| `AGENT_FAIL` | `{"error": str, "duration_ms": int}` |
+| `AGENT_RETRY` | `{"attempt": int, "max_retries": int}` |
+| `AGENT_SKIPPED` | `{"reason": str}` |
+
+### 10.3 回调注册
+
+创建 `Scheduler` 时通过 `on_event` 参数注册回调函数：
+
+```python
+scheduler = Scheduler(
+    workflow=workflow,
+    agents=agents,
+    workflow_input={"task": "..."},
+    on_event=lambda event: print(f"[{event.event_type}] {event.agent_name}"),
+)
+```
+
+- 回调为 `None` 时不发射事件（零开销）
+- 回调函数抛出异常不影响工作流执行
+
+### 10.4 事件序列示例
+
+一个包含 2 个并行 Agent 的工作流的事件序列：
+
+```
+WORKFLOW_START       {workflow_name: "my-workflow"}
+GROUP_START          {agents: ["reader"]}
+AGENT_START          agent_name="reader"
+AGENT_COMPLETE       agent_name="reader"  {output: {...}, duration_ms: 1234}
+GROUP_COMPLETE       {agents: ["reader"]}
+GROUP_START          {agents: ["complexity", "security"]}
+AGENT_START          agent_name="complexity"
+AGENT_START          agent_name="security"
+AGENT_COMPLETE       agent_name="complexity"  {output: {...}, duration_ms: 567}
+AGENT_COMPLETE       agent_name="security"    {output: {...}, duration_ms: 890}
+GROUP_COMPLETE       {agents: ["complexity", "security"]}
+WORKFLOW_COMPLETE    {execution_record: ...}
+```
+
+**实现位置**：`core/scheduler.py` — `Scheduler._emit()`
+
+---
+
+## 11. 工具权限过滤
+
+### 11.1 机制概述
+
+每个 Agent 的工具权限由其所属 Component 的 `permission` 声明决定。运行时通过 `create_filtered_registry()` 从全局 `ToolRegistry` 创建一个独立的过滤注册表。
+
+```python
+from core.tool_registry import ToolRegistry, create_filtered_registry, register_builtin_tools
+
+# 1. 全局注册表（包含所有内置工具）
+global_registry = ToolRegistry()
+register_builtin_tools(global_registry)
+
+# 2. 根据组件权限创建过滤注册表
+agent_registry = create_filtered_registry(global_registry, component.permission)
+
+# 3. Agent 只能使用过滤后的工具
+agent = LLMAgent(component=component, tool_registry=agent_registry)
+```
+
+### 11.2 过滤规则
+
+- `permission.allow` 中列出的工具 ID 被包含
+- `permission.deny` 中列出的工具 ID 被排除
+- `permission.ask` 中列出的工具 ID 被包含，但执行前需要用户确认
+- 优先级：`deny` > `ask` > `allow`
+- 如果 `allow` 和 `deny` 都为空，Agent 使用全局注册表（不限制）
+
+### 11.3 内置工具 ID
+
+常用内置工具 ID（用于 `permission` 声明）：
+
+| 工具 ID | 说明 |
+|---------|------|
+| `read` | 读取文件 |
+| `write` | 写入文件 |
+| `glob` | 文件模式匹配 |
+| `grep` | 内容搜索 |
+| `shell` | 执行 Shell 命令 |
+
+**实现位置**：`core/tool_registry.py` — `create_filtered_registry()`
+
+---
+
+## 12. REPL 集成
+
+### 12.1 工作流执行命令
+
+在 REPL 中通过 `/run` 命令执行工作流文件：
+
+```bash
+# 执行工作流
+/run my_workflow.gf
+
+# 带任务描述执行
+/run my_workflow.gf --task "审查代码质量"
+
+# 带额外输入参数
+/run my_workflow.gf --task "审查代码" --input debug=true --input format=json
+
+# 取消正在运行的工作流
+/run stop
+
+# 列出已保存的工作流
+/run
+```
+
+**参数说明**：
+- `<workflow_file>`：`.gf` 文件路径（支持相对路径、绝对路径，自动搜索 `~/.Grass/workflows/`）
+- `--task "描述"`：注入为 `workflow_input["task"]`
+- `--input key=value`：注入键值对（支持 JSON 值解析）
+- `stop`：取消正在运行的工作流
+- 无参数：列出 `~/.Grass/workflows/` 下已保存的工作流
+
+### 12.2 AI 生成工作流命令
+
+通过 `/generate` 命令让 AI 根据自然语言描述生成 DSL：
+
+```bash
+# 交互式生成（预览后确认保存）
+/generate 创建一个代码审查流水线，先读取代码，然后并行分析复杂度和安全性，最后生成报告
+
+# 仅预览不保存
+/generate preview 对比分析方案A和方案B
+
+# 直接保存为指定名称
+/generate save my-review 分析代码质量并生成报告
+```
+
+**子命令**：
+- 无子命令：生成 → 预览 → 交互确认（输入 `yes` 保存、`save <name>` 自定义名称保存、`no` 丢弃）
+- `preview`：仅预览，不保存
+- `save <name>`：直接保存到 `~/.Grass/workflows/<name>.gf`
+
+### 12.3 意图检测
+
+`IntentDetector` 通过规则匹配自动识别用户消息中的多步骤任务意图，并生成对应的 DSL v2 工作流定义。
+
+**支持的模式**：
+
+| 模式 | 触发词 | 生成结构 | 示例 |
+|------|--------|---------|------|
+| 顺序依赖 | "然后" | `A -> B` | "分析代码然后生成报告" |
+| 多步顺序 | "先...再...最后" | `A -> B -> C` | "先读取再分析最后报告" |
+| 并行+聚合 | "对比...和..." | `(A, B) -> C` | "对比方案A和方案B" |
+| 并行执行 | "分别" | `(A, B, C)` | "分别分析安全性、性能和风格" |
+
+**实现位置**：`tui/intent_detector.py` — `IntentDetector`
+
+### 12.4 WorkflowRunner 引擎
+
+`WorkflowRunner` 是 REPL 内的工作流执行引擎，对齐 CLI 的 `run_cmd` 逻辑，但面向 REPL 环境：
+
+- **异步执行**：不阻塞 REPL 事件循环
+- **事件驱动输出**：通过 `REPLOutputHandler` 将 `SchedulerEvent` 格式化为 Rich 输出
+- **可取消**：通过 `asyncio.Task` 支持 `/run stop` 取消
+- **自动保存执行记录**：执行完成后保存到 SQLite
+
+**执行流程**：
+
+```
+/run my_workflow.gf --task "..."
+    │
+    ├─ 1. 解析 .gf 文件 (DSLParser)
+    ├─ 2. 确定 model/provider (ConfigManager)
+    ├─ 3. 注册内置工具 (ToolRegistry)
+    ├─ 4. 创建 Agent 实例 (LLMAgent / ConditionAgent)
+    │     └─ 按 Component 权限过滤工具 (create_filtered_registry)
+    ├─ 5. 合并输入参数 (workflow_input)
+    ├─ 6. 创建 Scheduler (带 on_event 回调)
+    ├─ 7. 执行 (Scheduler.run)
+    │     └─ 事件 → REPLOutputHandler → Rich 输出
+    └─ 8. 保存执行记录 (SQLite)
+```
+
+**实现位置**：`tui/workflow_runner.py` — `WorkflowRunner`
+
+---
+
+## 13. 语法规则速查表
+
+### 13.1 关键字
 
 | 关键字 | 用途 | 示例 |
 |--------|------|------|
 | `component` | 定义组件 | `component reviewer { ... }` |
 | `workflow` | 定义工作流 | `workflow pipeline { ... }` |
 | `agent` | 实例化 Agent | `agent r use reviewer` |
-| `use` | 引入组件 | `use github-tools` |
+| `use` | workflow 内引入组件 | `agent r use reviewer` |
 | `port` | 定义端口 | `port input code: string` |
 | `input` | 输入端口方向 | `port input ...` |
 | `output` | 输出端口方向 | `port output ...` |
@@ -877,7 +1171,7 @@ workflow stream-pipeline {
 | `shared` | 共享上下文 | `context: "shared"` |
 | `independent` | 独立上下文 | `context: "independent"` |
 
-### 10.2 连接语法
+### 13.2 连接语法
 
 | 语法 | 含义 |
 |------|------|
@@ -887,7 +1181,7 @@ workflow stream-pipeline {
 | `A -> (B, C)` | 广播：A → B、C |
 | `(A.x, B) -> C.y` | 混合连接 |
 
-### 10.3 属性覆盖规则
+### 13.3 属性覆盖规则
 
 | 属性 | 实例化时可覆盖 | 说明 |
 |------|---------------|------|
@@ -899,7 +1193,7 @@ workflow stream-pipeline {
 | `mcp` | ❌ | MCP 配置不可覆盖 |
 | `permission` | ❌ | 权限不可放宽 |
 
-### 10.4 组件发现路径
+### 13.4 组件发现路径
 
 ```
 当前文件 → .grass/components/ → 项目根/.grass/components/ → ~/.Grass/components/
@@ -921,12 +1215,12 @@ workflow stream-pipeline {
 
 ## 附录 B：执行模式组合
 
-| mode | context | 触发时机 | 实例策略 | 典型场景 |
-|------|---------|---------|---------|---------|
-| `batch` | `shared` | 所有输入就绪 | 复用实例 | 函数调用 |
-| `batch` | `independent` | 所有输入就绪 | 新建实例 | 无状态批处理 |
-| `stream` | `shared` | 每次输入 | 复用实例（累积） | 流式累加器 |
-| `stream` | `independent` | 每次输入 | 新建实例 | 流式 map |
+| mode | context | 触发时机 | 实例策略 | 典型场景 | 状态 |
+|------|---------|---------|---------|---------|------|
+| `batch` | `shared` | 所有输入就绪 | 复用实例 | 函数调用 | 已实现 |
+| `batch` | `independent` | 所有输入就绪 | 新建实例 | 无状态批处理 | 已实现 |
+| `stream` | `shared` | 每次输入 | 复用实例（累积） | 流式累加器 | 规划中 |
+| `stream` | `independent` | 每次输入 | 新建实例 | 流式 map | 规划中 |
 
 ## 附录 C：权限优先级
 
