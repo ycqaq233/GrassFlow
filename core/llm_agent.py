@@ -1,9 +1,8 @@
 """
 GrassFlow LLM Agent
 
-使用 LLM API 的 Agent 实现
-
-重构：LLMAgent 从 Component 构造，不再依赖 AgentConfig。
+使用 LLM API 的 Agent 实现。
+LLMAgent 从 Component 构造。
 """
 
 import logging

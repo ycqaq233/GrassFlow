@@ -112,7 +112,7 @@ def test_context_dependency_data(context, mock_agent):
     context.set("dep1", {"output": "test1"})
     context.set("dep2", {"output": "test2"})
 
-    deps = context.get_dependency_data(mock_agent, ["dep1", "dep2"])
+    deps = context.get_dependency_data(["dep1", "dep2"])
     assert "_deps" in deps
     assert deps["_deps"]["dep1"] == {"output": "test1"}
     assert deps["_deps"]["dep2"] == {"output": "test2"}

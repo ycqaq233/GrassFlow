@@ -26,11 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-try:
-    from core.models import Component, ParseResult
-except ImportError:
-    from core.models import Component, ParseResult
-from tui.dsl_parser_v2 import DSLv2Parser
+from core.models import Component, ParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -235,11 +231,18 @@ class ComponentRegistry:
         # 注册表：组件名 -> ComponentEntry
         self._entries: Dict[str, ComponentEntry] = {}
 
-        # DSL 解析器（复用）
-        self._parser = DSLv2Parser()
+        # DSL 解析器（延迟导入，避免 core -> tui 循环依赖）
+        self._parser = None
 
         # 发现记录：记录每个组件来自哪些路径（用于检测同名冲突警告）
         self._discovered_paths: Dict[str, List[str]] = {}
+
+    def _get_parser(self):
+        """延迟加载 DSLv2Parser，避免 core -> tui 循环依赖"""
+        if self._parser is None:
+            from tui.dsl_parser_v2 import DSLv2Parser
+            self._parser = DSLv2Parser()
+        return self._parser
 
     # -------------------------------------------------------------------
     #  发现路径
@@ -377,7 +380,7 @@ class ComponentRegistry:
             return []
 
         try:
-            parse_result = self._parser.parse(content)
+            parse_result = self._get_parser().parse(content)
         except Exception as e:
             logger.error("Failed to parse file %s: %s", file_path, e)
             return []
@@ -655,7 +658,7 @@ class ComponentRegistry:
 
         try:
             content = file_path.read_text(encoding="utf-8")
-            parse_result = self._parser.parse(content)
+            parse_result = self._get_parser().parse(content)
         except Exception as e:
             raise ComponentLoadError(str(file_path), str(e))
 
@@ -690,7 +693,7 @@ class ComponentRegistry:
             source = ComponentSource(ComponentSource.FILE_INLINE)
 
         try:
-            parse_result = self._parser.parse(dsl_text)
+            parse_result = self._get_parser().parse(dsl_text)
         except Exception as e:
             logger.error("Failed to parse DSL text: %s", e)
             return []

@@ -233,7 +233,7 @@ class TestWorkflowGeneration:
         assert result.dsl == sample_dsl
         assert result.workflow_name == "ticket_processing"
         assert result.agent_count == 6
-        assert result.edge_count > 0
+        assert result.connection_count > 0
         mock_llm_client.chat.assert_called_once()
 
     @pytest.mark.asyncio
@@ -311,9 +311,9 @@ class TestDSLExtraction:
         count = generator._count_agents(sample_dsl)
         assert count == 6
 
-    def test_count_edges(self, generator, sample_dsl):
-        """测试统计边数量"""
-        count = generator._count_edges(sample_dsl)
+    def test_count_connections(self, generator, sample_dsl):
+        """测试统计连接数量"""
+        count = generator._count_connections(sample_dsl)
         assert count > 0
 
 
@@ -400,12 +400,12 @@ class TestDataModels:
             dsl="workflow test {}",
             workflow_name="test",
             agent_count=1,
-            edge_count=0,
+            connection_count=0,
         )
         assert result.dsl == "workflow test {}"
         assert result.workflow_name == "test"
         assert result.agent_count == 1
-        assert result.edge_count == 0
+        assert result.connection_count == 0
         assert result.suggestions == []
         assert result.warnings == []
 

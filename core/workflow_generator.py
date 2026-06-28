@@ -172,7 +172,7 @@ class GenerationResult:
     dsl: str
     workflow_name: str
     agent_count: int
-    edge_count: int
+    connection_count: int
     suggestions: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -281,7 +281,7 @@ class WorkflowGenerator:
             # 解析工作流信息
             workflow_name = workflow_name or self._extract_workflow_name(dsl)
             agent_count = self._count_agents(dsl)
-            edge_count = self._count_edges(dsl)
+            connection_count = self._count_connections(dsl)
 
             # 生成建议
             suggestions = self._generate_suggestions(dsl, description)
@@ -290,7 +290,7 @@ class WorkflowGenerator:
                 dsl=dsl,
                 workflow_name=workflow_name,
                 agent_count=agent_count,
-                edge_count=edge_count,
+                connection_count=connection_count,
                 suggestions=suggestions,
                 warnings=validation.warnings,
             )
@@ -410,20 +410,20 @@ class WorkflowGenerator:
         """
         return len(re.findall(r'agent\s+\w+\s*\{', dsl))
 
-    def _count_edges(self, dsl: str) -> int:
-        """统计边数量
+    def _count_connections(self, dsl: str) -> int:
+        """统计连接数量
 
         Args:
             dsl: DSL 代码
 
         Returns:
-            边数量
+            连接数量
         """
         # 移除 agent 声明块
         dsl_without_agents = re.sub(r'agent\s+\w+\s*\{[^}]*\}', '', dsl, flags=re.DOTALL)
         # 统计 -> 和 |
-        edges = re.findall(r'->|\|', dsl_without_agents)
-        return len(edges)
+        connections = re.findall(r'->|\|', dsl_without_agents)
+        return len(connections)
 
     def _generate_suggestions(self, dsl: str, description: str) -> List[str]:
         """生成改进建议

@@ -2,7 +2,7 @@
 GrassFlow 运行时执行记录类型
 
 从 core/models.py 分离出来的运行时状态类型。
-DSL 定义类型在 core/models.py（或 core/dsl_v2_ast.py）中。
+DSL 定义类型在 core/models.py 中。
 """
 
 from enum import Enum

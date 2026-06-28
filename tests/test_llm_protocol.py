@@ -744,21 +744,21 @@ class TestUtils:
 
     def test_apply_text_event(self):
         """文本事件应用"""
-        from core.llm_protocol import LLMResponse as ProtoLLMResponse
+        from core.llm_protocol import ProtocolLLMResponse as ProtoLLMResponse
         resp = ProtoLLMResponse()
         _apply_event_to_response(resp, LLMEvent(type=LLMEventType.TEXT_DELTA, data={"text": "Hello"}))
         assert resp.text == "Hello"
 
     def test_apply_reasoning_event(self):
         """推理事件应用"""
-        from core.llm_protocol import LLMResponse as ProtoLLMResponse
+        from core.llm_protocol import ProtocolLLMResponse as ProtoLLMResponse
         resp = ProtoLLMResponse()
         _apply_event_to_response(resp, LLMEvent(type=LLMEventType.REASONING_DELTA, data={"text": "thinking..."}))
         assert resp.reasoning == "thinking..."
 
     def test_apply_tool_call_event(self):
         """工具调用事件应用"""
-        from core.llm_protocol import LLMResponse as ProtoLLMResponse
+        from core.llm_protocol import ProtocolLLMResponse as ProtoLLMResponse
         resp = ProtoLLMResponse()
         tc = ToolCall(id="call_1", name="test", arguments="{}")
         _apply_event_to_response(resp, LLMEvent(type=LLMEventType.TOOL_CALL, data={"tool_call": tc}))
@@ -767,7 +767,7 @@ class TestUtils:
 
     def test_apply_finish_event(self):
         """完成事件应用"""
-        from core.llm_protocol import LLMResponse as ProtoLLMResponse
+        from core.llm_protocol import ProtocolLLMResponse as ProtoLLMResponse
         resp = ProtoLLMResponse()
         _apply_event_to_response(resp, LLMEvent(type=LLMEventType.FINISH, data={"model": "gpt-4", "finish_reason": "stop"}))
         assert resp.model == "gpt-4"

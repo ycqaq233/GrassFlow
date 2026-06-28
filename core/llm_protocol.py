@@ -103,7 +103,7 @@ class ToolCall:
 
 
 @dataclass
-class LLMResponse:
+class ProtocolLLMResponse:
     """LLM 完整响应（非流式或流式聚合后）"""
     text: str = ""
     reasoning: str = ""
@@ -793,12 +793,12 @@ class Route(Generic[BodyT, FrameT, EventT, StateT]):
             for e in stream_processor.on_halt(state):
                 yield e
 
-    async def complete(self, request: LLMRequest) -> LLMResponse:
+    async def complete(self, request: LLMRequest) -> ProtocolLLMResponse:
         """
         非流式请求——收集所有事件后返回完整响应。
         """
         request = replace(request, stream=False)
-        response = LLMResponse()
+        response = ProtocolLLMResponse()
 
         async for event in self.stream_events(request):
             response.raw_events.append(event)
@@ -870,7 +870,7 @@ class Model:
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         options: Optional[GenerationOptions] = None,
         **extra,
-    ) -> LLMResponse:
+    ) -> ProtocolLLMResponse:
         """非流式请求"""
         request = self.make_request(
             messages=messages,
@@ -1439,7 +1439,7 @@ class ProtocolLLMClient:
         reasoning_effort: Optional[str] = None,
         tools: Optional[List[ToolDefinition]] = None,
         **kwargs,
-    ) -> "LLMResponse":
+    ) -> "ProtocolLLMResponse":
         """
         发送聊天请求（兼容现有 LLMClient.chat 接口）。
 
@@ -1573,7 +1573,7 @@ class ProtocolLLMClient:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         **kwargs,
-    ) -> "LLMResponse":
+    ) -> "ProtocolLLMResponse":
         """发送补全请求（兼容现有 LLMClient.complete 接口）"""
         messages = [{"role": "user", "content": prompt}]
         return await self.chat(messages, temperature, max_tokens, **kwargs)
@@ -1675,7 +1675,7 @@ def _status_to_error_code(status: int) -> LLMErrorCode:
         return LLMErrorCode.TRANSPORT
 
 
-def _apply_event_to_response(response: LLMResponse, event: LLMEvent) -> None:
+def _apply_event_to_response(response: ProtocolLLMResponse, event: LLMEvent) -> None:
     """将事件应用到响应对象（用于 complete 聚合）"""
     if event.type == LLMEventType.TEXT_DELTA:
         response.text += event.data.get("text", "")

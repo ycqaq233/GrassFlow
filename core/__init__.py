@@ -75,7 +75,6 @@ from .agent_component import (
     ComponentError,
     ComponentFactory,
     ComponentNotFoundError,
-    ComponentRegistry,
     DataFlowRouter,
     InstantiatedWorkflow,
     OverrideError,
@@ -84,6 +83,9 @@ from .agent_component import (
     PortMapping,
     PortMappingError,
     WorkflowInstantiator,
+)
+from .component_registry import (
+    ComponentRegistry,
 )
 from .llm_protocol import (
     Protocol,

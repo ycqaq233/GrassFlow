@@ -39,12 +39,11 @@ class WorkflowContext:
         """
         return self._data.get(agent_id, {})
 
-    def get_dependency_data(self, agent: Agent, dependencies: List[str]) -> Dict[str, Any]:
+    def get_dependency_data(self, dependencies: List[str]) -> Dict[str, Any]:
         """
         获取 Agent 的依赖数据
 
         Args:
-            agent: Agent 实例
             dependencies: 依赖的 Agent ID 列表
 
         Returns:
