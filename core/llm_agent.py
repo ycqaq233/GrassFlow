@@ -158,6 +158,8 @@ class LLMAgent(Agent):
 
         当 input_data 中包含 `task` 字段时，优先使用 task 作为 prompt 的主输入内容。
         这使得工作流可以通过 --task 选项接收用户指令。
+
+        如果 prompt 中没有 {input} 或 {task} 占位符，会自动将 task 内容追加到末尾。
         """
         prompt = self._component.system_prompt or ""
 
@@ -180,9 +182,16 @@ class LLMAgent(Agent):
             variables[f"dep_{dep_name}"] = str(dep_data)
 
         try:
-            return prompt.format(**variables)
+            formatted = prompt.format(**variables)
         except KeyError:
-            return prompt
+            formatted = prompt
+
+        # 如果 prompt 中没有 {input} 或 {task} 占位符，但有 task 内容，追加到末尾
+        has_placeholder = "{input}" in prompt or "{task}" in prompt
+        if not has_placeholder and task_value:
+            formatted = f"{formatted}\n\n任务: {task_value}"
+
+        return formatted
 
     def _parse_response(self, response_content: str) -> Dict[str, Any]:
         """解析 LLM 响应"""
