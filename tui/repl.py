@@ -92,6 +92,7 @@ class GrassFlowREPL:
         self._permission_mode: str = "ask"  # default permission mode: ask/allow/deny
         self._pending_generated_dsl: str = ""  # /generate interactive mode pending DSL
         self._pending_generated_name: str = ""  # /generate interactive mode pending name
+        self._pending_workflow_intent: Optional[Dict[str, str]] = None  # intent detection pending confirmation
         self._session_approvals: set = set()  # session-level tool approvals (tool names)
 
         # Context compressor (lazy init)
@@ -609,6 +610,11 @@ class GrassFlowREPL:
                 self._pending_generated_dsl = dsl_text
                 self._pending_generated_name = wf_name
 
+        # Handle intent detection confirmation (y/n)
+        if self._pending_workflow_intent:
+            if self._handle_workflow_confirmation(text):
+                return
+
         # Consume _retry_last flag — replay the last user message
         if self._retry_last:
             self._retry_last = False
@@ -668,15 +674,253 @@ class GrassFlowREPL:
             self.app.loop.create_task(self._pre_process_compression(text))
             return  # _pre_process_compression will call _dispatch_agent after compression
 
+        # Non-async path: check intent before dispatching
+        if self._check_workflow_detection(text):
+            return
         self._dispatch_agent(text)
 
     async def _pre_process_compression(self, text: str) -> None:
-        """Compress context if needed, then dispatch to agent."""
+        """Compress context if needed, check intent, then dispatch to agent."""
         try:
             await self._check_and_compress()
         except Exception as e:
             logger.debug("Context compression failed: %s", e)
+        # Intent detection: skip agent if multi-step intent detected
+        if self._check_workflow_detection(text):
+            return
         self._dispatch_agent(text)
+
+    # ==================== 意图检测 ====================
+
+    def _check_workflow_detection(self, text: str) -> bool:
+        """Run intent detection; if multi-step intent found, prompt user and return True.
+
+        Returns True if intent was detected (agent dispatch should be skipped).
+        """
+        try:
+            from tui.config_integration import load_config_readonly
+            config = load_config_readonly()
+            if not getattr(config, 'ai', None) or not config.ai.workflow_detection:
+                return False
+        except Exception:
+            return False
+
+        try:
+            from tui.intent_detector import IntentDetector
+            detector = IntentDetector()
+            intent = detector.detect_intent(text)
+        except Exception:
+            return False
+
+        if intent is None:
+            return False
+
+        # Multi-step intent detected — prompt user
+        from tui.layout import cprint
+        lines = [
+            "",
+            "\033[1;36m  Detected multi-step task:\033[0m",
+            f"    Pattern: {intent.pattern}",
+            f"    Agents: {intent.estimated_agents}",
+            f"    Steps:",
+        ]
+        for i, st in enumerate(intent.sub_tasks, 1):
+            lines.append(f"      {i}. {st.description}")
+
+        lines.append("")
+        lines.append("  Execute as workflow? [y]es / [n]o (send as message):")
+        cprint("\n".join(lines))
+
+        # Store pending intent for confirmation
+        try:
+            from tui.intent_detector import IntentDetector as _ID
+            dsl_text = _ID().generate_dsl(intent)
+        except Exception:
+            dsl_text = ""
+        self._pending_workflow_intent = {
+            "dsl": dsl_text,
+            "task": text,
+        }
+        return True
+
+    def _handle_workflow_confirmation(self, text: str) -> bool:
+        """Handle y/n response for pending workflow intent.
+
+        Returns True if the message was consumed as a confirmation response.
+        """
+        response = text.strip().lower()
+        if response not in ("y", "yes", "n", "no"):
+            return False
+
+        intent_data = self._pending_workflow_intent
+        self._pending_workflow_intent = None
+
+        if response in ("y", "yes"):
+            self._execute_intent_workflow(intent_data["dsl"], intent_data["task"])
+        else:
+            self.add_output("  Sending as regular message...", role="system")
+            self._handle_agent_message(intent_data["task"])
+        return True
+
+    def _execute_intent_workflow(self, dsl_text: str, task_text: str) -> None:
+        """Execute a workflow from intent-detected DSL."""
+        if not dsl_text:
+            self.add_output("  No DSL generated. Sending as regular message...", role="system")
+            self._handle_agent_message(task_text)
+            return
+
+        # Check if a workflow is already running
+        if getattr(self, "_workflow_task", None) and not self._workflow_task.done():
+            self.add_output("  A workflow is already running. Use '/run stop' to cancel.", role="error")
+            return
+
+        import asyncio
+
+        async def _run_intent_workflow():
+            try:
+                from pathlib import Path
+                import tempfile
+                from core.models import Component, ModelConfig
+                from core.context import WorkflowContext
+                from core.scheduler import Scheduler
+                from core.condition import ConditionAgent
+                from core.llm_agent import LLMAgent
+                from core.tool_registry import register_builtin_tools, get_default_registry, create_filtered_registry
+                from core.db import execution_db
+                from tui.dsl_parser import parse_file_result
+                import copy
+
+                # Save DSL to temp file for parser
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".gf", delete=False, encoding="utf-8",
+                ) as tmp:
+                    tmp.write(dsl_text)
+                    tmp_path = tmp.name
+
+                try:
+                    parse_result = parse_file_result(tmp_path)
+                finally:
+                    Path(tmp_path).unlink(missing_ok=True)
+
+                if not parse_result.workflows:
+                    self.add_output("  Failed to parse generated DSL.", role="error")
+                    return
+
+                workflow = parse_result.workflows[0]
+                components_dict = {c.name: c for c in parse_result.components}
+
+                self.add_output(
+                    f"  Executing workflow: {workflow.name} "
+                    f"({len(workflow.agents)} agents, {len(workflow.connections)} connections)",
+                    role="system",
+                )
+
+                # Get default model/provider
+                default_model = "gpt-4"
+                default_provider = "deepseek"
+                try:
+                    from core.config import config_manager
+                    config = config_manager.load_config()
+                    default_model = config.llm.default_model
+                    default_provider = config.llm.default_provider
+                except Exception:
+                    pass
+
+                # Register builtin tools
+                tool_registry = get_default_registry()
+                register_builtin_tools(tool_registry)
+
+                # Create agent instances
+                agents = {}
+                for agent_instance in workflow.agents:
+                    if agent_instance.component and agent_instance.component in components_dict:
+                        component = copy.deepcopy(components_dict[agent_instance.component])
+                        for k, v in agent_instance.overrides.items():
+                            if k == "model" and isinstance(v, dict):
+                                for mk, mv in v.items():
+                                    setattr(component.model, mk, mv)
+                            elif k == "model":
+                                component.model.default = v
+                            elif hasattr(component, k):
+                                setattr(component, k, v)
+                        if component.model.default:
+                            from tui.slash_commands import _resolve_model_for_provider
+                            component.model.default = _resolve_model_for_provider(
+                                component.model.default, default_provider,
+                            )
+                    else:
+                        raw_model = agent_instance.overrides.get("model", default_model)
+                        from tui.slash_commands import _resolve_model_for_provider
+                        resolved_model = _resolve_model_for_provider(raw_model, default_provider)
+                        component = Component(
+                            name=agent_instance.name,
+                            system_prompt=agent_instance.inline_system_prompt or "",
+                            model=ModelConfig(default=resolved_model),
+                            ports=list(agent_instance.inline_ports),
+                        )
+
+                    name_lower = agent_instance.name.lower()
+                    if "route" in name_lower or "condition" in name_lower:
+                        rules = agent_instance.overrides.get("rules", [])
+                        agent = ConditionAgent(component, rules=rules)
+                    else:
+                        if component.permission and (component.permission.allow or component.permission.deny):
+                            agent_registry = create_filtered_registry(tool_registry, component.permission)
+                        else:
+                            agent_registry = tool_registry
+                        agent = LLMAgent(component=component, tool_registry=agent_registry)
+
+                    agents[agent_instance.name] = agent
+
+                # Execute
+                scheduler = Scheduler(workflow, agents, workflow_input={"task": task_text})
+                context = WorkflowContext()
+                result = await scheduler.run(context)
+
+                # Save execution record
+                try:
+                    execution_db.save_execution(result)
+                except Exception:
+                    pass
+
+                # Display results
+                if result.error:
+                    self.add_output(f"  Workflow failed: {result.error}", role="error")
+                else:
+                    lines = [f"  Workflow '{workflow.name}' completed!"]
+                    for agent_name, record in result.agent_records.items():
+                        status = record.status.value if hasattr(record.status, "value") else str(record.status)
+                        dur = f"{record.duration_ms}ms" if record.duration_ms else "N/A"
+                        lines.append(f"    [{status}] {agent_name} ({dur})")
+                        if record.output_data:
+                            summary = str(record.output_data)
+                            if len(summary) > 200:
+                                summary = summary[:200] + "..."
+                            lines.append(f"      -> {summary}")
+                    total_dur = f"{result.total_duration_ms}ms" if result.total_duration_ms else "N/A"
+                    lines.append(f"  Total: {total_dur}")
+
+                    # Inject workflow result into conversation context
+                    result_summary = "\n".join(lines)
+                    self._conversation_history.append({
+                        "role": "system",
+                        "content": f"[Workflow Result]\n{result_summary}",
+                    })
+                    self.add_output(result_summary, role="system")
+
+            except asyncio.CancelledError:
+                self.add_output("  Workflow cancelled.", role="system")
+            except Exception as e:
+                self.add_output(f"  Workflow error: {e}", role="error")
+                import traceback
+                self.add_output(traceback.format_exc(), role="error")
+            finally:
+                self._workflow_task = None
+
+        if self.app and self.app.loop:
+            self._workflow_task = self.app.loop.create_task(_run_intent_workflow())
+        else:
+            self.add_output("  Cannot start workflow: no event loop.", role="error")
 
     def _dispatch_agent(self, text: str) -> None:
         """Dispatch to agent processing (after compression check)."""

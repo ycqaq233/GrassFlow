@@ -69,6 +69,11 @@ class LLMConfig(BaseModel):
     retry_delay: float = 1.0
 
 
+class AIConfig(BaseModel):
+    """AI 行为配置"""
+    workflow_detection: bool = True  # 是否启用意图检测（自动识别多步骤任务）
+
+
 class WorkflowConfig(BaseModel):
     """工作流配置"""
     auto_save: bool = True
@@ -103,6 +108,7 @@ class GrassFlowConfig(BaseModel):
     version: str = "1.0.0"
     provider: Dict[str, ProviderConfig] = Field(default_factory=dict)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    ai: AIConfig = Field(default_factory=AIConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
