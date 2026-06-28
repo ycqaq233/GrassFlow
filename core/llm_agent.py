@@ -2,13 +2,20 @@
 GrassFlow LLM Agent
 
 使用 LLM API 的 Agent 实现
+
+重构：LLMAgent 从 Component 构造，而非分散参数。
 """
 
 import logging
 from typing import Dict, Any, Optional, List
-from core.agent import Agent
-from core.dsl_v2_ast import Component, Port, ModelConfig
+
+from core.agent import Agent, AgentConfig
 from core.llm import LLMClient, LLMManager, llm_manager
+
+try:
+    from core.models import Component
+except ImportError:
+    from core.dsl_v2_ast import Component
 
 logger = logging.getLogger(__name__)
 
@@ -84,15 +91,53 @@ def _resolve_model(model: str) -> str:
     return model
 
 
+def _build_agent_config(component: Component) -> AgentConfig:
+    """从 Component 构建 AgentConfig，用于 Agent 基类初始化。
+
+    Args:
+        component: DSL v2 组件定义
+
+    Returns:
+        AgentConfig 实例
+    """
+    # 获取端口定义
+    input_ports = {p.name: p.type for p in component.ports if p.direction == "input"}
+    output_ports = {p.name: p.type for p in component.ports if p.direction == "output"}
+
+    # 构建 JSON Schema
+    input_schema: Dict[str, Any] = {}
+    if input_ports:
+        input_schema = {
+            "type": "object",
+            "properties": {name: {"type": t} for name, t in input_ports.items()},
+        }
+
+    output_schema: Dict[str, Any] = {}
+    if output_ports:
+        output_schema = {
+            "type": "object",
+            "properties": {name: {"type": t} for name, t in output_ports.items()},
+        }
+
+    return AgentConfig(
+        name=component.name,
+        model=component.model.default or "default",
+        prompt=component.system_prompt or "",
+        input_schema=input_schema,
+        output_schema=output_schema,
+        on_fail=component.on_fail,
+        retry_count=component.retry_count,
+    )
+
+
 class LLMAgent(Agent):
     """
     LLM Agent
 
     使用 LLM API 执行任务的 Agent。
 
-    使用方式：
-    1. 在 DSL 中定义：agent classify { model: "gpt-4", prompt: "分类工单: {input}" }
-    2. 在执行流中使用：classify -> route
+    从 DSL v2 Component 构造：
+        agent = LLMAgent(component)
 
     LLMAgent 会：
     1. 将输入数据格式化为 prompt
@@ -102,55 +147,38 @@ class LLMAgent(Agent):
 
     def __init__(
         self,
-        name: str,
-        model: str = "default",
-        prompt: str = "",
-        input_schema: Optional[Dict[str, Any]] = None,
-        output_schema: Optional[Dict[str, Any]] = None,
-        system_prompt: Optional[str] = None,
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        component: Component,
         llm_client: Optional[LLMClient] = None,
         llm_manager: Optional[LLMManager] = None,
     ):
         """
-        初始化 LLMAgent
+        从 Component 初始化 LLMAgent
 
         Args:
-            name: Agent 名称
-            model: 模型名称
-            prompt: 提示词模板，支持 {input} 和 {field} 占位符
-            input_schema: 输入 Schema
-            output_schema: 输出 Schema
-            system_prompt: 系统提示词
-            temperature: 温度参数
-            max_tokens: 最大 token 数
+            component: DSL v2 组件定义，提供模型名、系统提示词、参数等配置
             llm_client: LLM 客户端实例（优先使用）
             llm_manager: LLM 管理器（用于获取客户端）
         """
+        # 从 Component 构建 AgentConfig 给基类
+        config = _build_agent_config(component)
+        super().__init__(config)
+
+        # 保留 Component 引用
+        self.component = component
+
         # 解析模型名称（处理 'default'、provider 前缀等）
-        resolved_model = _resolve_model(model)
-        if resolved_model != model:
-            logger.debug("Model resolved: %s -> %s", model, resolved_model)
+        raw_model = component.model.default or "default"
+        resolved_model = _resolve_model(raw_model)
+        if resolved_model != raw_model:
+            logger.debug("Model resolved: %s -> %s", raw_model, resolved_model)
 
-        # 构建 Component
-        ports: List[Port] = []
-        for field_name, field_schema in (input_schema or {}).items():
-            ports.append(Port(name=field_name, direction="input", type=field_schema.get("type", "object")))
-        for field_name, field_schema in (output_schema or {}).items():
-            ports.append(Port(name=field_name, direction="output", type=field_schema.get("type", "object")))
+        # 更新基类 config 中的模型名（已解析）
+        self.config.model = resolved_model
 
-        component = Component(
-            name=name,
-            system_prompt=prompt,
-            ports=ports,
-            model=ModelConfig(default=resolved_model),
-        )
-        super().__init__(component)
-
-        self.system_prompt = system_prompt
-        self.temperature = temperature
-        self.max_tokens = max_tokens
+        # 从 Component 提取配置
+        self.system_prompt = component.system_prompt
+        self.temperature = component.model.temperature if component.model.temperature is not None else 0.7
+        self.max_tokens = component.model.max_tokens
 
         # 获取 LLM 客户端
         if llm_client:
@@ -173,7 +201,7 @@ class LLMAgent(Agent):
         Returns:
             格式化后的提示词
         """
-        if not self.component.system_prompt:
+        if not self.config.prompt:
             # 如果没有 prompt，直接返回输入数据的字符串表示
             return str(input_data)
 
@@ -192,10 +220,10 @@ class LLMAgent(Agent):
 
         # 格式化 prompt
         try:
-            return self.component.system_prompt.format(**variables)
+            return self.config.prompt.format(**variables)
         except KeyError as e:
             # 如果缺少变量，返回原始 prompt
-            return self.component.system_prompt
+            return self.config.prompt
 
     def _parse_response(self, response_content: str) -> Dict[str, Any]:
         """
@@ -270,60 +298,50 @@ class LLMAgentFactory:
 
     def create(
         self,
-        name: str,
-        model: Optional[str] = None,
-        prompt: str = "",
+        component: Component,
         **kwargs,
     ) -> LLMAgent:
         """
-        创建 LLM Agent
+        从 Component 创建 LLM Agent
 
         Args:
-            name: Agent 名称
-            model: 模型名称
-            prompt: 提示词模板
-            **kwargs: 其他参数
+            component: DSL v2 组件定义
+            **kwargs: 额外参数（如 llm_client）
 
         Returns:
             LLMAgent 实例
         """
-        # Resolve model: use provided, or fall back to configured default
-        resolved = model if model is not None else _resolve_model("gpt-4")
         return LLMAgent(
-            name=name,
-            model=resolved,
-            prompt=prompt,
+            component=component,
             llm_manager=self._manager,
             **kwargs,
         )
 
-    def create_from_component(self, component: Component) -> LLMAgent:
+    def create_from_config(self, config: AgentConfig) -> LLMAgent:
         """
-        从组件定义创建 LLM Agent
+        从旧版 AgentConfig 创建 LLM Agent（向后兼容）
 
         Args:
-            component: 组件定义
+            config: Agent 配置
 
         Returns:
             LLMAgent 实例
         """
-        # 从 Component.ports 推导 schema
-        input_schema = {}
-        output_schema = {}
-        for port in component.ports:
-            schema_entry = {"type": port.type}
-            if port.direction == "input":
-                input_schema[port.name] = schema_entry
-            elif port.direction == "output":
-                output_schema[port.name] = schema_entry
-
-        model_default = component.model.default if component.model else "gpt-4"
+        # 将旧版 AgentConfig 转换为 Component
+        from core.dsl_v2_ast import ModelConfig
+        component = Component(
+            name=config.name,
+            system_prompt=config.prompt,
+            model=ModelConfig(
+                default=config.model,
+                temperature=0.7,
+                max_tokens=None,
+            ),
+            on_fail=config.on_fail,
+            retry_count=config.retry_count,
+        )
         return LLMAgent(
-            name=component.name,
-            model=model_default,
-            prompt=component.system_prompt or "",
-            input_schema=input_schema,
-            output_schema=output_schema,
+            component=component,
             llm_manager=self._manager,
         )
 
