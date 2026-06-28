@@ -1,92 +1,89 @@
 """
 GrassFlow 数据模型
 
-定义：
-- Workflow: 工作流定义
-- AgentConfig: Agent 配置
-- ExecutionRecord: 执行记录
+v2 类型系统（唯一类型源）：
+- Port / MCPConfig / PermissionConfig / ModelConfig
+- Component / AgentInstance / Connection / Workflow / ParseResult
 """
 
 from typing import Any, Dict, List, Optional
-from datetime import datetime
 from pydantic import BaseModel, Field
-from enum import Enum
 
 
-class AgentType(str, Enum):
-    """Agent 类型"""
-    LLM = "llm"
-    CONDITION = "condition"
-    MANUAL = "manual"
-    INPUT = "input"
-    OUTPUT = "output"
-
-
-class InteractionType(str, Enum):
-    """交互类型"""
-    SEQUENCE = "sequence"      # 顺序执行
-    PARALLEL = "parallel"      # 并行执行
-    IMMEDIATE = "immediate"    # 立即执行（先启动，遇依赖等待）
-    CONDITION = "condition"    # 条件分支
-    BROADCAST = "broadcast"    # 广播分发
-    AGGREGATE = "aggregate"    # 聚合等待
-
-
-class AgentConfig(BaseModel):
-    """Agent 配置"""
+class Port(BaseModel):
+    """端口定义"""
     name: str
-    type: AgentType = AgentType.LLM
-    model: str = "gpt-4"
-    prompt: str = ""
-    input_schema: Dict[str, Any] = Field(default_factory=dict)
-    output_schema: Dict[str, Any] = Field(default_factory=dict)
-    on_fail: str = "stop"
+    direction: str  # "input" | "output"
+    type: str       # "string" | "number" | "boolean" | "object" | "array"
+    description: Optional[str] = None
+    sync: bool = True  # True = sync, False = async
+
+
+class MCPConfig(BaseModel):
+    """MCP 服务器配置"""
+    server_name: str
+    tools: List[str] = Field(default_factory=list)
+
+
+class PermissionConfig(BaseModel):
+    """权限配置"""
+    allow: List[str] = Field(default_factory=list)
+    deny: List[str] = Field(default_factory=list)
+    ask: List[str] = Field(default_factory=list)
+
+
+class ModelConfig(BaseModel):
+    """模型配置"""
+    default: Optional[str] = None
+    fallback: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+
+
+class Component(BaseModel):
+    """组件定义"""
+    name: str
+    description: Optional[str] = None
+    version: Optional[str] = None
+    system_prompt: Optional[str] = None
+    ports: List[Port] = Field(default_factory=list)
+    mcp: List[MCPConfig] = Field(default_factory=list)
+    model: ModelConfig = Field(default_factory=ModelConfig)
+    permission: PermissionConfig = Field(default_factory=PermissionConfig)
+    mode: str = "batch"      # "batch" | "stream"
+    context: str = "shared"  # "shared" | "independent"
+    on_fail: str = "stop"    # "stop" | "skip" | "retry"
     retry_count: int = 3
-    timeout: Optional[int] = None
-    api_key: Optional[str] = None  # 可选，不填用全局
 
 
-class Edge(BaseModel):
-    """边（连接）"""
-    source: str  # 源 Agent 名称
-    target: str  # 目标 Agent 名称
-    interaction_type: InteractionType = InteractionType.SEQUENCE
-    condition: Optional[str] = None  # 条件分支的条件
+class AgentInstance(BaseModel):
+    """Agent 实例（在 workflow 中使用）"""
+    name: str
+    component: Optional[str] = None  # use 关键字引用的组件名
+    overrides: Dict[str, Any] = Field(default_factory=dict)
+    inline_ports: List[Port] = Field(default_factory=list)
+    inline_system_prompt: Optional[str] = None
+
+
+class Connection(BaseModel):
+    """连接定义"""
+    source_agent: str
+    source_port: Optional[str] = None  # None = 默认端口
+    target_agents: List[str] = Field(default_factory=list)
+    target_ports: List[str] = Field(default_factory=list)
 
 
 class Workflow(BaseModel):
     """工作流定义"""
     name: str
-    description: str = ""
-    agents: List[AgentConfig] = Field(default_factory=list)
-    edges: List[Edge] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
-
-    def get_agent(self, name: str) -> Optional[AgentConfig]:
-        """根据名称获取 Agent 配置"""
-        for agent in self.agents:
-            if agent.name == name:
-                return agent
-        return None
-
-    def add_agent(self, config: AgentConfig) -> None:
-        """添加 Agent"""
-        if self.get_agent(config.name):
-            raise ValueError(f"Agent '{config.name}' already exists")
-        self.agents.append(config)
-        self.updated_at = datetime.now()
-
-    def add_edge(self, edge: Edge) -> None:
-        """添加边"""
-        # 验证源和目标 Agent 存在
-        if not self.get_agent(edge.source):
-            raise ValueError(f"Source agent '{edge.source}' not found")
-        if not self.get_agent(edge.target):
-            raise ValueError(f"Target agent '{edge.target}' not found")
-        self.edges.append(edge)
-        self.updated_at = datetime.now()
+    ports: List[Port] = Field(default_factory=list)
+    agents: List[AgentInstance] = Field(default_factory=list)
+    connections: List[Connection] = Field(default_factory=list)
+    output_mappings: Dict[str, str] = Field(default_factory=dict)
 
 
-# 运行时执行类型已提取到 core.execution，此处保留向后兼容导入
-from core.execution import ExecutionStatus, AgentExecutionRecord, ExecutionRecord  # noqa: F401
+class ParseResult(BaseModel):
+    """解析结果"""
+    components: List[Component] = Field(default_factory=list)
+    workflows: List[Workflow] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)

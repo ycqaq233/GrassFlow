@@ -16,7 +16,7 @@ GrassFlow DSL v2 解析器
 
 import re
 from typing import List, Optional, Tuple
-from core.dsl_v2_ast import (
+from core.models import (
     Port, MCPConfig, PermissionConfig, ModelConfig,
     Component, AgentInstance, Connection, Workflow, ParseResult
 )

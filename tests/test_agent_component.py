@@ -23,7 +23,7 @@ from core.agent_component import (
     PortMappingError,
     WorkflowInstantiator,
 )
-from core.dsl_v2_ast import (
+from core.models import (
     AgentInstance,
     Component,
     Connection,

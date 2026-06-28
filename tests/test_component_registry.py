@@ -9,7 +9,7 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from core.dsl_v2_ast import (
+from core.models import (
     Component,
     MCPConfig,
     ModelConfig,

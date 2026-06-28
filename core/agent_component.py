@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from .agent import Agent, AgentConfig
-from .dsl_v2_ast import (
+from .models import (
     AgentInstance,
     Component,
     Connection,
