@@ -1284,7 +1284,7 @@ Examples of multi-step tasks:
 
 1. Write a DSL v2 workflow definition (see syntax below)
 2. Save it to a .gf file using the `write` tool
-3. Execute it by telling the user to run `/run <file.gf>`, or describe the workflow in your response
+3. Execute it using the `run_workflow` tool with the .gf file path
 
 ### DSL v2 Syntax (condensed)
 
@@ -1314,7 +1314,9 @@ Key patterns:
 ### Important
 
 - Do NOT try to do everything yourself when the task has multiple independent sub-tasks
-- Generate the DSL, save it, and let the user execute it with `/run`
+- Generate the DSL, save it, then execute it directly using the `run_workflow` tool
+- When the user asks you to run/execute a workflow, use the `run_workflow` tool directly
+- Do NOT tell the user to run `/run` manually — you have the `run_workflow` tool available
 - Each agent in the workflow gets its own tool permissions
 - The workflow engine handles parallel execution, dependency resolution, and data flow
 """

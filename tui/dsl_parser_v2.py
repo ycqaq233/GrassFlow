@@ -122,17 +122,10 @@ class DSLv2Parser:
         if ver_match:
             comp.version = ver_match.group(1)
 
-        # 解析 system_prompt（支持多行和模板变量）
-        # 先尝试匹配三引号多行字符串
-        prompt_match = re.search(r'system_prompt:\s*"""(.*?)"""', body, re.DOTALL)
-        if prompt_match:
-            comp.system_prompt = prompt_match.group(1).strip()
-        else:
-            # 匹配单行字符串（支持花括号模板变量）
-            # 使用非贪婪匹配，支持花括号
-            prompt_match = re.search(r'system_prompt:\s*"([^"]*)"', body)
-            if prompt_match:
-                comp.system_prompt = prompt_match.group(1)
+        # 解析 system_prompt / prompt（支持多行格式）
+        prompt_text = self._extract_prompt_field(body)
+        if prompt_text:
+            comp.system_prompt = prompt_text
 
         # 解析 port
         port_pattern = r'port\s+(input|output)\s+(\w[\w-]*):\s*(\w+)\s*(?:"([^"]*)")?'
@@ -343,10 +336,10 @@ class DSLv2Parser:
         if model_match:
             agent.overrides["model"] = model_match.group(1)
 
-        # 解析 system_prompt
-        prompt_match = re.search(r'system_prompt:\s*"([^"]*)"', body)
-        if prompt_match:
-            agent.inline_system_prompt = prompt_match.group(1)
+        # 解析 prompt / system_prompt（支持多种格式）
+        prompt_text = self._extract_prompt_field(body)
+        if prompt_text:
+            agent.inline_system_prompt = prompt_text
 
         # 解析 port
         port_pattern = r'port\s+(input|output)\s+(\w[\w-]*):\s*(\w+)\s*(?:"([^"]*)")?'
@@ -360,6 +353,54 @@ class DSLv2Parser:
             agent.inline_ports.append(port)
 
         return agent
+
+    def _extract_prompt_field(self, body: str) -> Optional[str]:
+        """从 agent/component body 中提取 prompt 或 system_prompt 字段。
+
+        支持以下格式：
+        1. system_prompt: "..."        — 单行双引号
+        2. system_prompt: |-           — YAML 多行块（literal block）
+           多行内容
+        3. system_prompt: """..."""    — 三引号多行
+        4. prompt: "..." / prompt: |-  — 同上，prompt 作为别名
+        """
+        # 优先级: system_prompt > prompt
+        for field_name in ("system_prompt", "prompt"):
+            # 1. 三引号多行
+            m = re.search(rf'{field_name}:\s*"""(.*?)"""', body, re.DOTALL)
+            if m:
+                return m.group(1).strip()
+
+            # 2. YAML 多行块 (|- 或 |)
+            m = re.search(rf'{field_name}:\s*\|(-?)\s*\n', body)
+            if m:
+                # 找到块开始位置，提取后续缩进行
+                block_start = m.end()
+                lines = body[block_start:].split('\n')
+                # 确定缩进级别（第一行非空行的缩进）
+                indent = None
+                collected = []
+                for line in lines:
+                    stripped = line.rstrip()
+                    if not stripped:
+                        collected.append("")
+                        continue
+                    current_indent = len(line) - len(line.lstrip())
+                    if indent is None:
+                        indent = current_indent
+                    if current_indent < indent:
+                        break  # 缩进减少，块结束
+                    collected.append(line[indent:])
+                result = "\n".join(collected).rstrip()
+                if result:
+                    return result
+
+            # 3. 单行双引号
+            m = re.search(rf'{field_name}:\s*"([^"]*)"', body)
+            if m:
+                return m.group(1)
+
+        return None
 
     def _parse_connections(self, body: str, agents: List[AgentInstance]) -> List[Connection]:
         """

@@ -660,7 +660,9 @@ def _cmd_run(repl, args: List[str]) -> None:
 
             # 创建 WorkflowRunner（延迟创建，每次执行都是新实例）
             tool_registry = get_default_registry()
-            output_handler = REPLOutputHandler()
+            output_handler = REPLOutputHandler(
+                output_fn=lambda text: repl.add_output(text, role="system"),
+            )
             runner = WorkflowRunner(
                 tool_registry=tool_registry,
                 output_handler=output_handler,

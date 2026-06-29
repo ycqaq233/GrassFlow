@@ -67,17 +67,21 @@ class ExecutionResult:
 
 
 class REPLOutputHandler:
-    """接收 SchedulerEvent，格式化为 Rich 输出到 REPL。
+    """接收 SchedulerEvent，格式化为输出到 REPL。
 
-    每个事件类型映射到一条或多条 console.print 调用。
-    支持进度追踪（agent 计数 / 总数）。
+    支持两种输出模式：
+    1. output_fn 回调模式（推荐）— 通过回调函数输出纯文本，无 ANSI 码
+    2. Rich Console 模式（降级）— 直接打印到 stdout，含 ANSI 码
     """
 
-    def __init__(self, console=None):
+    def __init__(self, console=None, output_fn=None):
         """
         Args:
             console: Rich Console 实例。为 None 时自动创建。
+            output_fn: 输出回调函数 (text: str) -> None。
+                       提供时优先使用此模式，输出纯文本。
         """
+        self._output_fn = output_fn
         try:
             from rich.console import Console as _Console
             self._console = console or _Console()
@@ -91,6 +95,18 @@ class REPLOutputHandler:
         self._completed_agents: int = 0
         self._failed_agents: int = 0
         self._running_agents: Dict[str, datetime] = {}
+
+    def _print(self, text: str, rich_text: str = "") -> None:
+        """输出文本。优先使用 output_fn（纯文本），降级到 Rich Console。"""
+        if self._output_fn:
+            # 使用回调模式：输出纯文本（去除 Rich 标记）
+            import re
+            clean = re.sub(r'\[/?[^\]]+\]', '', rich_text or text)
+            self._output_fn(clean)
+        elif self._has_rich and self._console:
+            self._console.print(rich_text or text)
+        else:
+            print(text)
 
     def set_total_agents(self, count: int) -> None:
         """设置总 Agent 数量，用于进度计算"""
@@ -128,38 +144,28 @@ class REPLOutputHandler:
 
     def _on_workflow_start(self, event: SchedulerEvent) -> None:
         name = event.data.get("workflow_name", "unknown") if event.data else "unknown"
-        if self._has_rich:
-            self._console.print()
-            self._console.print(f"[bold green]Executing workflow:[/bold green] {name}")
-            if self._total_agents > 0:
-                self._console.print(f"[dim]Agents: {self._total_agents}[/dim]")
-            self._console.print()
-        else:
-            print(f"\nExecuting workflow: {name}")
+        self._print(f"\nExecuting workflow: {name}",
+                    f"\n[bold green]Executing workflow:[/bold green] {name}")
+        if self._total_agents > 0:
+            self._print(f"Agents: {self._total_agents}",
+                        f"[dim]Agents: {self._total_agents}[/dim]")
+        self._print("")
 
     def _on_workflow_complete(self, event: SchedulerEvent) -> None:
-        if self._has_rich:
-            self._console.print()
-            self._console.print("[bold green]Workflow completed successfully![/bold green]")
-            self._render_progress_bar()
-        else:
-            print("\nWorkflow completed successfully!")
+        self._print("\nWorkflow completed successfully!",
+                    "\n[bold green]Workflow completed successfully![/bold green]")
+        self._render_progress_bar()
 
     def _on_workflow_failed(self, event: SchedulerEvent) -> None:
         error = event.data.get("error", "unknown") if event.data else "unknown"
-        if self._has_rich:
-            self._console.print()
-            self._console.print(f"[bold red]Workflow failed:[/bold red] {error}")
-        else:
-            print(f"\nWorkflow failed: {error}")
+        self._print(f"\nWorkflow failed: {error}",
+                    f"\n[bold red]Workflow failed:[/bold red] {error}")
 
     def _on_group_start(self, event: SchedulerEvent) -> None:
         agents = event.data.get("agents", []) if event.data else []
         if len(agents) > 1:
-            if self._has_rich:
-                self._console.print(f"[dim]--- Parallel group: {', '.join(agents)} ---[/dim]")
-            else:
-                print(f"--- Parallel group: {', '.join(agents)} ---")
+            self._print(f"--- Parallel group: {', '.join(agents)} ---",
+                        f"[dim]--- Parallel group: {', '.join(agents)} ---[/dim]")
 
     def _on_group_complete(self, event: SchedulerEvent) -> None:
         pass  # 组完成在 individual agent 完成时已处理
@@ -167,10 +173,8 @@ class REPLOutputHandler:
     def _on_agent_start(self, event: SchedulerEvent) -> None:
         name = event.agent_name or "unknown"
         self._running_agents[name] = event.timestamp
-        if self._has_rich:
-            self._console.print(f"  [blue]●[/blue] [bold]{name}[/bold] [dim]started[/dim]")
-        else:
-            print(f"  * {name} started")
+        self._print(f"  * {name} started",
+                    f"  [blue]●[/blue] [bold]{name}[/bold] [dim]started[/dim]")
 
     def _on_agent_complete(self, event: SchedulerEvent) -> None:
         name = event.agent_name or "unknown"
@@ -180,11 +184,9 @@ class REPLOutputHandler:
         duration_ms = event.data.get("duration_ms") if event.data else None
         duration_str = f" ({duration_ms}ms)" if duration_ms else ""
 
-        if self._has_rich:
-            self._console.print(f"  [green]✓[/green] [bold]{name}[/bold] [dim]completed{duration_str}[/dim]")
-            self._render_progress_bar()
-        else:
-            print(f"  + {name} completed{duration_str}")
+        self._print(f"  + {name} completed{duration_str}",
+                    f"  [green]✓[/green] [bold]{name}[/bold] [dim]completed{duration_str}[/dim]")
+        self._render_progress_bar()
 
     def _on_agent_fail(self, event: SchedulerEvent) -> None:
         name = event.agent_name or "unknown"
@@ -192,31 +194,25 @@ class REPLOutputHandler:
         self._failed_agents += 1
 
         error = event.data.get("error", "") if event.data else ""
-        if self._has_rich:
-            self._console.print(f"  [red]✗[/red] [bold]{name}[/bold] [red]failed: {error}[/red]")
-        else:
-            print(f"  ! {name} failed: {error}")
+        self._print(f"  ! {name} failed: {error}",
+                    f"  [red]✗[/red] [bold]{name}[/bold] [red]failed: {error}[/red]")
 
     def _on_agent_retry(self, event: SchedulerEvent) -> None:
         name = event.agent_name or "unknown"
         attempt = event.data.get("attempt", "?") if event.data else "?"
         max_retries = event.data.get("max_retries", "?") if event.data else "?"
-        if self._has_rich:
-            self._console.print(f"  [yellow]↻[/yellow] [bold]{name}[/bold] [yellow]retry {attempt}/{max_retries}[/yellow]")
-        else:
-            print(f"  ~ {name} retry {attempt}/{max_retries}")
+        self._print(f"  ~ {name} retry {attempt}/{max_retries}",
+                    f"  [yellow]↻[/yellow] [bold]{name}[/bold] [yellow]retry {attempt}/{max_retries}[/yellow]")
 
     def _on_agent_skipped(self, event: SchedulerEvent) -> None:
         name = event.agent_name or "unknown"
         self._completed_agents += 1
-        if self._has_rich:
-            self._console.print(f"  [dim]⊙ {name} skipped[/dim]")
-        else:
-            print(f"  - {name} skipped")
+        self._print(f"  - {name} skipped",
+                    f"  [dim]⊙ {name} skipped[/dim]")
 
     def _render_progress_bar(self) -> None:
         """渲染进度条"""
-        if not self._has_rich or self._total_agents <= 0:
+        if self._total_agents <= 0:
             return
 
         done = self._completed_agents + self._failed_agents
@@ -225,14 +221,17 @@ class REPLOutputHandler:
         filled = int(ratio * width)
         empty = width - filled
 
+        bar_plain = '#' * filled + '.' * empty
         bar_color = "green" if ratio >= 1.0 else "cyan" if ratio > 0.5 else "blue"
-        bar = f"[{bar_color}]{'#' * filled}[/{bar_color}][dim]{'.' * empty}[/dim]"
+        bar_rich = f"[{bar_color}]{'#' * filled}[/{bar_color}][dim]{'.' * empty}[/dim]"
 
-        parts = [f"  Progress: [{bar}] {ratio * 100:.0f}% ({done}/{self._total_agents})"]
-        if self._failed_agents > 0:
-            parts.append(f" [red]{self._failed_agents} failed[/red]")
+        failed_plain = f" {self._failed_agents} failed" if self._failed_agents > 0 else ""
+        failed_rich = f" [red]{self._failed_agents} failed[/red]" if self._failed_agents > 0 else ""
 
-        self._console.print("".join(parts))
+        self._print(
+            f"  Progress: [{bar_plain}] {ratio * 100:.0f}% ({done}/{self._total_agents}){failed_plain}",
+            f"  Progress: [{bar_rich}] {ratio * 100:.0f}% ({done}/{self._total_agents}){failed_rich}",
+        )
 
 
 # ---------------------------------------------------------------------------
