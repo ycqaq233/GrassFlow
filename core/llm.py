@@ -95,6 +95,9 @@ class LLMClient:
             if self.base_url:
                 params["api_base"] = self.base_url
 
+            # 传递超时参数，防止 HTTP 请求无限挂起
+            params["timeout"] = self.timeout
+
             params.update(kwargs)
 
             # 调用 API
