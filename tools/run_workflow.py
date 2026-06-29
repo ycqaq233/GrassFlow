@@ -85,9 +85,11 @@ class RunWorkflowTool(Tool):
 
             # 创建执行器
             tool_registry = get_default_registry()
-            # 使用 no-op output_fn：工具执行结果由 run_workflow 返回值传递，
-            # 不需要 REPLOutputHandler 直接打印（避免 ANSI 码污染 REPL 输出）
-            output_handler = REPLOutputHandler(output_fn=lambda _text: None)
+            # 收集执行过程中的日志（开始/agent启动/完成/失败等）
+            progress_log: list[str] = []
+            output_handler = REPLOutputHandler(
+                output_fn=lambda text: progress_log.append(text),
+            )
             runner = WorkflowRunner(
                 tool_registry=tool_registry,
                 output_handler=output_handler,
@@ -102,8 +104,12 @@ class RunWorkflowTool(Tool):
                 timeout=timeout,
             )
 
-            # 格式化输出
+            # 格式化输出：进度日志 + 执行结果
             lines = []
+            lines.append("=== Workflow Execution Log ===")
+            lines.extend(progress_log)
+            lines.append("")
+            lines.append("=== Result ===")
             if result.success:
                 lines.append(f"Workflow '{result.workflow_name}' completed successfully!")
                 if result.execution_record:
