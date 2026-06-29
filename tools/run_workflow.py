@@ -54,6 +54,12 @@ class RunWorkflowTool(Tool):
             "required": ["path"],
         }
 
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        """剥离 ANSI 转义码（含私有模式序列）"""
+        import re
+        return re.sub(r"\x1b\[\??[0-9;]*[A-Za-z]|\r", "", text)
+
     async def execute(self, params: Dict[str, Any], ctx: ToolContext) -> ToolResult:
         """执行工作流文件"""
         import os
@@ -79,7 +85,9 @@ class RunWorkflowTool(Tool):
 
             # 创建执行器
             tool_registry = get_default_registry()
-            output_handler = REPLOutputHandler()
+            # 使用 no-op output_fn：工具执行结果由 run_workflow 返回值传递，
+            # 不需要 REPLOutputHandler 直接打印（避免 ANSI 码污染 REPL 输出）
+            output_handler = REPLOutputHandler(output_fn=lambda _text: None)
             runner = WorkflowRunner(
                 tool_registry=tool_registry,
                 output_handler=output_handler,
@@ -104,7 +112,7 @@ class RunWorkflowTool(Tool):
                         dur = f"{record.duration_ms}ms" if record.duration_ms else "N/A"
                         lines.append(f"  [{status}] {agent_name} ({dur})")
                         if record.output_data:
-                            summary = str(record.output_data)
+                            summary = self._strip_ansi(str(record.output_data))
                             if len(summary) > 500:
                                 summary = summary[:500] + "..."
                             lines.append(f"    -> {summary}")

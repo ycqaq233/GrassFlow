@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re as _re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -38,6 +39,21 @@ from typing import (
 from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
+
+
+# ANSI 转义码剥离（用于清理 MCP 工具返回的终端彩色输出）
+_ANSI_ESCAPE_RE = _re.compile(
+    r"\x1b\[\??[0-9;]*[A-Za-z]"    # CSI 序列（含私有模式 ?2004h 等）
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC 序列
+    r"|\x1b[()][A-Za-z]"           # 字符集选择序列
+    r"|\x1b[>=]"                   # 应用/普通键盘模式
+    r"|\r"                          # 回车
+)
+
+
+def _strip_ansi(text: str) -> str:
+    """剥离 ANSI 转义码和回车符，保留纯文本内容。"""
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -553,15 +569,16 @@ class MCPToolAdapter:
             if isinstance(raw_result, dict) and "content" in raw_result:
                 parts = raw_result["content"]
                 text_parts = [
-                    p.get("text", "") for p in parts if p.get("type") == "text"
+                    _strip_ansi(p.get("text", ""))
+                    for p in parts if p.get("type") == "text"
                 ]
                 output = "\n".join(text_parts)
                 is_error = raw_result.get("isError", False)
                 return ToolResult(output=output, is_error=is_error)
             elif isinstance(raw_result, str):
-                return ToolResult(output=raw_result)
+                return ToolResult(output=_strip_ansi(raw_result))
             else:
-                return ToolResult(output=str(raw_result))
+                return ToolResult(output=_strip_ansi(str(raw_result)))
         except Exception as e:
             return ToolResult.error(f"MCP tool '{self._full_id}' call failed: {e}")
 
