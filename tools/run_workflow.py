@@ -85,11 +85,14 @@ class RunWorkflowTool(Tool):
 
             # 创建执行器
             tool_registry = get_default_registry()
-            # 收集执行过程中的日志（开始/agent启动/完成/失败等）
+            # 收集执行过程中的日志，同时实时输出到 REPL
             progress_log: list[str] = []
-            output_handler = REPLOutputHandler(
-                output_fn=lambda text: progress_log.append(text),
-            )
+
+            def _on_progress(text: str) -> None:
+                progress_log.append(text)
+                print(text, flush=True)  # 实时输出到终端
+
+            output_handler = REPLOutputHandler(output_fn=_on_progress)
             runner = WorkflowRunner(
                 tool_registry=tool_registry,
                 output_handler=output_handler,
