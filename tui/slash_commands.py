@@ -1043,37 +1043,274 @@ def _cmd_agent(repl, args: List[str]) -> None:
 
 
 def _cmd_mcp(repl, args: List[str]) -> None:
-    """MCP 服务器管理"""
-    # Show runtime state if available
+    """MCP 服务器管理
+
+    用法:
+        /mcp                  — 显示所有服务器状态（表格形式）
+        /mcp test <server>    — 测试单个服务器连接并列出工具
+        /mcp errors           — 显示所有启动错误
+    """
     mcp_mgr = getattr(getattr(repl, '_agent', None), '_mcp_manager', None)
+
+    # --- 子命令分发 ---
+    if args and args[0].lower() == "test":
+        _mcp_test_server(repl, mcp_mgr, args[1:])
+        return
+
+    if args and args[0].lower() == "errors":
+        _mcp_show_errors(repl, mcp_mgr)
+        return
+
+    # --- 主命令：表格形式显示所有服务器状态 ---
     if mcp_mgr:
         try:
-            summary = mcp_mgr.get_tools_summary()
-            repl.add_output(summary, role="system")
+            _mcp_display_table(repl, mcp_mgr)
             return
         except Exception:
             pass
-    # Fallback to config display with "not started" status
+
+    # Fallback: MCP 管理器不可用时，从配置文件显示
+    _mcp_display_config_fallback(repl)
+
+
+def _mcp_display_table(repl, mcp_mgr) -> None:
+    """以表格形式显示所有 MCP 服务器状态"""
+    all_status = mcp_mgr.get_all_server_status()
+
+    if not all_status:
+        repl.add_output("  No MCP servers configured.", role="system")
+        return
+
+    # 计算列宽
+    name_w = max(len("Server"), max(len(n) for n in all_status))
+    trans_w = max(len("Transport"), max(len(s["transport"]) for s in all_status.values()))
+
+    # 表头
+    header = (
+        f"  {'Server':<{name_w}}  {'Transport':<{trans_w}}  "
+        f"{'Status':<16}  {'Tools':>5}  {'Error'}"
+    )
+    sep = "  " + "-" * (len(header) - 2)
+
+    lines = ["", "  MCP Servers", sep, header, sep]
+
+    # 每行一个服务器
+    total_servers = 0
+    connected_count = 0
+    total_tools = 0
+
+    for name, status in all_status.items():
+        total_servers += 1
+        transport = status["transport"]
+        tools_count = status["tools_count"]
+        error = status.get("error") or ""
+        enabled = status.get("enabled", True)
+        connected = status["connected"]
+
+        total_tools += tools_count
+        if connected:
+            connected_count += 1
+
+        # 状态图标和文本
+        if not enabled:
+            icon = "⏸️"  # pause button
+            status_text = "disabled"
+        elif connected:
+            icon = "✅"  # check mark
+            status_text = "connected"
+        elif error:
+            icon = "❌"  # cross mark
+            status_text = "failed"
+        else:
+            icon = "⏳"  # hourglass
+            status_text = "not started"
+
+        # 截断过长的错误信息
+        error_display = error[:40] + "..." if len(error) > 40 else error
+
+        line = (
+            f"  {icon} {name:<{name_w}}  {transport:<{trans_w}}  "
+            f"{status_text:<16}  {tools_count:>5}  {error_display}"
+        )
+        lines.append(line)
+
+    lines.append(sep)
+
+    # 底部汇总
+    lines.append(
+        f"  Total: {total_servers} servers | "
+        f"Connected: {connected_count} | "
+        f"Tools: {total_tools}"
+    )
+
+    # 显示启动错误数量
+    startup_errors = mcp_mgr.get_startup_errors()
+    if startup_errors:
+        lines.append(
+            f"  Errors: {len(startup_errors)} server(s) with startup errors "
+            f"(use /mcp errors for details)"
+        )
+
+    repl.add_output("\n".join(lines), role="system")
+
+
+def _mcp_display_config_fallback(repl) -> None:
+    """MCP 管理器不可用时，从配置文件显示服务器列表"""
     try:
         from tui.config_integration import get_mcp_servers
         mcp_servers = get_mcp_servers()
-        if mcp_servers:
-            lines = ["  MCP servers:"]
-            for name, srv in mcp_servers.items():
-                transport = "stdio" if "command" in srv else ("http" if "url" in srv else "auto")
-                enabled = srv.get("enabled", True)
-                if not enabled:
-                    lines.append(f"    ⏸️ {name} ({transport}) - disabled")
-                else:
-                    lines.append(f"    ⏳ {name} ({transport}) - not started")
-            lines.append("")
-            enabled_count = sum(1 for s in mcp_servers.values() if s.get("enabled", True))
-            lines.append(f"  {len(mcp_servers)} servers ({enabled_count} enabled, agent not initialized)")
-            repl.add_output("\n".join(lines), role="system")
-        else:
+        if not mcp_servers:
             repl.add_output("  No MCP servers configured.", role="system")
+            return
+
+        name_w = max(len("Server"), max(len(n) for n in mcp_servers))
+        trans_w = max(len("Transport"), max(
+            len("stdio" if "command" in s else ("http" if "url" in s else "auto"))
+            for s in mcp_servers.values()
+        ))
+
+        header = (
+            f"  {'Server':<{name_w}}  {'Transport':<{trans_w}}  "
+            f"{'Status':<16}  {'Tools':>5}  {'Error'}"
+        )
+        sep = "  " + "-" * (len(header) - 2)
+
+        lines = ["", "  MCP Servers", sep, header, sep]
+
+        enabled_count = 0
+        for name, srv in mcp_servers.items():
+            transport = "stdio" if "command" in srv else ("http" if "url" in srv else "auto")
+            enabled = srv.get("enabled", True)
+            if enabled:
+                enabled_count += 1
+
+            if not enabled:
+                icon = "⏸️"
+                status_text = "disabled"
+            else:
+                icon = "⏳"
+                status_text = "not started"
+
+            line = (
+                f"  {icon} {name:<{name_w}}  {transport:<{trans_w}}  "
+                f"{status_text:<16}  {'0':>5}  "
+            )
+            lines.append(line)
+
+        lines.append(sep)
+        lines.append(
+            f"  Total: {len(mcp_servers)} servers | "
+            f"Enabled: {enabled_count} | "
+            f"Tools: 0 (agent not initialized)"
+        )
+
+        repl.add_output("\n".join(lines), role="system")
     except Exception:
         repl.add_output("  MCP status not available (config module error).", role="system")
+
+
+def _mcp_test_server(repl, mcp_mgr, args: List[str]) -> None:
+    """测试单个 MCP 服务器连接"""
+    if not args:
+        repl.add_output(
+            "Usage: /mcp test <server_name>\n"
+            "Use /mcp to see available server names.",
+            role="error",
+        )
+        return
+
+    server_name = args[0]
+
+    if not mcp_mgr:
+        # 尝试从配置文件查找
+        try:
+            from tui.config_integration import get_mcp_servers
+            mcp_servers = get_mcp_servers()
+            if server_name not in mcp_servers:
+                available = ", ".join(mcp_servers.keys()) if mcp_servers else "(none)"
+                repl.add_output(
+                    f"Server '{server_name}' not found.\nAvailable: {available}",
+                    role="error",
+                )
+                return
+            repl.add_output(
+                f"  Server '{server_name}' found in config but agent is not initialized.\n"
+                f"  Cannot test connection without a running agent.",
+                role="system",
+            )
+        except Exception:
+            repl.add_output("  MCP config not available.", role="error")
+        return
+
+    # 获取服务器状态
+    status = mcp_mgr.get_server_status(server_name)
+    if status is None:
+        available = ", ".join(mcp_mgr.server_names) if mcp_mgr.server_names else "(none)"
+        repl.add_output(
+            f"Server '{server_name}' not found.\nAvailable: {available}",
+            role="error",
+        )
+        return
+
+    # 显示详细状态
+    lines = [""]
+    lines.append(f"  MCP Server: {server_name}")
+    lines.append(f"  Transport:  {status['transport']}")
+    lines.append(f"  Connected:  {'Yes' if status['connected'] else 'No'}")
+    lines.append(f"  Tools:      {status['tools_count']}")
+
+    if status["connected"]:
+        lines.append("")
+        lines.append("  Discovered tools:")
+        if status["tools"]:
+            for tool_name in status["tools"]:
+                tool = mcp_mgr.get_tool(tool_name)
+                if tool:
+                    desc = tool.description[:60] + "..." if len(tool.description) > 60 else tool.description
+                    lines.append(f"    - {tool_name}")
+                    if desc:
+                        lines.append(f"      {desc}")
+                else:
+                    lines.append(f"    - {tool_name}")
+        else:
+            lines.append("    (none)")
+    else:
+        # 显示错误信息
+        all_status = mcp_mgr.get_all_server_status()
+        server_info = all_status.get(server_name, {})
+        error = server_info.get("error")
+        if error:
+            lines.append(f"  Error: {error}")
+        else:
+            lines.append("  Server is not connected.")
+
+    lines.append("")
+    repl.add_output("\n".join(lines), role="system")
+
+
+def _mcp_show_errors(repl, mcp_mgr) -> None:
+    """显示所有 MCP 启动错误"""
+    if not mcp_mgr:
+        repl.add_output(
+            "  MCP manager not available (agent not initialized).",
+            role="system",
+        )
+        return
+
+    errors = mcp_mgr.get_startup_errors()
+
+    if not errors:
+        repl.add_output("  No MCP startup errors.", role="system")
+        return
+
+    lines = ["", "  MCP Startup Errors", "  " + "-" * 40]
+    for name, error in errors.items():
+        lines.append(f"  {name}:")
+        lines.append(f"    {error}")
+        lines.append("")
+
+    lines.append(f"  {len(errors)} server(s) with errors.")
+    repl.add_output("\n".join(lines), role="system")
 
 
 def _cmd_skills(repl, args: List[str]) -> None:
@@ -1729,8 +1966,9 @@ COMMAND_REGISTRY: List[CommandDef] = [
         description="MCP 服务器管理",
         category="Configuration",
         aliases=(),
-        args_hint="",
+        args_hint="[test <server>|errors]",
         handler_name="_cmd_mcp",
+        subcommands=("test", "errors"),
     ),
     CommandDef(
         name="connect",
@@ -1963,7 +2201,7 @@ class SlashCommandCompleter(Completer):
     _ARG_COMPLETIONS: Dict[str, List[str]] = {
         "think": ["on", "off", "low", "medium", "high", "xhigh", "show", "full", "collapsed", "display"],
         "theme": ["default", "dark", "light", "cyber", "ocean"],
-        "mcp": [],
+        "mcp": ["test", "errors"],
         "generate": ["preview", "save"],
         "gen": ["preview", "save"],
         "models": ["--api", "--config"],
