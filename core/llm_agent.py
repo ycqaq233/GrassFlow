@@ -248,7 +248,8 @@ class LLMAgent(Agent):
 
     async def _run_with_tools(self, messages: List[Dict], input_data: Dict[str, Any]) -> Dict[str, Any]:
         """带工具调用的执行循环"""
-        max_iterations = 10
+        # 允许通过 component.max_tool_iterations 自定义，默认 20
+        max_iterations = getattr(self._component, 'max_tool_iterations', None) or 20
         tools_schema = self._get_tools_schema()
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         last_model = ""

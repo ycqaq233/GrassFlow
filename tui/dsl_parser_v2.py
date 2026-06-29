@@ -153,6 +153,11 @@ class DSLv2Parser:
         if model_tokens:
             comp.model.max_tokens = int(model_tokens.group(1))
 
+        # 解析 max_tool_iterations
+        mti_match = re.search(r'max_tool_iterations:\s*(\d+)', body)
+        if mti_match:
+            comp.max_tool_iterations = int(mti_match.group(1))
+
         # 解析 mcp
         mcp_pattern = r'mcp\s+(\w[\w-]*)\s*\{[^}]*tools:\s*\[([^\]]*)\][^}]*\}'
         for mcp_match in re.finditer(mcp_pattern, body, re.DOTALL):
