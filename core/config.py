@@ -101,6 +101,11 @@ class ServerConfig(BaseModel):
     debug: bool = False
 
 
+class MCPConfig(BaseModel):
+    """MCP 全局设置"""
+    startup_timeout: float = 30.0  # MCP 服务器启动超时（秒）
+
+
 class GrassFlowConfig(BaseModel):
     """GrassFlow 全局配置"""
     model_config = ConfigDict(extra="allow")
@@ -112,6 +117,7 @@ class GrassFlowConfig(BaseModel):
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     mcp_servers: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     permissions: Dict[str, Any] = Field(default_factory=dict)
     workflows_dir: str = "~/.Grass/workflows"

@@ -121,7 +121,11 @@ class AgentIntegration:
                 _cfg_obj = _load_cfg()
                 mcp_config = _cfg_obj.mcp_servers if _cfg_obj.mcp_servers else None
                 if mcp_config:
-                    self._mcp_manager = MCPManager()
+                    # 从配置读取启动超时，默认 30 秒
+                    startup_timeout = 30.0
+                    if hasattr(_cfg_obj, 'mcp') and _cfg_obj.mcp:
+                        startup_timeout = _cfg_obj.mcp.startup_timeout
+                    self._mcp_manager = MCPManager(startup_timeout=float(startup_timeout))
                     self._mcp_manager.load_config({"mcp_servers": mcp_config})
 
                     # Register callback: when MCP servers finish connecting,

@@ -702,10 +702,14 @@ class MCPManager:
     - 工具调用代理
     """
 
-    def __init__(self, config_dir: Optional[Path] = None) -> None:
+    def __init__(self, config_dir: Optional[Path] = None,
+                 startup_timeout: float = 30.0) -> None:
         self._config_dir = config_dir
         self._servers: Dict[str, _ServerState] = {}
         self._on_ready_callback: Optional[Callable[[], None]] = None
+        self._startup_timeout = startup_timeout
+        # 收集启动阶段的错误（服务器名 → 错误信息）
+        self._startup_errors: Dict[str, str] = {}
 
     def set_on_ready_callback(self, callback: Callable[[], None]) -> None:
         """Set a callback to be invoked when all MCP servers have connected and
@@ -835,7 +839,7 @@ class MCPManager:
         if tasks:
             # Wait for each server's connected_event (set after handshake +
             # tool discovery), with a per-server timeout.
-            connect_timeout = 15.0
+            connect_timeout = self._startup_timeout
             events = [
                 state.connected_event
                 for state in self._servers.values()
@@ -852,6 +856,16 @@ class MCPManager:
                     "remaining servers will register tools as they connect",
                     connect_timeout,
                 )
+                # 记录超时的服务器
+                for name, state in self._servers.items():
+                    if state.config.enabled and not state.connected_event.is_set():
+                        self._startup_errors[name] = "startup timeout"
+                        state.error_message = "startup timeout"
+
+            # 收集启动阶段的错误
+            for name, state in self._servers.items():
+                if state.config.enabled and state.error_message:
+                    self._startup_errors[name] = state.error_message
 
             # Count how many servers actually connected
             connected = sum(
@@ -933,6 +947,7 @@ class MCPManager:
                 attempt += 1
                 if attempt >= MAX_RECONNECT_ATTEMPTS:
                     state.error_message = "连接反复断开，重连失败"
+                    self._startup_errors[name] = state.error_message
                     logger.error("MCP 服务器 %r 连接反复断开，重连 %d 次后放弃", name, attempt)
                     break
                 delay = RECONNECT_BASE_DELAY * (2 ** (attempt - 1))
@@ -944,6 +959,7 @@ class MCPManager:
                 attempt += 1
                 if attempt >= MAX_RECONNECT_ATTEMPTS:
                     state.error_message = str(exc)
+                    self._startup_errors[name] = state.error_message
                     logger.error("MCP 服务器 %r 重连 %d 次后放弃: %s", name, attempt, exc)
                     break
                 delay = RECONNECT_BASE_DELAY * (2 ** (attempt - 1))
@@ -1308,8 +1324,34 @@ class MCPManager:
             "tools": [t.name for t in state.tools.values()],
         }
 
+    def get_startup_errors(self) -> Dict[str, str]:
+        """获取启动阶段的错误信息
+
+        Returns:
+            字典，键为服务器名称，值为错误信息。
+        """
+        return dict(self._startup_errors)
+
+    def get_all_server_status(self) -> Dict[str, Dict[str, Any]]:
+        """获取所有服务器的状态（包括 disabled 的）
+
+        Returns:
+            字典，键为服务器名称，值为状态字典。
+        """
+        result = {}
+        for name, state in self._servers.items():
+            result[name] = {
+                "name": name,
+                "transport": state.config.effective_transport,
+                "enabled": state.config.enabled,
+                "connected": state.connected,
+                "tools_count": len(state.tools),
+                "error": state.error_message,
+            }
+        return result
+
     def get_tools_summary(self) -> str:
-        """生成用于 /mcp 命令的工具摘要文本"""
+        """生成用于 /mcp 命令的工具摘要文本（包括 disabled 服务器）"""
         if not self._servers:
             return "  No MCP servers configured."
 
@@ -1319,7 +1361,10 @@ class MCPManager:
 
         for name, state in self._servers.items():
             transport = state.config.effective_transport
-            if state.connected:
+            if not state.config.enabled:
+                status_icon = "⏸️"
+                status_text = "disabled"
+            elif state.connected:
                 status_icon = "✅"
                 status_text = "connected"
             elif state.started and state.error_message:
@@ -1339,10 +1384,12 @@ class MCPManager:
                     desc = tool.description[:60] + "..." if len(tool.description) > 60 else tool.description
                     lines.append(f"       - {tool.name}: {desc}")
 
-        total_tools = sum(len(s.tools) for s in self._servers.values())
+        total = len(self._servers)
+        enabled = sum(1 for s in self._servers.values() if s.config.enabled)
         connected = sum(1 for s in self._servers.values() if s.connected)
+        total_tools = sum(len(s.tools) for s in self._servers.values())
         lines.append("")
-        lines.append(f"  {len(self._servers)} servers total, {connected} connected, {total_tools} tools")
+        lines.append(f"  {total} servers ({enabled} enabled), {connected} connected, {total_tools} tools")
 
         return "\n".join(lines)
 

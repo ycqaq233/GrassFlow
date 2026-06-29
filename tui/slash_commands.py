@@ -1061,9 +1061,14 @@ def _cmd_mcp(repl, args: List[str]) -> None:
             lines = ["  MCP servers:"]
             for name, srv in mcp_servers.items():
                 transport = "stdio" if "command" in srv else ("http" if "url" in srv else "auto")
-                lines.append(f"    ⏳ {name} ({transport}) - not started")
+                enabled = srv.get("enabled", True)
+                if not enabled:
+                    lines.append(f"    ⏸️ {name} ({transport}) - disabled")
+                else:
+                    lines.append(f"    ⏳ {name} ({transport}) - not started")
             lines.append("")
-            lines.append(f"  {len(mcp_servers)} servers configured (agent not initialized)")
+            enabled_count = sum(1 for s in mcp_servers.values() if s.get("enabled", True))
+            lines.append(f"  {len(mcp_servers)} servers ({enabled_count} enabled, agent not initialized)")
             repl.add_output("\n".join(lines), role="system")
         else:
             repl.add_output("  No MCP servers configured.", role="system")
