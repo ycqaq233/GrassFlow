@@ -112,6 +112,12 @@ class GrassFlowREPL:
 
         # Thinking toggle state (Ctrl+T)
         self._thinking_expanded: bool = False  # current thinking block display state
+
+        # 工具调用折叠状态（连续同名工具合并显示）
+        self._tool_fold_name: Optional[str] = None   # 当前折叠的工具名
+        self._tool_fold_count: int = 0                # 连续调用次数
+        self._tool_fold_args_list: list = []          # 收集每次调用的参数预览
+        self._tool_fold_results: list = []            # 收集每次调用的结果 (result_str, is_err)
         self._last_thinking_content: str = ""  # full thinking text from last block
         self._last_thinking_duration: float = 0.0  # elapsed seconds
         self._last_thinking_tokens: int = 0    # token count from last block
@@ -234,6 +240,8 @@ class GrassFlowREPL:
 
     def _flush_stream(self) -> None:
         """刷新流式缓冲区，渲染 markdown 并输出"""
+        # 先输出折叠的工具调用摘要
+        self._flush_tool_fold()
         collected = self._stream_collected_text
         if not collected:
             if self._stream_box_opened:
@@ -258,6 +266,50 @@ class GrassFlowREPL:
         self._thinking_token_count = 0
         self._thinking_box_opened = False
         self._thinking_start_time = 0.0
+        # Reset tool fold state
+        self._tool_fold_name = None
+        self._tool_fold_count = 0
+        self._tool_fold_args_list = []
+        self._tool_fold_results = []
+
+    def _flush_tool_fold(self) -> None:
+        """输出折叠的工具调用摘要"""
+        if self._tool_fold_count == 0:
+            return
+        name = self._tool_fold_name
+        count = self._tool_fold_count
+        args_list = self._tool_fold_args_list
+        results = self._tool_fold_results
+
+        if count == 1:
+            # 单次调用，正常显示
+            cprint(f"\n\033[1;36m  🔧 {name}({args_list[0]})\033[0m")
+            if results:
+                result_str, is_err = results[0]
+                if is_err:
+                    cprint(f"\033[1;31m    ❌ {result_str}\033[0m")
+                else:
+                    cprint(f"\033[32m    ✅ {result_str}\033[0m")
+        else:
+            # 多次调用，折叠显示
+            err_count = sum(1 for _, is_err in results if is_err)
+            ok_count = count - err_count
+            status_parts = []
+            if ok_count:
+                status_parts.append(f"\033[32m{ok_count} ok\033[0m")
+            if err_count:
+                status_parts.append(f"\033[1;31m{err_count} err\033[0m")
+            status = ", ".join(status_parts)
+
+            cprint(f"\n\033[1;36m  🔧 {name} ×{count}\033[0m  [{status}]")
+            for i, (args, (result_str, is_err)) in enumerate(zip(args_list, results), 1):
+                icon = "❌" if is_err else "✅"
+                cprint(f"\033[2m    {i}. {icon} {args} → {result_str}\033[0m")
+
+        self._tool_fold_name = None
+        self._tool_fold_count = 0
+        self._tool_fold_args_list = []
+        self._tool_fold_results = []
 
     def _close_thinking_block(self) -> None:
         """关闭思考块：刷新剩余缓冲区，打印摘要行，保存状态供 Ctrl+T 切换"""
@@ -1038,18 +1090,28 @@ class GrassFlowREPL:
                     args_str = json.dumps(data['args'], ensure_ascii=False)[:300]
                     cprint(f"\033[2m    args: {args_str}\033[0m")
             else:
-                # Compact: show summary line with args preview
+                # Compact mode: 折叠连续同名工具调用
                 args_preview = ""
                 if data.get("args"):
                     args_str = json.dumps(data['args'], ensure_ascii=False)
-                    if len(args_str) > 80:
-                        args_preview = args_str[:77] + "..."
+                    if len(args_str) > 60:
+                        args_preview = args_str[:57] + "..."
                     else:
                         args_preview = args_str
-                    args_preview = f"({args_preview})"
                 else:
-                    args_preview = "()"
-                cprint(f"\n\033[1;36m  \U0001f527 {name}{args_preview}\033[0m")
+                    args_preview = "..."
+
+                if name == self._tool_fold_name:
+                    # 同名工具，累加计数
+                    self._tool_fold_count += 1
+                    self._tool_fold_args_list.append(args_preview)
+                else:
+                    # 不同工具，先输出之前的折叠组
+                    self._flush_tool_fold()
+                    # 开始新的折叠组
+                    self._tool_fold_name = name
+                    self._tool_fold_count = 1
+                    self._tool_fold_args_list = [args_preview]
         elif etype == "tool_result":
             self._flush_stream()
             # BUGFIX: accumulate current segment into full response before reset
@@ -1063,15 +1125,23 @@ class GrassFlowREPL:
                 prefix = "[tool result] [ERROR] " if is_err else "[tool result] "
                 cprint(f"{color}  {prefix}{str(result)[:500 if is_err else 800]}\033[0m")
             else:
-                # Compact: single summary line truncated to ~200 chars
-                result_str = str(result).replace("\n", " ").strip()
-                max_len = 200
-                if len(result_str) > max_len:
-                    result_str = result_str[:max_len - 3] + "..."
-                if is_err:
-                    cprint(f"\033[1;31m  ❌ {data.get('name', 'tool')} → {result_str}\033[0m")
+                # Compact mode: 折叠模式下记录结果，不单独显示
+                if self._tool_fold_count > 0:
+                    # 记录到折叠组
+                    result_str = str(result).replace("\n", " ").strip()
+                    if len(result_str) > 100:
+                        result_str = result_str[:97] + "..."
+                    self._tool_fold_results.append((result_str, is_err))
                 else:
-                    cprint(f"\033[32m  ✅ {data.get('name', 'tool')} → {result_str}\033[0m")
+                    # 无折叠组（不应该发生），正常显示
+                    result_str = str(result).replace("\n", " ").strip()
+                    if len(result_str) > 200:
+                        result_str = result_str[:197] + "..."
+                    name = data.get('name', 'tool')
+                    if is_err:
+                        cprint(f"\033[1;31m  ❌ {name} → {result_str}\033[0m")
+                    else:
+                        cprint(f"\033[32m  ✅ {name} → {result_str}\033[0m")
         elif etype == "error":
             self._close_thinking_block()
             self._flush_stream()
