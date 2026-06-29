@@ -361,7 +361,7 @@ class DSLv2Parser:
         1. system_prompt: "..."        — 单行双引号
         2. system_prompt: |-           — YAML 多行块（literal block）
            多行内容
-        3. system_prompt: """..."""    — 三引号多行
+        3. system_prompt: triple-quoted — 三引号多行
         4. prompt: "..." / prompt: |-  — 同上，prompt 作为别名
         """
         # 优先级: system_prompt > prompt
@@ -383,14 +383,24 @@ class DSLv2Parser:
                 for line in lines:
                     stripped = line.rstrip()
                     if not stripped:
-                        collected.append("")
+                        # 空行：如果还没确定缩进则跳过，否则保留
+                        if indent is not None:
+                            collected.append("")
                         continue
                     current_indent = len(line) - len(line.lstrip())
                     if indent is None:
                         indent = current_indent
+                    # 块结束条件：缩进严格小于块缩进，或缩进为0且是DSL关键字
                     if current_indent < indent:
-                        break  # 缩进减少，块结束
-                    collected.append(line[indent:])
+                        break
+                    if current_indent == 0 and re.match(
+                        r'(permission|model|port|agent|\}|[a-z_]+\s*:)', stripped
+                    ):
+                        break
+                    collected.append(line[indent:] if indent else line)
+                # 去除尾部空行
+                while collected and not collected[-1].strip():
+                    collected.pop()
                 result = "\n".join(collected).rstrip()
                 if result:
                     return result
