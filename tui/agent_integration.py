@@ -81,6 +81,7 @@ class AgentIntegration:
 
         # MCP 管理器（延迟初始化）
         self._mcp_manager: Any = None
+        self._mcp_loop: Any = None  # MCP 专用事件循环
 
         # Skills 管理器（延迟初始化）
         self._skills_manager: Any = None
@@ -149,21 +150,33 @@ class AgentIntegration:
                     self._mcp_manager.set_on_ready_callback(_on_mcp_ready)
 
                     # Start MCP on a dedicated background event loop (hermes pattern)
+                    # 使用 run_forever() 保持事件循环运行，让 MCP 服务器任务持续工作
                     import threading
                     def _mcp_background_start():
                         try:
                             loop = asyncio.new_event_loop()
                             asyncio.set_event_loop(loop)
+                            self._mcp_loop = loop
                             try:
+                                # start_all() 创建服务器任务后返回
                                 loop.run_until_complete(self._mcp_manager.start_all())
+                                # 保持事件循环运行，让服务器任务继续工作
+                                # 直到 stop_all() 调用 loop.call_soon_threadsafe(loop.stop)
+                                loop.run_forever()
                             finally:
+                                # 清理残留任务
+                                pending = asyncio.all_tasks(loop)
+                                for task in pending:
+                                    task.cancel()
+                                if pending:
+                                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                                 loop.close()
                         except Exception as e:
                             logger.warning("MCP background startup failed: %s", e)
 
                     mcp_thread = threading.Thread(
                         target=_mcp_background_start,
-                        name="mcp-startup",
+                        name="mcp-event-loop",
                         daemon=True,
                     )
                     mcp_thread.start()
@@ -584,10 +597,24 @@ class AgentIntegration:
     async def shutdown(self) -> None:
         """Shutdown MCP servers and clean up resources."""
         if self._mcp_manager:
-            try:
-                await self._mcp_manager.stop_all()
-            except Exception:
-                pass
+            mcp_loop = getattr(self, '_mcp_loop', None)
+            if mcp_loop and mcp_loop.is_running():
+                try:
+                    # 在 MCP 事件循环上调度 stop_all，然后停止循环
+                    import concurrent.futures
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._mcp_manager.stop_all(), mcp_loop
+                    )
+                    future.result(timeout=10)
+                except Exception:
+                    pass
+                finally:
+                    mcp_loop.call_soon_threadsafe(mcp_loop.stop)
+            else:
+                try:
+                    await self._mcp_manager.stop_all()
+                except Exception:
+                    pass
 
     # ==================== 统计重置 ====================
 
