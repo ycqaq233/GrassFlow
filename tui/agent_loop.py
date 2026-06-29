@@ -542,18 +542,21 @@ class AgentLoop:
                     # ── 文本响应路径（最终输出）──
                     final_text = response.text
 
-                    if final_text:
-                        yield LoopEvent.of(
-                            LoopEventType.TEXT_START.value,
-                        )
-                        yield LoopEvent.of(
-                            LoopEventType.TEXT_DELTA.value,
-                            text=final_text,
-                        )
-                        yield LoopEvent.of(
-                            LoopEventType.TEXT_END.value,
-                            text=final_text,
-                        )
+                    # 兜底：LLM 返回空文本时，提示用户
+                    if not final_text:
+                        final_text = "[Agent completed but produced no output]"
+
+                    yield LoopEvent.of(
+                        LoopEventType.TEXT_START.value,
+                    )
+                    yield LoopEvent.of(
+                        LoopEventType.TEXT_DELTA.value,
+                        text=final_text,
+                    )
+                    yield LoopEvent.of(
+                        LoopEventType.TEXT_END.value,
+                        text=final_text,
+                    )
 
                     # 检查 finish_reason
                     finish_reason = response.finish_reason
