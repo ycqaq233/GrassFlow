@@ -58,7 +58,7 @@ class Component:
     context: str = "shared"  # "shared" | "independent"
     on_fail: str = "stop"    # "stop" | "skip" | "retry"
     retry_count: int = 3
-    max_tool_iterations: int = 20  # 工具调用循环最大迭代次数
+    max_tool_iterations: int = 30  # 工具调用循环最大迭代次数
 
 
 @dataclass

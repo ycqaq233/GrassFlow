@@ -248,8 +248,8 @@ class LLMAgent(Agent):
 
     async def _run_with_tools(self, messages: List[Dict], input_data: Dict[str, Any]) -> Dict[str, Any]:
         """带工具调用的执行循环"""
-        # 允许通过 component.max_tool_iterations 自定义，默认 20
-        max_iterations = getattr(self._component, 'max_tool_iterations', None) or 20
+        # 允许通过 component.max_tool_iterations 自定义，默认 30
+        max_iterations = getattr(self._component, 'max_tool_iterations', None) or 30
         tools_schema = self._get_tools_schema()
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         last_model = ""
@@ -300,6 +300,17 @@ class LLMAgent(Agent):
                     except Exception as e:
                         result_str = f"Error: {e}"
 
+                    # 截断过大的工具结果，防止上下文窗口溢出
+                    # 保留首尾各 MAX_TOOL_RESULT_CHARS/2 字符，中间用省略提示
+                    MAX_TOOL_RESULT_CHARS = 6000
+                    if len(result_str) > MAX_TOOL_RESULT_CHARS:
+                        half = MAX_TOOL_RESULT_CHARS // 2
+                        truncated_msg = (
+                            f"\n\n... [truncated {len(result_str) - MAX_TOOL_RESULT_CHARS} chars, "
+                            f"total {len(result_str)} chars] ..."
+                        )
+                        result_str = result_str[:half] + truncated_msg + result_str[-half:]
+
                     tool_calls_log.append({
                         "tool": tool_name,
                         "args": tool_args,
@@ -326,8 +337,33 @@ class LLMAgent(Agent):
 
             return result
 
-        # 达到最大迭代次数
-        result = self._parse_response(messages[-1].get("content", ""))
+        # 达到最大迭代次数 — 强制 LLM 生成最终回复（不带工具）
+        logger.warning(
+            "Agent '%s' reached max tool iterations (%d), forcing final response",
+            self._component.name, max_iterations,
+        )
+        messages.append({
+            "role": "user",
+            "content": (
+                "You have reached the maximum number of tool calls. "
+                "Please stop calling tools and generate your final response NOW "
+                "based on the data you have collected so far. "
+                "Output your analysis/report as text."
+            ),
+        })
+        try:
+            final_response = await self._client.chat(
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+            result = self._parse_response(final_response.content)
+            if final_response.usage:
+                for key in total_usage:
+                    total_usage[key] += final_response.usage.get(key, 0)
+        except Exception:
+            result = {"text": "[Agent reached iteration limit and could not generate final response]"}
+
         result["_llm"] = {
             "model": last_model,
             "usage": total_usage,
