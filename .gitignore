@@ -61,4 +61,33 @@ Thumbs.db
 
 # MyPy
 .mypy_cache/
-.claude/worktrees/
+
+# Claude AI
+.claude/
+
+# Report files (docx, pdf)
+report/
+
+# Research documents (not for code repo)
+深度研究报告_可视化多Agent编排平台.md
+项目制作计划.md
+
+# Temporary analysis files
+*.gf
+analyze_pwn.*
+pwn_*.gf
+
+# Debug data
+debug_data/
+
+# Test logs
+test.log
+hs_err_pid*.log
+
+# Other
+.grass/
+.playwright-mcp/
+.github/
+.dockerignore
+Dockerfile
+docker-compose.yml
