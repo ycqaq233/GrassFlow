@@ -130,8 +130,19 @@ class RunWorkflowTool(Tool):
             else:
                 lines.append(f"Workflow '{result.workflow_name}' failed: {result.error}")
 
+            output = "\n".join(lines)
+            # 截断过大的输出，防止 LLM 上下文溢出
+            MAX_OUTPUT = 4000
+            if len(output) > MAX_OUTPUT:
+                half = MAX_OUTPUT // 2
+                output = (
+                    output[:half]
+                    + f"\n\n... [truncated {len(output) - MAX_OUTPUT} chars] ...\n\n"
+                    + output[-half:]
+                )
+
             return ToolResult(
-                output="\n".join(lines),
+                output=output,
                 title=f"Workflow: {result.workflow_name}",
                 metadata={
                     "workflow_name": result.workflow_name,
