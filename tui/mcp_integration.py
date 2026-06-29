@@ -914,13 +914,12 @@ class MCPManager:
 
         return await target_server.call_tool(tool_name, arguments)
 
-    def call_tool_sync(self, tool_name: str, arguments: Dict[str, Any],
-                       timeout: float = 120.0) -> Any:
-        """在 MCP 事件循环上调度工具调用并同步等待结果。
+    async def call_tool_async(self, tool_name: str, arguments: Dict[str, Any],
+                              timeout: float = 120.0) -> Any:
+        """异步调用 MCP 工具（推荐方式）。
 
-        这是从外部线程（如 agent 主线程）调用 MCP 工具的正确方式。
-        使用 run_coroutine_threadsafe 将实际的 session.call_tool()
-        调度到创建 session 的同一个事件循环上，避免跨循环挂起。
+        将 session.call_tool() 调度到 MCP 后台事件循环执行，
+        然后用 asyncio.wrap_future 异步等待结果，不阻塞主线程事件循环。
 
         Args:
             tool_name: 工具名称（格式: mcp_{server}_{tool}）
@@ -929,10 +928,31 @@ class MCPManager:
 
         Returns:
             工具返回的结果
+        """
+        loop = self._mcp_loop
+        if loop is None or not loop.is_running():
+            raise MCPConnectionError("MCP 事件循环未运行")
 
-        Raises:
-            MCPConnectionError: MCP 事件循环未运行
-            MCPToolCallError: 超时或调用失败
+        async def _call() -> Any:
+            return await self.call_tool(tool_name, arguments)
+
+        future = asyncio.run_coroutine_threadsafe(_call(), loop)
+        try:
+            return await asyncio.wait_for(
+                asyncio.wrap_future(future),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            future.cancel()
+            raise MCPToolCallError(
+                f"MCP 工具 {tool_name} 调用超时 ({timeout}s)"
+            )
+
+    def call_tool_sync(self, tool_name: str, arguments: Dict[str, Any],
+                       timeout: float = 120.0) -> Any:
+        """同步调用 MCP 工具（仅用于非 async 上下文，如线程中）。
+
+        警告：此方法会阻塞当前线程。在 async 上下文中请使用 call_tool_async。
         """
         loop = self._mcp_loop
         if loop is None or not loop.is_running():

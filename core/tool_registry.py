@@ -557,8 +557,13 @@ class MCPToolAdapter:
         避免跨事件循环调用导致的挂起问题。
         """
         try:
-            # 优先使用同步桥接 — 将 session.call_tool() 调度到 MCP 事件循环
-            if hasattr(self.mcp_client, 'call_tool_sync'):
+            # 优先使用异步桥接 — 将 session.call_tool() 调度到 MCP 事件循环
+            # call_tool_async 用 asyncio.wrap_future 避免阻塞主线程事件循环
+            if hasattr(self.mcp_client, 'call_tool_async'):
+                raw_result = await self.mcp_client.call_tool_async(
+                    self.tool_id, args,
+                )
+            elif hasattr(self.mcp_client, 'call_tool_sync'):
                 raw_result = self.mcp_client.call_tool_sync(
                     self.tool_id, args,
                 )
