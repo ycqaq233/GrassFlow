@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import concurrent.futures
 import logging
 import os
 import shutil
+import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -316,6 +318,8 @@ class _MCPServer:
         self._ready: asyncio.Event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._stop_event: asyncio.Event = asyncio.Event()
+        # RPC 序列化锁 — 防止并发 stdio 调用交错 JSON-RPC 消息
+        self._rpc_lock: asyncio.Lock = asyncio.Lock()
         # Circuit breaker 状态
         self.failure_count: int = 0
         self.breaker_open: bool = False
@@ -512,7 +516,16 @@ class _MCPServer:
         raw_tool_name = tool_name[len(f"mcp_{self.config.name}_"):]
 
         try:
-            result = await self.session.call_tool(raw_tool_name, arguments)
+            async with self._rpc_lock:
+                result = await asyncio.wait_for(
+                    self.session.call_tool(raw_tool_name, arguments),
+                    timeout=self.config.timeout,
+                )
+        except asyncio.TimeoutError:
+            self._record_failure()
+            raise MCPToolCallError(
+                f"工具 {tool_name} 调用超时 ({self.config.timeout}s)"
+            )
         except Exception as exc:
             self._record_failure()
             raise MCPToolCallError(f"工具 {tool_name} 调用失败: {exc}")
@@ -612,6 +625,8 @@ class MCPManager:
         self._startup_timeout = startup_timeout
         # 收集启动阶段的错误（服务器名 → 错误信息）
         self._startup_errors: Dict[str, str] = {}
+        # MCP 专用事件循环引用（由 agent_integration 设置）
+        self._mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 
     def set_on_ready_callback(self, callback: Callable[[], None]) -> None:
         """Set a callback to be invoked when all MCP servers have connected and
@@ -621,6 +636,14 @@ class MCPManager:
         again each time a late-connecting server finishes its handshake.
         """
         self._on_ready_callback = callback
+
+    def set_mcp_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """存储 MCP 后台事件循环引用。
+
+        agent_integration 启动 MCP 后台线程后必须调用此方法，
+        以便 call_tool_sync 能在正确的事件循环上调度协程。
+        """
+        self._mcp_loop = loop
 
     # -------------------- 配置 --------------------
 
@@ -890,6 +913,48 @@ class MCPManager:
             raise MCPToolCallError(f"未找到工具: {tool_name}")
 
         return await target_server.call_tool(tool_name, arguments)
+
+    def call_tool_sync(self, tool_name: str, arguments: Dict[str, Any],
+                       timeout: float = 120.0) -> Any:
+        """在 MCP 事件循环上调度工具调用并同步等待结果。
+
+        这是从外部线程（如 agent 主线程）调用 MCP 工具的正确方式。
+        使用 run_coroutine_threadsafe 将实际的 session.call_tool()
+        调度到创建 session 的同一个事件循环上，避免跨循环挂起。
+
+        Args:
+            tool_name: 工具名称（格式: mcp_{server}_{tool}）
+            arguments: 工具参数
+            timeout: 超时秒数
+
+        Returns:
+            工具返回的结果
+
+        Raises:
+            MCPConnectionError: MCP 事件循环未运行
+            MCPToolCallError: 超时或调用失败
+        """
+        loop = self._mcp_loop
+        if loop is None or not loop.is_running():
+            raise MCPConnectionError("MCP 事件循环未运行")
+
+        async def _call() -> Any:
+            return await self.call_tool(tool_name, arguments)
+
+        future = asyncio.run_coroutine_threadsafe(_call(), loop)
+        start_time = _time.monotonic()
+
+        while True:
+            remaining = timeout - (_time.monotonic() - start_time)
+            if remaining <= 0:
+                future.cancel()
+                raise MCPToolCallError(
+                    f"MCP 工具 {tool_name} 调用超时 ({timeout}s)"
+                )
+            try:
+                return future.result(timeout=min(0.1, remaining))
+            except concurrent.futures.TimeoutError:
+                continue
 
     # -------------------- 查询接口 --------------------
 

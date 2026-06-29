@@ -535,9 +535,19 @@ class MCPToolAdapter:
     async def _call_mcp(
         self, args: Dict[str, Any], ctx: ToolContext
     ) -> ToolResult:
-        """通过 MCP 客户端调用远程工具"""
+        """通过 MCP 客户端调用远程工具
+
+        使用同步桥接 (call_tool_sync) 将工具调用调度到 MCP 后台事件循环，
+        避免跨事件循环调用导致的挂起问题。
+        """
         try:
-            raw_result = await self.mcp_client.call_tool(self.tool_id, args)
+            # 优先使用同步桥接 — 将 session.call_tool() 调度到 MCP 事件循环
+            if hasattr(self.mcp_client, 'call_tool_sync'):
+                raw_result = self.mcp_client.call_tool_sync(
+                    self.tool_id, args,
+                )
+            else:
+                raw_result = await self.mcp_client.call_tool(self.tool_id, args)
 
             # MCP 返回格式通常为 {"content": [{"type": "text", "text": "..."}]}
             if isinstance(raw_result, dict) and "content" in raw_result:

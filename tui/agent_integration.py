@@ -157,6 +157,9 @@ class AgentIntegration:
                             loop = asyncio.new_event_loop()
                             asyncio.set_event_loop(loop)
                             self._mcp_loop = loop
+                            # 将 MCP 事件循环引用传递给 MCPManager，
+                            # 使 call_tool_sync 能在正确的循环上调度协程
+                            self._mcp_manager.set_mcp_loop(loop)
                             try:
                                 # start_all() 创建服务器任务后返回
                                 loop.run_until_complete(self._mcp_manager.start_all())
