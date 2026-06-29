@@ -146,9 +146,9 @@ def load_config() -> GrassFlowConfig:
                 return copy.deepcopy(merged_cfg)
 
         # 缓存未命中，重新加载
-        _base_manager._global_config = None
-        _base_manager._project_config = None
-        _base_manager._merged_config = None
+        _base_manager._global_config = _NOT_LOADED
+        _base_manager._project_config = _NOT_LOADED
+        _base_manager._merged_config = _NOT_LOADED
 
         try:
             result = _base_manager.load_config()
