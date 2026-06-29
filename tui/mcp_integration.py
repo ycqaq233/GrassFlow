@@ -95,6 +95,10 @@ MCP_CLIENT_VERSION = "0.1.0"
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_BASE_DELAY = 1.0  # 秒，指数退避基数
 
+# Circuit breaker 常量
+BREAKER_THRESHOLD = 3      # 连续失败次数触发熔断
+BREAKER_COOLDOWN = 60.0    # 冷却时间（秒）
+
 # 安全环境变量白名单（只传递这些变量到子进程，防止泄露 secrets）
 _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
@@ -312,6 +316,10 @@ class _MCPServer:
         self._ready: asyncio.Event = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._stop_event: asyncio.Event = asyncio.Event()
+        # Circuit breaker 状态
+        self.failure_count: int = 0
+        self.breaker_open: bool = False
+        self.breaker_opened_at: float = 0.0
 
     async def start(self) -> None:
         """启动服务器，根据 transport 类型分发到对应的运行方法"""
@@ -476,6 +484,21 @@ class _MCPServer:
             MCPToolCallError: 工具调用失败
             MCPConnectionError: 服务器未连接
         """
+        # Circuit breaker 检查
+        if self.breaker_open:
+            import time
+            elapsed = time.monotonic() - self.breaker_opened_at
+            if elapsed < BREAKER_COOLDOWN:
+                raise MCPToolCallError(
+                    f"server unreachable — circuit breaker open "
+                    f"(cooldown {BREAKER_COOLDOWN - elapsed:.0f}s remaining)"
+                )
+            # 冷却期已过，设为 half-open（允许一次尝试）
+            logger.info(
+                "MCP 服务器 %r circuit breaker half-open，允许一次尝试",
+                self.config.name,
+            )
+
         if self.session is None or not self.connected:
             raise MCPConnectionError(
                 f"MCP 服务器 {self.config.name!r} 未连接"
@@ -491,6 +514,7 @@ class _MCPServer:
         try:
             result = await self.session.call_tool(raw_tool_name, arguments)
         except Exception as exc:
+            self._record_failure()
             raise MCPToolCallError(f"工具 {tool_name} 调用失败: {exc}")
 
         # MCP CallToolResult 有 .content 和 .isError 属性
@@ -499,9 +523,13 @@ class _MCPServer:
             for block in (result.content or []):
                 if hasattr(block, "text"):
                     error_text += block.text
+            self._record_failure()
             raise MCPToolCallError(
                 f"工具 {tool_name} 返回错误: {error_text or 'unknown error'}"
             )
+
+        # 调用成功，重置 circuit breaker
+        self._record_success()
 
         # 提取内容
         if hasattr(result, "content"):
@@ -514,6 +542,36 @@ class _MCPServer:
             return "\n".join(parts) if parts else str(result)
 
         return result
+
+    def _record_success(self) -> None:
+        """记录调用成功，重置 circuit breaker 状态"""
+        self.failure_count = 0
+        if self.breaker_open:
+            logger.info(
+                "MCP 服务器 %r circuit breaker 已关闭（调用成功）",
+                self.config.name,
+            )
+        self.breaker_open = False
+
+    def _record_failure(self) -> None:
+        """记录调用失败，检查是否需要打开 circuit breaker"""
+        import time
+        self.failure_count += 1
+        if self.failure_count >= BREAKER_THRESHOLD and not self.breaker_open:
+            self.breaker_open = True
+            self.breaker_opened_at = time.monotonic()
+            logger.warning(
+                "MCP 服务器 %r circuit breaker 已打开（连续失败 %d 次），"
+                "冷却 %.0f 秒后重试",
+                self.config.name, self.failure_count, BREAKER_COOLDOWN,
+            )
+
+    def reset_breaker(self) -> None:
+        """手动重置 circuit breaker 状态"""
+        self.failure_count = 0
+        self.breaker_open = False
+        self.breaker_opened_at = 0.0
+        logger.info("MCP 服务器 %r circuit breaker 已手动重置", self.config.name)
 
     async def stop(self) -> None:
         """停止服务器"""
